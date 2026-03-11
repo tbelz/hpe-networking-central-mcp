@@ -91,7 +91,7 @@ jobs:
               if resp.get('id') == 2:
                   tools = [t['name'] for t in resp.get('result', {}).get('tools', [])]
                   print(f'Registered tools: {tools}')
-                  expected = {'refresh_inventory', 'get_device_details', 'list_scripts', 'save_script', 'execute_script'}
+                  expected = {'refresh_inventory', 'get_device_details', 'list_scripts', 'save_script', 'execute_script', 'call_central_api', 'get_api_details', 'refresh_api_catalog'}
                   missing = expected - set(tools)
                   if missing:
                       print(f'❌ Missing tools: {missing}')
