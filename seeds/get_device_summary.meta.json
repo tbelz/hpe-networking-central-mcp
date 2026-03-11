@@ -1,0 +1,12 @@
+{
+  "description": "Retrieve a monitoring summary of all devices from HPE Aruba Networking Central, grouped by site, type, status, and model.",
+  "tags": ["monitoring", "inventory", "reporting"],
+  "parameters": [
+    {"name": "filter", "type": "string", "description": "Optional filter expression for devices", "required": false},
+    {"name": "sort", "type": "string", "description": "Optional sort expression", "required": false},
+    {"name": "format", "type": "string", "description": "Output format: summary or full", "required": false, "default": "summary"}
+  ],
+  "created_at": "2026-03-11T00:00:00Z",
+  "last_run": null,
+  "last_exit_code": null
+}

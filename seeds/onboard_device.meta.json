@@ -1,0 +1,12 @@
+{
+  "description": "Onboard a network device to a site in HPE Aruba Networking Central with persona assignment. Checks inventory, verifies site, and assigns device function.",
+  "tags": ["onboarding", "site-management", "persona"],
+  "parameters": [
+    {"name": "serial", "type": "string", "description": "Device serial number", "required": true},
+    {"name": "site", "type": "string", "description": "Target site name in Central", "required": true},
+    {"name": "persona", "type": "string", "description": "Device persona/function (ACCESS_SWITCH, CAMPUS_AP, CORE_SWITCH, etc.)", "required": false, "default": "ACCESS_SWITCH"}
+  ],
+  "created_at": "2026-03-11T00:00:00Z",
+  "last_run": null,
+  "last_exit_code": null
+}
