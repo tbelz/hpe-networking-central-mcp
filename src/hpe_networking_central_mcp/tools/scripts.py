@@ -86,7 +86,7 @@ def register_script_tools(mcp, settings: Settings):
         content: str,
         description: str,
         tags: list[str],
-        parameters: list[dict[str, str]],
+        parameters: list[dict[str, str]] | None = None,
     ) -> str:
         """Save a Python script to the automation library for reuse.
 
@@ -121,7 +121,7 @@ def register_script_tools(mcp, settings: Settings):
         meta = {
             "description": description,
             "tags": tags,
-            "parameters": parameters,
+            "parameters": parameters or [],
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "last_run": None,
             "last_exit_code": None,

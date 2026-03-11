@@ -18,6 +18,13 @@ logger = structlog.get_logger("tools.inventory")
 _inventory_cache: dict[str, Any] = {}
 _cache_timestamp: float = 0.0
 
+# Keys injected by the inventory plugin that must never be exposed
+_SENSITIVE_KEYS = {
+    "central_access_token", "central_client_id",
+    "central_client_secret", "central_base_url",
+    "ansible_ssh_pass", "ansible_become_pass",
+}
+
 
 def _unwrap_ansible_unsafe(value: Any) -> Any:
     """Unwrap Ansible's __ansible_unsafe dict wrappers to plain Python values.
@@ -173,7 +180,10 @@ def register_inventory_tools(mcp, settings: Settings):
 
         if detail_level == "full":
             meta = inventory.get("_meta", {}).get("hostvars", {})
-            devices = list(meta.values())
+            devices = [
+                {k: v for k, v in d.items() if k not in _SENSITIVE_KEYS}
+                for d in meta.values()
+            ]
 
             # Apply filters
             if filter_site:
@@ -234,6 +244,7 @@ def register_inventory_tools(mcp, settings: Settings):
                 str(vars_.get("macAddress", "")).lower(),
                 str(vars_.get("deviceName", "")).lower(),
             ]:
-                return json.dumps({"device": vars_, "hostname": hostname}, indent=2)
+                safe = {k: v for k, v in vars_.items() if k not in _SENSITIVE_KEYS}
+                return json.dumps({"device": safe, "hostname": hostname}, indent=2)
 
         return json.dumps({"error": f"Device '{identifier}' not found in inventory. Try refresh_inventory(force_refresh=true) first."})
