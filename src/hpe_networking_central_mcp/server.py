@@ -1,4 +1,4 @@
-"""HPE Networking Central MCP Server — Code Interpreter Pattern."""
+"""HPE Networking Central MCP Server - API Discovery + Code Interpreter Pattern."""
 
 from __future__ import annotations
 
@@ -8,8 +8,10 @@ from .config import load_settings
 from .logging import setup_logging
 from .prompts.workflows import register_prompts
 from .resources.docs import register_resources
+from .tools.api_call import register_api_call_tools
+from .tools.api_catalog import initialize_catalog, register_catalog_tools
 from .tools.execution import register_execution_tools
-from .tools.inventory import register_inventory_tools, _generate_inventory_config
+from .tools.inventory import register_inventory_tools
 from .tools.scripts import register_script_tools
 
 logger = setup_logging()
@@ -17,27 +19,40 @@ logger = setup_logging()
 mcp = FastMCP(
     "hpe-networking-central-mcp",
     instructions="""You are an automation engineer for HPE Aruba Networking Central.
-You manage network devices (switches, access points, gateways) through the Code Interpreter Pattern:
-- Use refresh_inventory() to understand the current network state
-- Use list_scripts() to find existing automation scripts
-- Write new Python scripts using pycentral v2 SDK when needed, save with save_script()
-- Execute scripts with execute_script() to make changes
-- Always verify changes by refreshing inventory after execution
+You manage network devices (switches, access points, gateways) through a combination of
+direct API reads and reusable Python scripts.
 
-You do NOT call APIs directly. Instead, you write, save, and execute reusable Python scripts.
-Scripts use the pycentral v2 SDK and read credentials from environment variables.
-Read the docs://script-writing-guide resource for the script template.""",
+## How to work
+
+1. **Discover APIs**: Read the api://central/catalog resource for a complete overview of
+   available endpoints. Use get_api_details("keyword") to find specific endpoint details.
+
+2. **Quick reads**: Use call_central_api(path, params) for GET requests - monitoring queries,
+   config lookups, health checks. This is the fastest way to read data.
+
+3. **Inventory**: Use refresh_inventory() to get a structured overview of all devices, sites,
+   and their status. Use get_device_details() for individual device lookup.
+
+4. **Writes and complex operations**: Write Python scripts using httpx + OAuth2, save with
+   save_script(), and execute with execute_script(). Scripts handle POST/PATCH/DELETE operations
+   and multi-step workflows.
+
+5. **Reuse**: Always check list_scripts() before writing a new script.
+
+Read docs://script-writing-guide for the script template and authentication pattern.
+You decide freely whether to use call_central_api() or write a script based on the task.""",
 )
 
 settings = load_settings()
 
-# Generate inventory config on startup if creds available
-if settings.has_credentials:
+# Initialize API catalog from Postman collections
+if settings.has_postman_key:
     try:
-        _generate_inventory_config(settings)
-        logger.info("startup_inventory_config_ready")
+        initialize_catalog(settings)
     except Exception as e:
-        logger.warning("startup_inventory_config_failed", error=str(e))
+        logger.warning("startup_catalog_init_failed", error=str(e))
+else:
+    logger.info("startup_catalog_skip", reason="no_postman_api_key")
 
 # Ensure script library exists
 settings.script_library_path.mkdir(parents=True, exist_ok=True)
@@ -46,12 +61,15 @@ settings.script_library_path.mkdir(parents=True, exist_ok=True)
 register_inventory_tools(mcp, settings)
 register_script_tools(mcp, settings)
 register_execution_tools(mcp, settings)
+register_catalog_tools(mcp, settings)
+register_api_call_tools(mcp, settings)
 register_resources(mcp, settings)
 register_prompts(mcp)
 
 logger.info(
     "server_ready",
     credentials_configured=settings.has_credentials,
+    catalog_available=settings.has_postman_key,
     script_library=str(settings.script_library_path),
 )
 

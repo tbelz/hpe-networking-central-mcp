@@ -1,4 +1,4 @@
-"""MCP Prompts — guided workflow templates."""
+"""MCP Prompts - guided workflow templates."""
 
 from __future__ import annotations
 
@@ -14,39 +14,42 @@ def register_prompts(mcp):
     def onboard_device(serial_number: str, site_name: str, persona: str = "ACCESS_SWITCH") -> str:
         """Guide: onboard a network device to a site in HPE Aruba Networking Central.
 
-        Walks through: inventory check → verify device → check for existing script → create/reuse → execute → verify.
+        Walks through: inventory check -> verify device -> discover APIs -> create/reuse script -> execute -> verify.
         """
         return f"""You are onboarding device {serial_number} to site "{site_name}" with persona "{persona}" in HPE Aruba Networking Central.
 
 Follow this workflow:
 
 1. **Refresh Inventory**: Call refresh_inventory(detail_level="summary") to get the current network state.
-   - Verify the site "{site_name}" exists. If not, you'll need to create it first.
-   - Locate device {serial_number}. Check if it's in "unassigned" status or already assigned.
+   - Verify the site "{site_name}" exists. If not, you will need to create it.
+   - Locate device {serial_number}. Check if it is in "unassigned" status or already assigned.
    - If the device is already at the target site, report that and stop.
 
-2. **Check Existing Scripts**: Call list_scripts(tag="onboarding") to see if an onboarding script exists.
+2. **Discover APIs**: Use get_api_details("site") and get_api_details("device assign") to find the
+   relevant API endpoints for site creation and device assignment.
 
-3. **Create or Reuse Script**:
+3. **Check Existing Scripts**: Call list_scripts(tag="onboarding") to see if an onboarding script exists.
+
+4. **Create or Reuse Script**:
    - If an onboarding script exists, review its parameters and reuse it.
-   - If not, write a new Python script using pycentral v2 that:
-     a. Connects to Central using env vars (CENTRAL_BASE_URL, CENTRAL_CLIENT_ID, CENTRAL_CLIENT_SECRET)
-     b. Creates the site if needed (using pycentral scopes.Site)
+   - If not, write a new Python script using httpx that:
+     a. Authenticates via OAuth2 (client credentials flow to sso.common.cloud.hpe.com)
+     b. Creates the site if needed
      c. Assigns the device to the site
      d. Sets the device persona/function to "{persona}"
      e. Accepts --serial, --site, and --persona as CLI arguments
      f. Outputs results as JSON
    - Save it via save_script().
 
-4. **Execute**: Call execute_script() with the appropriate parameters:
+5. **Execute**: Call execute_script() with the appropriate parameters:
    - serial: {serial_number}
    - site: {site_name}
    - persona: {persona}
 
-5. **Verify**: Call refresh_inventory(force_refresh=true) and confirm the device is now assigned to "{site_name}".
+6. **Verify**: Call refresh_inventory(force_refresh=true) and confirm the device is now assigned to "{site_name}".
 
 Read the docs://pycentral/authentication and docs://script-writing-guide resources for reference.
-Refer to docs://ansible/onboarding for the canonical onboarding workflow steps.
+Read api://central/catalog for the full list of available API endpoints.
 """
 
     @mcp.prompt()
@@ -61,7 +64,7 @@ Follow this workflow:
 2. **Analyze Summary**: Review the data and identify:
    - Total device count and breakdown by type (switches, APs, gateways)
    - Devices per site
-   - Online vs offline devices — flag any offline devices
+   - Online vs offline devices - flag any offline devices
    - Unassigned devices that need onboarding
    - Device function/persona distribution
 
@@ -72,7 +75,12 @@ Follow this workflow:
 
 4. **Get Specifics**: Use get_device_details(identifier) for any device that needs attention.
 
-5. **Present Report**: Summarize findings in a structured format:
+5. **Explore Further**: Use call_central_api() for deeper monitoring queries:
+   - Site health: get_api_details("site health") to find the right endpoint
+   - AP stats: get_api_details("ap stats") for AP-specific metrics
+   - Client counts: get_api_details("clients") for connected client data
+
+6. **Present Report**: Summarize findings in a structured format:
    - Overall health score (% online)
    - Site-by-site breakdown
    - Action items (unassigned devices, offline devices, firmware inconsistencies)
@@ -93,24 +101,25 @@ Follow this workflow:
    - If device is not found, suggest refresh_inventory(force_refresh=true).
 
 2. **Assess Status**:
-   - If ONLINE: device is reachable — check for configuration issues.
-   - If OFFLINE: device is unreachable — this is the primary issue to investigate.
+   - If ONLINE: device is reachable - check for configuration issues.
+   - If OFFLINE: device is unreachable - this is the primary issue to investigate.
 
 3. **Check Context**: Call refresh_inventory(detail_level="full", filter_site="<device_site>") to see:
    - Are other devices at the same site also affected?
    - Is this an isolated issue or a site-wide problem?
 
-4. **Diagnostics Script**: Check list_scripts(tag="troubleshooting") for existing diagnostic scripts.
-   - If none exist, consider writing one using pycentral's Troubleshooting module:
-     - AAA/RADIUS testing for authentication issues
-     - Device connectivity checks
-   - The script should accept --serial as a parameter and output JSON results.
+4. **Explore Diagnostics**: Use get_api_details("troubleshoot") to find diagnostic API endpoints.
+   - Use call_central_api() for read-only diagnostic queries.
+   - For active tests (AAA, RADIUS), write and execute a script.
 
-5. **Present Findings**:
+5. **Check Script Library**: Call list_scripts(tag="troubleshooting") for existing diagnostic scripts.
+   - If none exist, consider writing one that runs device health checks.
+
+6. **Present Findings**:
    - Device status and key attributes
    - Comparison with other devices at the same site
-   - Recommended actions (reboot, re-onboard, check physical connectivity, etc.)
+   - Recommended actions
    - If a script was run, present the diagnostic results.
 
-Read docs://pycentral/quickstart for available monitoring and troubleshooting APIs.
+Read api://central/catalog for available diagnostic and monitoring endpoints.
 """
