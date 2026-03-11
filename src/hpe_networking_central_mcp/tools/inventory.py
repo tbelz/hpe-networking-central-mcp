@@ -6,7 +6,7 @@ import json
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 
@@ -106,10 +106,9 @@ def _get_cached_inventory(settings: Settings, force_refresh: bool = False) -> di
     return data
 
 
-def _summarize_inventory(inventory: dict[str, Any]) -> dict[str, Any]:
-    """Build a summary from raw Ansible inventory JSON."""
-    meta = inventory.get("_meta", {}).get("hostvars", {})
-    total_devices = len(meta)
+def _summarize_inventory(devices: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Build a summary from a hostname → hostvars mapping."""
+    total_devices = len(devices)
 
     # Count by groups
     sites: dict[str, int] = {}
@@ -118,7 +117,7 @@ def _summarize_inventory(inventory: dict[str, Any]) -> dict[str, Any]:
     functions: dict[str, int] = {}
     unassigned: list[dict[str, str]] = []
 
-    for hostname, vars_ in meta.items():
+    for hostname, vars_ in devices.items():
         site = str(vars_.get("siteName") or "unassigned")
         dtype = str(vars_.get("deviceType") or "unknown")
         status = str(vars_.get("status") or "unknown")
@@ -149,7 +148,7 @@ def register_inventory_tools(mcp, settings: Settings):
 
     @mcp.tool()
     def refresh_inventory(
-        detail_level: str = "summary",
+        detail_level: Literal["summary", "full"] = "summary",
         force_refresh: bool = False,
         filter_site: str | None = None,
         filter_type: str | None = None,
@@ -163,9 +162,9 @@ def register_inventory_tools(mcp, settings: Settings):
         Args:
             detail_level: "summary" for counts and key metrics, "full" for complete device data.
             force_refresh: Force a fresh API call, ignoring the 5-minute cache.
-            filter_site: Only return devices at this site name.
-            filter_type: Only return devices of this type (SWITCH, ACCESS_POINT, GATEWAY).
-            filter_status: Only return devices with this status (ONLINE, OFFLINE).
+            filter_site: Only return devices at this site name (case-insensitive).
+            filter_type: Only return devices of this type (SWITCH, ACCESS_POINT, GATEWAY — case-insensitive).
+            filter_status: Only return devices with this status (ONLINE, OFFLINE — case-insensitive).
 
         Returns:
             JSON string with inventory data — either summary metrics or full device list.
@@ -178,37 +177,26 @@ def register_inventory_tools(mcp, settings: Settings):
         except Exception as e:
             return json.dumps({"error": str(e)})
 
+        # Extract hostvars and apply filters (case-insensitive) before any view
+        meta = inventory.get("_meta", {}).get("hostvars", {})
+        filtered: dict[str, dict[str, Any]] = {}
+        for hostname, vars_ in meta.items():
+            if filter_site and str(vars_.get("siteName") or "").lower() != filter_site.lower():
+                continue
+            if filter_type and str(vars_.get("deviceType") or "").upper() != filter_type.upper():
+                continue
+            if filter_status and str(vars_.get("status") or "").upper() != filter_status.upper():
+                continue
+            filtered[hostname] = vars_
+
         if detail_level == "full":
-            meta = inventory.get("_meta", {}).get("hostvars", {})
             devices = [
                 {k: v for k, v in d.items() if k not in _SENSITIVE_KEYS}
-                for d in meta.values()
+                for d in filtered.values()
             ]
-
-            # Apply filters
-            if filter_site:
-                devices = [d for d in devices if d.get("siteName") == filter_site]
-            if filter_type:
-                devices = [d for d in devices if d.get("deviceType") == filter_type]
-            if filter_status:
-                devices = [d for d in devices if d.get("status") == filter_status]
-
             return json.dumps({"total": len(devices), "devices": devices}, indent=2)
         else:
-            summary = _summarize_inventory(inventory)
-
-            # If filters applied, add filtered counts
-            if any([filter_site, filter_type, filter_status]):
-                meta = inventory.get("_meta", {}).get("hostvars", {})
-                filtered = list(meta.values())
-                if filter_site:
-                    filtered = [d for d in filtered if d.get("siteName") == filter_site]
-                if filter_type:
-                    filtered = [d for d in filtered if d.get("deviceType") == filter_type]
-                if filter_status:
-                    filtered = [d for d in filtered if d.get("status") == filter_status]
-                summary["filtered_count"] = len(filtered)
-
+            summary = _summarize_inventory(filtered)
             return json.dumps(summary, indent=2)
 
     @mcp.tool()
@@ -216,13 +204,15 @@ def register_inventory_tools(mcp, settings: Settings):
         """Get detailed information about a specific network device.
 
         Looks up a device by serial number, device name, IP address, or MAC address
-        from the cached inventory. Refresh inventory first if data is stale.
+        from the cached inventory.  Supports partial/substring matching: if the
+        identifier uniquely matches one device the full details are returned; if
+        multiple devices match a compact candidate list is returned instead.
 
         Args:
-            identifier: Serial number, device name, IPv4 address, or MAC address.
+            identifier: Full or partial serial number, device name, IPv4 address, or MAC address.
 
         Returns:
-            JSON string with all known attributes of the device, or an error if not found.
+            JSON string with device details, a candidate list, or an error.
         """
         if not settings.has_credentials:
             return json.dumps({"error": "Central credentials not configured."})
@@ -233,18 +223,41 @@ def register_inventory_tools(mcp, settings: Settings):
             return json.dumps({"error": str(e)})
 
         meta = inventory.get("_meta", {}).get("hostvars", {})
-        search = identifier.strip()
+        search = identifier.strip().lower()
 
-        # Search across multiple fields
+        # Collect all substring matches across key fields
+        matches: list[tuple[str, dict[str, Any]]] = []
         for hostname, vars_ in meta.items():
-            if search.lower() in [
-                str(vars_.get("serialNumber", "")).lower(),
-                str(hostname).lower(),
-                str(vars_.get("ipv4", "")).lower(),
-                str(vars_.get("macAddress", "")).lower(),
-                str(vars_.get("deviceName", "")).lower(),
-            ]:
-                safe = {k: v for k, v in vars_.items() if k not in _SENSITIVE_KEYS}
-                return json.dumps({"device": safe, "hostname": hostname}, indent=2)
+            fields = [
+                str(vars_.get("serialNumber", "")),
+                str(hostname),
+                str(vars_.get("ipv4", "")),
+                str(vars_.get("macAddress", "")),
+                str(vars_.get("deviceName", "")),
+            ]
+            if any(search in f.lower() for f in fields):
+                matches.append((hostname, vars_))
+
+        if len(matches) == 1:
+            hostname, vars_ = matches[0]
+            safe = {k: v for k, v in vars_.items() if k not in _SENSITIVE_KEYS}
+            return json.dumps({"device": safe, "hostname": hostname}, indent=2)
+
+        if len(matches) > 1:
+            candidates = [
+                {
+                    "serial": str(v.get("serialNumber", "")),
+                    "name": str(v.get("deviceName", h)),
+                    "site": str(v.get("siteName", "unassigned")),
+                    "type": str(v.get("deviceType", "unknown")),
+                    "status": str(v.get("status", "unknown")),
+                }
+                for h, v in matches
+            ]
+            return json.dumps({
+                "message": f"Multiple devices match '{identifier}'. Narrow your search or use the full serial number.",
+                "match_count": len(matches),
+                "candidates": candidates,
+            }, indent=2)
 
         return json.dumps({"error": f"Device '{identifier}' not found in inventory. Try refresh_inventory(force_refresh=true) first."})

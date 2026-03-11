@@ -22,10 +22,9 @@ The agent doesn't call Central APIs directly. Instead, it writes, saves, and re-
 │  ├─ save_script         │──► /scripts/library/*.py
 │  └─ execute_script      │──► python3 (pycentral v2 SDK)
 │                         │
-│  Resources:             │
-│  ├─ pycentral docs      │
-│  ├─ Ansible module docs │
-│  ├─ Example playbooks   │
+│  Resources (10):        │
+│  ├─ pycentral docs (3)  │
+│  ├─ Ansible docs  (5)   │
 │  └─ Script writing guide│
 │                         │
 │  Prompts:               │
@@ -115,11 +114,26 @@ Add to `claude_desktop_config.json`:
 
 | Tool | Description |
 |------|-------------|
-| `refresh_inventory` | Run the Ansible inventory plugin to discover all devices, sites, and status. Returns summary or full data. |
-| `get_device_details` | Look up a specific device by serial number, name, IP, or MAC address. |
+| `refresh_inventory` | Run the Ansible inventory plugin to discover all devices, sites, and status. Returns summary or full detail (`detail_level` validated). Filters (`filter_site`, `filter_type`, `filter_status`) are **case-insensitive**. |
+| `get_device_details` | Look up a device by serial number, name, IP, or MAC address. Supports **partial/substring matching** — a unique prefix returns full details; multiple matches return a candidate list. |
 | `list_scripts` | List all scripts in the automation library with metadata. |
 | `save_script` | Save a new Python script to the library for reuse. |
 | `execute_script` | Execute a script from the library with parameters. |
+
+## Resources
+
+| URI | Description |
+|-----|-------------|
+| `docs://pycentral/overview` | pycentral v2 SDK overview — modules, authentication, usage patterns |
+| `docs://pycentral/authentication` | How to authenticate with pycentral v2 — OAuth2, token_info |
+| `docs://pycentral/quickstart` | Quickstart guide — basic API calls and modules |
+| `docs://ansible/inventory-plugin` | Ansible dynamic inventory plugin documentation |
+| `docs://ansible/onboarding` | Example Ansible playbook for device onboarding |
+| `docs://ansible/onboarding-advanced` | Advanced onboarding playbook with filtering and error handling |
+| `docs://ansible/profiles` | central_profiles Ansible module documentation |
+| `docs://ansible/sites` | central_sites Ansible module documentation |
+| `docs://ansible/glp-devices` | glp_devices Ansible module — assign/unassign to GLP |
+| `docs://script-writing-guide` | Guide for writing automation scripts the server can execute |
 
 ## Prompts
 
