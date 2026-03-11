@@ -14,7 +14,7 @@ import os
 import sys
 from collections import defaultdict
 
-from pycentral.base import NewCentralBase
+from pycentral import NewCentralBase
 from pycentral.new_monitoring.devices import MonitoringDevices
 
 

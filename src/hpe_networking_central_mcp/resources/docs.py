@@ -102,7 +102,7 @@ pycentral v2 is the Python SDK for HPE Aruba Networking Central (New Central) an
 
 ## Authentication Pattern
 ```python
-from pycentral.base import NewCentralBase
+from pycentral import NewCentralBase
 
 token_info = {
     "new_central": {
@@ -125,7 +125,7 @@ PYCENTRAL_AUTH_GUIDE = """# Authentication Guide
 ## NewCentralBase
 
 ```python
-from pycentral.base import NewCentralBase
+from pycentral import NewCentralBase
 
 # Option 1: Client credentials (auto-generates token)
 token_info = {
@@ -156,7 +156,7 @@ central = NewCentralBase(token_info=token_info)
 ## Using Environment Variables (recommended for MCP scripts)
 ```python
 import os
-from pycentral.base import NewCentralBase
+from pycentral import NewCentralBase
 
 token_info = {
     "new_central": {
@@ -173,7 +173,7 @@ PYCENTRAL_QUICKSTART = """# Quickstart
 
 ## Monitoring Devices
 ```python
-from pycentral.base import NewCentralBase
+from pycentral import NewCentralBase
 from pycentral.new_monitoring.devices import MonitoringDevices
 
 central = NewCentralBase(token_info=token_info)
@@ -246,7 +246,7 @@ SCRIPT_WRITING_GUIDE = """# Script Writing Guide for HPE Central MCP
 Scripts are Python files executed by the MCP server. They should:
 1. Use `argparse` for CLI parameters
 2. Read credentials from environment variables
-3. Use `pycentral.base.NewCentralBase` for API connections
+3. Use `pycentral.NewCentralBase` for API connections
 4. Print results as JSON to stdout
 5. Use proper exit codes (0=success, 1=error)
 
@@ -260,7 +260,7 @@ import json
 import os
 import sys
 
-from pycentral.base import NewCentralBase
+from pycentral import NewCentralBase
 
 
 def get_connection():

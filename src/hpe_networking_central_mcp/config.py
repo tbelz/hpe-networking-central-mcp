@@ -45,11 +45,11 @@ class Settings:
 def load_settings() -> Settings:
     """Load settings from environment variables."""
     return Settings(
-        central_base_url=os.environ.get("CENTRAL_BASE_URL", ""),
-        central_client_id=os.environ.get("CENTRAL_CLIENT_ID", ""),
-        central_client_secret=os.environ.get("CENTRAL_CLIENT_SECRET", ""),
-        glp_client_id=os.environ.get("GLP_CLIENT_ID", ""),
-        glp_client_secret=os.environ.get("GLP_CLIENT_SECRET", ""),
+        central_base_url=os.environ.get("CENTRAL_BASE_URL", "").strip().rstrip("/"),
+        central_client_id=os.environ.get("CENTRAL_CLIENT_ID", "").strip(),
+        central_client_secret=os.environ.get("CENTRAL_CLIENT_SECRET", "").strip(),
+        glp_client_id=os.environ.get("GLP_CLIENT_ID", "").strip(),
+        glp_client_secret=os.environ.get("GLP_CLIENT_SECRET", "").strip(),
         script_library_path=Path(os.environ.get("SCRIPT_LIBRARY_PATH", "/scripts/library")),
         docs_path=Path(os.environ.get("DOCS_PATH", "/docs")),
         examples_path=Path(os.environ.get("EXAMPLES_PATH", "/examples")),

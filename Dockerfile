@@ -19,7 +19,7 @@ RUN git clone --branch v2-beta --depth 1 \
     https://github.com/aruba/aruba-central-ansible-collection.git /build/ansible-collection
 
 # Copy MCP server source
-COPY pyproject.toml uv.lock* ./
+COPY pyproject.toml uv.lock* README.md ./
 COPY src/ ./src/
 
 # Create venv and install all dependencies

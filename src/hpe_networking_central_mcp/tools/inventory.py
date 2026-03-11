@@ -19,6 +19,22 @@ _inventory_cache: dict[str, Any] = {}
 _cache_timestamp: float = 0.0
 
 
+def _unwrap_ansible_unsafe(value: Any) -> Any:
+    """Unwrap Ansible's __ansible_unsafe dict wrappers to plain Python values.
+
+    ansible-inventory --list serialises AnsibleUnsafeText as
+    {"__ansible_unsafe": "actual_value"}.  This helper recursively converts
+    those back to plain strings so downstream code can use them normally.
+    """
+    if isinstance(value, dict):
+        if "__ansible_unsafe" in value and len(value) == 1:
+            return value["__ansible_unsafe"]
+        return {_unwrap_ansible_unsafe(k): _unwrap_ansible_unsafe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_unwrap_ansible_unsafe(v) for v in value]
+    return value
+
+
 def _generate_inventory_config(settings: Settings) -> None:
     """Generate the Ansible inventory YAML config from env vars."""
     config = f"""plugin: arubanetworks.hpeanw_central.central_inventory
@@ -62,7 +78,8 @@ def _run_ansible_inventory(settings: Settings) -> dict[str, Any]:
         logger.error("ansible_inventory_failed", stderr=result.stderr[:2000])
         raise RuntimeError(f"ansible-inventory failed (exit {result.returncode}): {result.stderr[:500]}")
 
-    return json.loads(result.stdout)
+    raw = json.loads(result.stdout)
+    return _unwrap_ansible_unsafe(raw)
 
 
 def _get_cached_inventory(settings: Settings, force_refresh: bool = False) -> dict[str, Any]:
@@ -95,18 +112,18 @@ def _summarize_inventory(inventory: dict[str, Any]) -> dict[str, Any]:
     unassigned: list[dict[str, str]] = []
 
     for hostname, vars_ in meta.items():
-        site = vars_.get("siteName", "unassigned")
-        dtype = vars_.get("deviceType", "unknown")
-        status = vars_.get("status", "unknown")
-        func = vars_.get("deviceFunction", "unknown")
-        serial = vars_.get("serialNumber", hostname)
+        site = str(vars_.get("siteName") or "unassigned")
+        dtype = str(vars_.get("deviceType") or "unknown")
+        status = str(vars_.get("status") or "unknown")
+        func = str(vars_.get("deviceFunction") or "unknown")
+        serial = str(vars_.get("serialNumber") or hostname)
 
         sites[site] = sites.get(site, 0) + 1
         types[dtype] = types.get(dtype, 0) + 1
         statuses[status] = statuses.get(status, 0) + 1
         functions[func] = functions.get(func, 0) + 1
 
-        if site == "unassigned" or not vars_.get("siteName"):
+        if site == "unassigned":
             unassigned.append({"serial": serial, "type": dtype, "status": status})
 
     return {

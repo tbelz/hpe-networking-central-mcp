@@ -26,6 +26,9 @@ def _build_env(settings: Settings) -> dict[str, str]:
     env["CENTRAL_CLIENT_SECRET"] = settings.central_client_secret
     env["GLP_CLIENT_ID"] = settings.effective_glp_client_id
     env["GLP_CLIENT_SECRET"] = settings.effective_glp_client_secret
+    # Ensure no stale values leak through from host environment
+    for key in ("BASE_URL", "CLIENT_ID", "CLIENT_SECRET"):
+        env.pop(key, None)
     return env
 
 
