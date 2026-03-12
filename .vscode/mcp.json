@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "hpe-networking-central-mcp": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "--env-file", "${workspaceFolder}/.env",
+        "-v", "central-scripts:/scripts/library",
+        "hpe-networking-central-mcp:latest"
+      ]
+    }
+  }
+}

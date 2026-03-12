@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 
 from mcp.server.fastmcp import FastMCP
 
+from .central_client import CentralClient
 from .config import load_settings
 from .logging import setup_logging
 from .prompts.workflows import register_prompts
@@ -46,6 +48,32 @@ You decide freely whether to use call_central_api() or write a script based on t
 )
 
 settings = load_settings()
+
+# ── Validate Central credentials before accepting connections ──────────
+if not settings.has_credentials:
+    logger.error(
+        "startup_failed",
+        reason="Missing credentials. Set CENTRAL_BASE_URL, CENTRAL_CLIENT_ID, "
+        "CENTRAL_CLIENT_SECRET in your .env file. See .env.example.",
+    )
+    sys.exit(1)
+
+try:
+    _client = CentralClient(
+        settings.central_base_url,
+        settings.central_client_id,
+        settings.central_client_secret,
+    )
+    _client.validate()
+    _client.close()
+    logger.info("credentials_validated")
+except Exception as exc:
+    logger.error(
+        "startup_failed",
+        reason="Credential validation failed — could not obtain OAuth2 token.",
+        error=str(exc),
+    )
+    sys.exit(1)
 
 # Initialize API catalog in background to avoid blocking MCP handshake
 if settings.has_postman_key:

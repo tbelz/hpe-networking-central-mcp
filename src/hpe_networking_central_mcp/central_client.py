@@ -95,6 +95,14 @@ class CentralClient:
         resp.raise_for_status()
         return resp.json()
 
+    def validate(self) -> None:
+        """Test credentials by requesting an OAuth2 token.
+
+        Raises:
+            httpx.HTTPStatusError: If the token request fails (bad credentials).
+        """
+        self._ensure_token()
+
     def close(self) -> None:
         """Close the underlying HTTP client."""
         self._http.close()
