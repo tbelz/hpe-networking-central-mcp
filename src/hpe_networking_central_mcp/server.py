@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from mcp.server.fastmcp import FastMCP
 
 from .config import load_settings
@@ -45,12 +47,15 @@ You decide freely whether to use call_central_api() or write a script based on t
 
 settings = load_settings()
 
-# Initialize API catalog from Postman collections
+# Initialize API catalog in background to avoid blocking MCP handshake
 if settings.has_postman_key:
-    try:
-        initialize_catalog(settings)
-    except Exception as e:
-        logger.warning("startup_catalog_init_failed", error=str(e))
+    def _bg_catalog_init():
+        try:
+            initialize_catalog(settings)
+        except Exception as e:
+            logger.warning("startup_catalog_init_failed", error=str(e))
+
+    threading.Thread(target=_bg_catalog_init, daemon=True).start()
 else:
     logger.info("startup_catalog_skip", reason="no_postman_api_key")
 
