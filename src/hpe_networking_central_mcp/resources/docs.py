@@ -201,6 +201,35 @@ Rate-limited requests (429) are retried once after the server-specified wait.
 - Manage OAuth2 tokens directly
 - Import httpx or requests for API calls
 - Hardcode credentials or base URLs
+
+## NetworkX for Topology Analysis
+
+The `networkx` library is available for graph/topology analysis in scripts.
+Import it directly — it is pre-installed in the MCP server environment.
+
+```python
+import networkx as nx
+from central_helpers import api
+
+# Build a NetworkX graph from Kùzu topology data or from the topology API
+G = nx.Graph()
+
+# Example: fetch topology for a site and build a graph
+topo = api.get(f"network-monitoring/v1/topology/{site_id}")
+for device in topo.get("devices", []):
+    G.add_node(device["serial"], name=device.get("name", ""), type=device.get("type", ""))
+for link in topo.get("links", []):
+    G.add_edge(link["from"], link["to"], speed=link.get("speed", 0),
+               health=link.get("health", ""))
+
+# Standard NetworkX analysis
+print(f"Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}")
+print(f"Connected: {nx.is_connected(G)}")
+if nx.is_connected(G):
+    print(f"Diameter: {nx.diameter(G)}")
+    bridges = list(nx.bridges(G))
+    print(f"Single points of failure (bridges): {bridges}")
+```
 """
 
 CONFIG_WORKFLOWS = """\

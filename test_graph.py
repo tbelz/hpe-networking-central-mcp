@@ -344,6 +344,117 @@ if _has_creds and _gm.ready:
 
 
 # ======================================================================
+# Phase 5: Topology — L2 link data
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("Phase 5: Topology — L2 link population and queries")
+print("=" * 70)
+
+from hpe_networking_central_mcp.graph.schema import TOPOLOGY_REL_TABLES
+
+if _has_creds and _gm.ready:
+
+    def test_topology_schema_constants():
+        assert len(TOPOLOGY_REL_TABLES) >= 2, f"Expected >=2 topology rel tables, got {len(TOPOLOGY_REL_TABLES)}"
+        assert "CONNECTED_TO" in str(TOPOLOGY_REL_TABLES)
+        assert "LINKED_TO" in str(TOPOLOGY_REL_TABLES)
+        print(f"    -> {len(TOPOLOGY_REL_TABLES)} topology relationship tables defined")
+
+    def test_load_topology():
+        assert not _gm.topology_ready, "Topology should not be loaded yet"
+        t0 = time.time()
+        summary = _gm.load_topology(_client)
+        elapsed = time.time() - t0
+        assert _gm.topology_ready, "Topology should be ready after load"
+        print(f"    -> Topology loaded in {elapsed:.1f}s: {json.dumps({k:v for k,v in summary.items() if k != 'errors'})}")
+        if summary.get("errors"):
+            print(f"    -> Errors: {summary['errors']}")
+
+    def test_load_topology_idempotent():
+        """Second call should return cached data."""
+        t0 = time.time()
+        summary = _gm.load_topology(_client)
+        elapsed = time.time() - t0
+        assert elapsed < 1.0, f"Second load_topology call took {elapsed:.1f}s — should be cached"
+        assert _gm.topology_ready
+        print(f"    -> Cached topology returned in {elapsed:.3f}s")
+
+    def test_query_connected_to():
+        rows = _gm.query(
+            "MATCH (a:Device)-[c:CONNECTED_TO]->(b:Device) "
+            "RETURN a.name AS from, b.name AS to, c.speed AS speed, "
+            "c.edgeType AS type, c.health AS health, c.stpState AS stp, "
+            "c.fromPorts AS fromPorts, c.toPorts AS toPorts "
+            "ORDER BY a.name LIMIT 20"
+        )
+        print(f"    -> {len(rows)} CONNECTED_TO edges (showing up to 20)")
+        for r in rows[:5]:
+            print(f"       {r['from']} → {r['to']} | {r.get('speed','')} Gbps | {r.get('type','')} | {r.get('health','')}")
+
+    def test_query_unmanaged_devices():
+        rows = _gm.query(
+            "MATCH (u:UnmanagedDevice) "
+            "RETURN u.mac AS mac, u.name AS name, u.model AS model, "
+            "u.deviceType AS type, u.siteId AS siteId"
+        )
+        print(f"    -> {len(rows)} unmanaged devices")
+        for r in rows[:5]:
+            print(f"       {r['mac']} | {r.get('name','')} | {r.get('model','')}")
+
+    def test_query_linked_to():
+        rows = _gm.query(
+            "MATCH (d:Device)-[l:LINKED_TO]->(u:UnmanagedDevice) "
+            "RETURN d.name AS device, u.mac AS unmanagedMac, u.name AS unmanagedName, "
+            "l.fromPorts AS ports, l.speed AS speed"
+        )
+        print(f"    -> {len(rows)} LINKED_TO edges")
+        for r in rows[:5]:
+            print(f"       {r['device']} → {r.get('unmanagedName', r['unmanagedMac'])}")
+
+    def test_query_topology_per_site():
+        rows = _gm.query(
+            "MATCH (s:Site)-[:HAS_DEVICE]->(d:Device)-[c:CONNECTED_TO]->(d2:Device) "
+            "RETURN s.name AS site, count(c) AS links "
+            "ORDER BY links DESC"
+        )
+        print(f"    -> Topology links per site:")
+        for r in rows:
+            print(f"       {r['site']}: {r['links']} links")
+
+    def test_query_site_unmanaged():
+        rows = _gm.query(
+            "MATCH (s:Site)-[:HAS_UNMANAGED]->(u:UnmanagedDevice) "
+            "RETURN s.name AS site, count(u) AS unmanaged "
+            "ORDER BY unmanaged DESC"
+        )
+        print(f"    -> Unmanaged devices per site:")
+        for r in rows:
+            print(f"       {r['site']}: {r['unmanaged']}")
+
+    def test_topology_in_schema_description():
+        desc = _gm.get_schema_description()
+        assert "CONNECTED_TO" in desc
+        assert "LINKED_TO" in desc
+        assert "UnmanagedDevice" in desc
+        assert "Topology" in desc
+        print("    -> Schema description includes topology section")
+
+    run_test("topology schema constants", test_topology_schema_constants)
+    run_test("load_topology() populates L2 data", test_load_topology)
+    run_test("load_topology() idempotent (cached)", test_load_topology_idempotent)
+    run_test("MATCH CONNECTED_TO edges", test_query_connected_to)
+    run_test("MATCH UnmanagedDevice nodes", test_query_unmanaged_devices)
+    run_test("MATCH LINKED_TO edges", test_query_linked_to)
+    run_test("COUNT topology links per site", test_query_topology_per_site)
+    run_test("COUNT unmanaged devices per site", test_query_site_unmanaged)
+    run_test("schema description includes topology", test_topology_in_schema_description)
+
+else:
+    print(f"  [{WARN}] Skipping topology tests — graph not populated")
+
+
+# ======================================================================
 # Summary
 # ======================================================================
 

@@ -43,10 +43,11 @@ def register_graph_tools(mcp, settings: Settings, client: CentralClient, graph: 
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
     )
     def query_graph(cypher: str) -> str:
-        """Execute a read-only Cypher query against the Central configuration graph.
+        """Execute a read-only Cypher query against the Central configuration & topology graph.
 
-        The graph models the Aruba Central hierarchy:
+        The graph models the Aruba Central hierarchy and physical L2 topology:
         Org → SiteCollection → Site → Device, DeviceGroup → Device, Org → ConfigProfile.
+        Device -CONNECTED_TO→ Device, Device -LINKED_TO→ UnmanagedDevice (L2 links from LLDP).
 
         Node tables and their key properties:
         - Org: scopeId, name
@@ -56,15 +57,20 @@ def register_graph_tools(mcp, settings: Settings, client: CentralClient, graph: 
         - Device: serial, name, mac, model, deviceType, status, ipv4, firmware,
           persona, deviceFunction, siteId, siteName, configStatus, deviceGroupId
         - ConfigProfile: id, name, category, scopeId, deviceFunction, objectType
+        - UnmanagedDevice: mac, name, model, deviceType, health, status, ipv4, siteId
 
-        Relationships: HAS_COLLECTION, HAS_SITE, CONTAINS_SITE, HAS_DEVICE, HAS_MEMBER, HAS_CONFIG
+        Relationships: HAS_COLLECTION, HAS_SITE, CONTAINS_SITE, HAS_DEVICE, HAS_MEMBER,
+        HAS_CONFIG, HAS_UNMANAGED, CONNECTED_TO (Device→Device), LINKED_TO (Device→UnmanagedDevice)
+
+        Topology edges have: fromPorts, toPorts, speed, edgeType, health, lag, stpState, isSibling.
+        Topology data is populated lazily — call load_topology() first if CONNECTED_TO returns empty.
 
         Read graph://schema for full property lists and example queries.
         Write operations are blocked — use call_central_api() for mutations.
 
         Args:
             cypher: A read-only Cypher query string.
-                    Example: MATCH (s:Site)-[:HAS_DEVICE]->(d:Device) RETURN s.name, d.name
+                    Example: MATCH (d:Device)-[c:CONNECTED_TO]->(d2:Device) RETURN d.name, d2.name, c.speed
 
         Returns:
             JSON array of result rows.
@@ -92,9 +98,13 @@ def register_graph_tools(mcp, settings: Settings, client: CentralClient, graph: 
     def refresh_graph() -> str:
         """Refresh the Central configuration graph from live APIs.
 
-        Drops all existing graph data and re-populates from the Central APIs.
-        Use this after making configuration changes via call_central_api() or
-        execute_script() to ensure the graph reflects the current state.
+        Drops all existing graph data (including topology) and re-populates
+        from the Central APIs. Use this after making configuration changes
+        via call_central_api() or execute_script() to ensure the graph
+        reflects the current state.
+
+        This does NOT automatically reload topology data.
+        Call load_topology() afterwards if you need L2 link data.
 
         Returns:
             JSON summary of refreshed entity counts.
@@ -108,4 +118,40 @@ def register_graph_tools(mcp, settings: Settings, client: CentralClient, graph: 
             raise ToolError(f"Graph refresh failed: {exc}")
 
         logger.info("refresh_graph_done", **{k: v for k, v in summary.items() if k != "errors"})
+        return json.dumps(summary, indent=2)
+
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True, openWorldHint=True),
+    )
+    def load_topology() -> str:
+        """Load physical L2 topology data into the graph.
+
+        Fetches per-site LLDP topology from Central and creates:
+        - CONNECTED_TO edges between managed Device nodes
+        - LINKED_TO edges from Device to UnmanagedDevice (third-party LLDP neighbours)
+        - UnmanagedDevice nodes for discovered third-party devices
+
+        Edge properties: fromPorts, toPorts, speed (Gbps), edgeType, health,
+        lag, stpState, isSibling.
+
+        This is lazy — first call fetches from APIs, subsequent calls return
+        cached data. Use refresh_graph() to clear and start fresh.
+
+        The configuration graph must be populated first (happens automatically
+        at startup).
+
+        Returns:
+            JSON summary of topology counts.
+        """
+        if not settings.has_credentials:
+            raise ToolError("Central credentials not configured.")
+
+        try:
+            summary = graph.load_topology(client)
+        except RuntimeError as exc:
+            raise ToolError(str(exc))
+        except Exception as exc:
+            raise ToolError(f"Topology load failed: {exc}")
+
+        logger.info("load_topology_done", **{k: v for k, v in summary.items() if k != "errors"})
         return json.dumps(summary, indent=2)

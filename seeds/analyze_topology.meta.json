@@ -1,0 +1,10 @@
+{
+  "description": "Analyze L2 network topology for a site using NetworkX. Identifies single points of failure (bridges, articulation points), connectivity, diameter, LAG coverage, unhealthy links, and STP anomalies.",
+  "tags": ["topology", "analysis", "networkx", "resilience"],
+  "parameters": [
+    {"name": "site-id", "type": "str", "description": "Site scope ID (find via query_graph: MATCH (s:Site) RETURN s.scopeId, s.name)", "required": true}
+  ],
+  "created_at": null,
+  "last_run": null,
+  "last_result": null
+}
