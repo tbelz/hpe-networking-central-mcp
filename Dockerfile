@@ -15,6 +15,8 @@ COPY pyproject.toml uv.lock* README.md ./
 COPY src/ ./src/
 
 # Create venv and install all dependencies
+# Override python-preference from pyproject.toml — Docker provides system Python
+ENV UV_PYTHON_PREFERENCE=only-system
 RUN uv venv /opt/venv
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
