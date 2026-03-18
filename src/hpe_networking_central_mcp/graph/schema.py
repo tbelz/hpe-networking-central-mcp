@@ -57,21 +57,23 @@ NODE_TABLES: list[str] = [
     """,
     """
     CREATE NODE TABLE IF NOT EXISTS Device (
-        serial         STRING,
-        name           STRING,
-        mac            STRING,
-        model          STRING,
-        deviceType     STRING,
-        status         STRING,
-        ipv4           STRING,
-        firmware       STRING,
-        persona        STRING,
-        deviceFunction STRING,
-        siteId         STRING,
-        siteName       STRING,
-        partNumber     STRING,
-        deployment     STRING,
-        configStatus   STRING,
+        serial          STRING,
+        name            STRING,
+        mac             STRING,
+        model           STRING,
+        deviceType      STRING,
+        status          STRING,
+        ipv4            STRING,
+        firmware        STRING,
+        persona         STRING,
+        deviceFunction  STRING,
+        siteId          STRING,
+        siteName        STRING,
+        partNumber      STRING,
+        deployment      STRING,
+        configStatus    STRING,
+        deviceGroupId   STRING,
+        deviceGroupName STRING,
         PRIMARY KEY (serial)
     )
     """,
@@ -129,7 +131,7 @@ Schema version: {version}
 | SiteCollection  | scopeId     | name, siteCount, deviceCount |
 | Site            | scopeId     | name, address, city, country, state, zipcode, lat, lon, deviceCount, collectionId, collectionName, timezoneId |
 | DeviceGroup     | scopeId     | name, deviceCount |
-| Device          | serial      | name, mac, model, deviceType, status, ipv4, firmware, persona, deviceFunction, siteId, siteName, partNumber, deployment, configStatus |
+| Device          | serial      | name, mac, model, deviceType, status, ipv4, firmware, persona, deviceFunction, siteId, siteName, partNumber, deployment, configStatus, deviceGroupId, deviceGroupName |
 | ConfigProfile   | id          | name, category, scopeId, deviceFunction, objectType |
 
 ## Relationship Tables
@@ -225,9 +227,15 @@ RETURN cp.category, cp.name, cp.deviceFunction, cp.objectType
 ORDER BY cp.category, cp.name
 
 // Config profiles for a specific category
-MATCH (o:Org)-[:HAS_CONFIG]->(cp:ConfigProfile {{category: 'vlans'}})
+MATCH (o:Org)-[:HAS_CONFIG]->(cp:ConfigProfile {{category: 'wlan-ssids'}})
 RETURN cp.name, cp.deviceFunction
 ```
+
+### Tips
+- Always use aliases for aggregations: `count(d) AS cnt` (un-aliased count may show internal column names).
+- The `firmware` property maps to the API's `firmwareVersion` field.
+- Devices include `deviceGroupId` and `deviceGroupName` for direct group lookups without traversing HAS_MEMBER.
+- Avoid reserved words as aliases: `group`, `order`, `limit`, `match`, `return`, `set`, `delete`. Use e.g. `grp` instead of `group`.
 
 ### Cross-Site Comparison
 ```cypher

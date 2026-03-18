@@ -21,8 +21,8 @@ _CONFIG_CATEGORIES = [
     "server-groups",
 ]
 
-# Monitoring API for devices (supports cursor pagination)
-_DEVICES_PATH = "network-monitoring/v1alpha1/devices"
+# Device inventory API (returns ALL devices including un-onboarded, with deviceGroupId)
+_INVENTORY_PATH = "network-monitoring/v1/device-inventory"
 _PAGE_LIMIT = 100
 
 
@@ -30,11 +30,11 @@ _PAGE_LIMIT = 100
 
 
 def _fetch_all_devices(client: CentralClient) -> list[dict]:
-    """Fetch all monitored devices with automatic pagination."""
+    """Fetch all devices from the inventory API (includes un-onboarded devices)."""
     devices: list[dict] = []
     page = 1
     while True:
-        resp = client.get(_DEVICES_PATH, params={"limit": str(_PAGE_LIMIT), "next": str(page)})
+        resp = client.get(_INVENTORY_PATH, params={"limit": str(_PAGE_LIMIT), "next": str(page)})
         items = resp.get("items", [])
         devices.extend(items)
         total = resp.get("total", 0)
@@ -276,23 +276,26 @@ def populate_graph(client: CentralClient, conn) -> dict:
             "d.deviceType = $dt, d.status = $status, d.ipv4 = $ip, "
             "d.firmware = $fw, d.persona = $persona, d.deviceFunction = $df, "
             "d.siteId = $sid, d.siteName = $sn, d.partNumber = $pn, "
-            "d.deployment = $dep, d.configStatus = $cs",
+            "d.deployment = $dep, d.configStatus = $cs, "
+            "d.deviceGroupId = $dgid, d.deviceGroupName = $dgn",
             {
                 "serial": serial,
                 "name": d.get("deviceName", d.get("name", "")),
                 "mac": d.get("macAddress", d.get("mac", "")),
                 "model": d.get("model", ""),
                 "dt": d.get("deviceType", d.get("device_type", "")),
-                "status": d.get("status", ""),
-                "ip": d.get("ipv4", d.get("ip_address", "")),
-                "fw": d.get("firmwareVersion", d.get("firmware", "")),
-                "persona": d.get("persona", ""),
-                "df": d.get("deviceFunction", d.get("device_function", "")),
+                "status": d.get("status", "") or "",
+                "ip": d.get("ipv4", d.get("ip_address", "")) or "",
+                "fw": d.get("firmwareVersion", d.get("firmware", "")) or "",
+                "persona": d.get("persona", "") or "",
+                "df": d.get("deviceFunction", d.get("device_function", "")) or "",
                 "sid": site_id,
-                "sn": d.get("siteName", d.get("site_name", "")),
+                "sn": d.get("siteName", d.get("site_name", "")) or "",
                 "pn": d.get("partNumber", d.get("part_number", "")),
-                "dep": d.get("deployment", ""),
-                "cs": d.get("configStatus", d.get("config_status", "")),
+                "dep": d.get("deployment", "") or "",
+                "cs": d.get("configStatus", d.get("config_status", "")) or "",
+                "dgid": str(d.get("deviceGroupId", "") or ""),
+                "dgn": d.get("deviceGroupName", "") or "",
             },
         )
         summary["devices"] += 1
@@ -332,10 +335,8 @@ def populate_graph(client: CentralClient, conn) -> dict:
                 {"sid": site_id, "serial": serial},
             )
 
-    # DeviceGroup -> Device (best-effort: match by group name in device data)
-    # The device monitoring API doesn't reliably expose groupId, so we try to
-    # match via the device-group membership endpoint if available.
-    _populate_device_group_membership(client, conn, groups, summary)
+    # DeviceGroup -> Device (from deviceGroupId on each device)
+    _populate_device_group_membership(conn, devices, summary)
 
     # ── Config profiles (library level) ──────────────────────────
     for category in _CONFIG_CATEGORIES:
@@ -370,37 +371,25 @@ def populate_graph(client: CentralClient, conn) -> dict:
 
 
 def _populate_device_group_membership(
-    client: CentralClient,
     conn,
-    groups: list[dict],
+    devices: list[dict],
     summary: dict,
 ) -> None:
-    """Try to populate DeviceGroup -> Device relationships.
+    """Populate DeviceGroup -> Device relationships from device inventory data.
 
-    Uses the device-group membership API if available.
-    Silently skips groups where membership cannot be determined.
+    The device-inventory API includes deviceGroupId on each device,
+    which we match against the DeviceGroup.scopeId already in the graph.
     """
-    for dg in groups:
-        dg_id = str(dg.get("id", dg.get("scopeId", "")))
-        dg_name = dg.get("scopeName", dg.get("name", ""))
-        if not dg_id:
+    linked = 0
+    for d in devices:
+        serial = str(d.get("serialNumber", d.get("serial", "")))
+        dg_id = str(d.get("deviceGroupId", "") or "")
+        if not serial or not dg_id:
             continue
-
-        # Try the membership endpoint
-        try:
-            resp = client.get(
-                f"network-config/v1/device-groups/{dg_id}/devices",
-                params={"limit": str(_PAGE_LIMIT)},
-            )
-            members = resp.get("items", [])
-            for m in members:
-                serial = str(m.get("serialNumber", m.get("serial", "")))
-                if serial:
-                    conn.execute(
-                        "MATCH (dg:DeviceGroup {scopeId: $dgid}), (d:Device {serial: $serial}) "
-                        "MERGE (dg)-[:HAS_MEMBER]->(d)",
-                        {"dgid": dg_id, "serial": serial},
-                    )
-            logger.info("device_group_members", group=dg_name, count=len(members))
-        except CentralAPIError as exc:
-            logger.debug("device_group_membership_unavailable", group=dg_name, status=exc.status_code)
+        conn.execute(
+            "MATCH (dg:DeviceGroup {scopeId: $dgid}), (d:Device {serial: $serial}) "
+            "MERGE (dg)-[:HAS_MEMBER]->(d)",
+            {"dgid": dg_id, "serial": serial},
+        )
+        linked += 1
+    logger.info("device_group_membership", linked=linked)

@@ -218,6 +218,17 @@ if _has_creds and _gm.ready:
         for r in rows:
             print(f"       {r['name']} ({r['count']} devices)")
 
+    def test_query_device_group_membership():
+        rows = _gm.query(
+            "MATCH (dg:DeviceGroup)-[:HAS_MEMBER]->(d:Device) "
+            "RETURN dg.name AS grp, d.name AS device, d.serial AS serial "
+            "ORDER BY dg.name, d.name"
+        )
+        print(f"    -> {len(rows)} device-group memberships")
+        for r in rows:
+            print(f"       {r['grp']} -> {r['device']} ({r['serial']})")
+        assert len(rows) > 0, "No HAS_MEMBER relationships populated — deviceGroupId mapping failed"
+
     def test_query_config_profiles():
         rows = _gm.query(
             "MATCH (o:Org)-[:HAS_CONFIG]->(cp:ConfigProfile) "
@@ -259,6 +270,7 @@ if _has_creds and _gm.ready:
     run_test("MATCH Site→Device relationships", test_query_site_devices)
     run_test("MATCH blast radius for collection", test_query_blast_radius)
     run_test("MATCH device groups", test_query_device_groups)
+    run_test("MATCH device group membership", test_query_device_group_membership)
     run_test("MATCH config profiles", test_query_config_profiles)
     run_test("COUNT devices per site", test_query_device_count_per_site)
     run_test("MATCH firmware versions", test_query_firmware_versions)
