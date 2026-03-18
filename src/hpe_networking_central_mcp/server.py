@@ -72,7 +72,25 @@ direct API reads and reusable Python scripts.
 10. **Reuse**: Always check list_scripts() before writing a new script.
 
 Read docs://script-writing-guide for the script template and authentication pattern.
-Scripts use `from central_helpers import api, glp` — no OAuth2 boilerplate needed.""",
+Scripts use `from central_helpers import api, glp` — no OAuth2 boilerplate needed.
+
+## MANDATORY: Research before scripting
+
+Before writing ANY script you MUST complete these steps IN ORDER:
+
+1. `list_scripts()` — check if a seed or saved script already solves the task.
+2. `search_api_catalog("keyword")` — find relevant endpoints. NEVER guess API paths.
+3. `get_api_endpoint_detail(method, path)` — get exact parameter schemas and response shapes.
+4. Only THEN write the script using the discovered endpoints and schemas.
+
+Skipping these steps leads to wrong endpoints, wrong parameter names, and wasted iterations.
+
+## Pagination Rule
+
+NEVER pass a `limit` parameter to `call_central_api()` for fetching collections.
+For any operation that lists multiple items, write a script using `api.paginate(path)`.
+The paginate helper auto-detects cursor vs offset pagination with safe page_size=100.
+`call_central_api()` is for single-item lookups and one-off mutations only.""",
 )
 
 settings = load_settings()
@@ -152,6 +170,14 @@ _helpers_dst = settings.script_library_path / "central_helpers.py"
 if _helpers_src.exists():
     shutil.copy2(_helpers_src, _helpers_dst)
     logger.info("central_helpers_copied", dest=str(_helpers_dst))
+
+# Copy seed scripts into script library (always overwrite — server is source of truth)
+_seeds_dir = Path(__file__).parent / "seeds"
+if _seeds_dir.is_dir():
+    for seed_file in _seeds_dir.iterdir():
+        if seed_file.suffix in (".py", ".json") and seed_file.name != "__init__.py":
+            shutil.copy2(seed_file, settings.script_library_path / seed_file.name)
+            logger.info("seed_script_copied", filename=seed_file.name)
 
 # Register all components
 register_graph_tools(mcp, settings, client, graph_manager)

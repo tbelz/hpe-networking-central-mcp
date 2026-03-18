@@ -23,6 +23,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hpe_networking_central_mcp"]
+artifacts = ["src/hpe_networking_central_mcp/seeds/*.json"]
 
 [tool.uv]
 python-preference = "only-managed"

@@ -376,6 +376,33 @@ MATCH (s:Site {{name: 'Curry-Zentrale'}})-[:HAS_DEVICE]->(d:Device)-[c:CONNECTED
 RETURN d.name AS from, d2.name AS to, c.speed AS speedGbps,
        c.edgeType AS linkType, c.health AS health, c.stpState AS stp
 ```
+
+## Kùzu Cypher Engine — Supported & Unsupported Features
+
+### Supported
+- MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, DISTINCT
+- CREATE, SET, DELETE, MERGE
+- Variable-length paths: `[*1..5]`
+- Aggregations: count(), sum(), avg(), min(), max(), collect()
+- String functions: starts with, ends with, contains, toLower(), toUpper()
+- nodes(path), length(path), rels(path)
+- CASE WHEN ... THEN ... ELSE ... END
+- UNWIND, WITH, OPTIONAL MATCH
+- IS NULL / IS NOT NULL
+
+### NOT Supported (will cause errors)
+- APOC procedures (apoc.*)
+- List comprehensions: `[x IN list | x.prop]`
+- REDUCE, FOREACH
+- Custom procedures / plugins
+- Full-text search indexes
+- Built-in graph algorithms (betweenness centrality, PageRank, community detection)
+- shortestPath() / allShortestPaths() functions
+
+### For Graph Algorithms
+Use a NetworkX script instead of Cypher. The seed script `analyze_topology.py` demonstrates
+building a NetworkX graph from the topology API and running bridges, articulation points, etc.
+Find it with `list_scripts()` and run with `execute_script("analyze_topology.py", {{"site-id": "<scopeId>"}})`.
 """.format(version=SCHEMA_VERSION)
 
 

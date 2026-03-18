@@ -30,6 +30,31 @@ def register_resources(mcp, settings: Settings):
         """Central hierarchy, scope IDs, and configuration workflow patterns."""
         return CONFIG_WORKFLOWS
 
+    @mcp.resource("script://seeds")
+    def seed_scripts() -> str:
+        """Pre-built seed scripts available in the automation library."""
+        import json as _json
+        seeds_dir = Path(__file__).parent.parent / "seeds"
+        entries = []
+        for meta_file in sorted(seeds_dir.glob("*.meta.json")):
+            meta = _json.loads(meta_file.read_text(encoding="utf-8"))
+            script_name = meta_file.stem + ".py"  # foo.meta → foo.py
+            entries.append(
+                f"### {script_name}\n"
+                f"{meta.get('description', 'No description')}\n\n"
+                f"**Tags:** {', '.join(meta.get('tags', []))}\n\n"
+                f"**Parameters:**\n"
+                + "\n".join(
+                    f"- `--{p['name']}` ({p.get('type','str')})"
+                    f"{' [required]' if p.get('required') else ''}"
+                    f" — {p.get('description','')}"
+                    for p in meta.get("parameters", [])
+                )
+            )
+        if not entries:
+            return "No seed scripts available."
+        return "# Seed Scripts\n\nPre-built reusable scripts. Use `list_scripts()` to see them, `execute_script()` to run.\n\n" + "\n\n".join(entries)
+
 
 def _read_doc(path: Path, fallback: str = "Documentation not available.") -> str:
     """Read a documentation file, returning fallback if not found."""
@@ -122,6 +147,14 @@ Scripts are Python files executed by the MCP server. The server injects
 credentials as environment variables and provides `central_helpers.py` with
 pre-authenticated API clients. No OAuth2 boilerplate needed.
 
+## IMPORTANT: Discover endpoints first
+
+Before writing any script, you MUST:
+1. `search_api_catalog("keyword")` to find relevant endpoints
+2. `get_api_endpoint_detail(method, path)` to get exact parameter schemas
+
+Never guess or hardcode API paths — always discover them first.
+
 ## Template
 
 ```python
@@ -140,16 +173,13 @@ def main():
     parser.add_argument("--param1", required=True, help="Description")
     args = parser.parse_args()
 
-    # Central API calls
-    devices = api.get("network-monitoring/v1alpha1/devices", params={"limit": "10"})
+    # Use api.paginate() for collection endpoints (auto-handles cursor/offset pagination)
+    all_items = api.paginate("<path-from-api-catalog>")
 
-    # GreenLake API calls
-    glp_devices = glp.get("devices/v1/devices", params={"limit": "10"})
+    # Use api.get() only for single-item lookups
+    single_item = api.get("<path-from-api-catalog>/ITEM_ID")
 
-    # Paginated fetch (auto-detects cursor vs offset pagination)
-    all_devices = api.paginate("network-monitoring/v1alpha1/devices")
-
-    print(json.dumps({"status": "success", "count": len(all_devices)}))
+    print(json.dumps({"status": "success", "count": len(all_items)}))
 
 
 if __name__ == "__main__":
@@ -160,12 +190,12 @@ if __name__ == "__main__":
 
 ### Central: `from central_helpers import api`
 
-- `api.get(path, params=None)` → dict
+- `api.get(path, params=None)` → dict — **Single-item lookups only** (e.g., get one device by serial). Never use for fetching collections.
 - `api.post(path, json_body=None, params=None)` → dict
 - `api.patch(path, json_body=None, params=None)` → dict
 - `api.put(path, json_body=None, params=None)` → dict
 - `api.delete(path, params=None)` → dict
-- `api.paginate(path, params=None, max_pages=50, page_size=100)` → list[dict]
+- `api.paginate(path, params=None, max_pages=50, page_size=100)` → list[dict] — **The ONLY safe way to fetch collections.** Auto-detects cursor vs offset pagination. Never use `api.get()` with a `limit` parameter for fetching multiple items.
 
 ### GreenLake: `from central_helpers import glp`
 
@@ -177,7 +207,7 @@ Same methods as `api` above, but targeting `https://global.api.greenlake.hpe.com
 from central_helpers import api, CentralAPIError, NotFoundError, AuthenticationError
 
 try:
-    device = api.get("network-monitoring/v1alpha1/devices/SERIAL123")
+    device = api.get("<discovered-path>/SERIAL123")
 except NotFoundError:
     print("Device not found", file=sys.stderr)
 except CentralAPIError as e:

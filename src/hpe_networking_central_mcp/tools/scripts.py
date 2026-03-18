@@ -12,6 +12,7 @@ import structlog
 from mcp.types import ToolAnnotations
 
 from ..config import Settings
+from .execution import _run_script
 
 logger = structlog.get_logger("tools.scripts")
 
@@ -92,13 +93,18 @@ def register_script_tools(mcp, settings: Settings):
         description: str,
         tags: list[str],
         parameters: list[dict[str, str]] | None = None,
+        execute: bool = False,
     ) -> str:
         """Save a Python script to the automation library for reuse.
 
+        BEFORE calling this tool you MUST have:
+        1. Called list_scripts() to check for existing scripts
+        2. Called search_api_catalog() to discover API endpoints
+        3. Called get_api_endpoint_detail() for parameter schemas
+
         Scripts should use ``from central_helpers import api`` for all API calls.
-        The central_helpers module is pre-installed in the script library and handles
-        OAuth2 authentication automatically. Parameters should be accepted via argparse
-        CLI arguments. Read docs://script-writing-guide for the full template.
+        Use ``api.paginate()`` for collection endpoints, ``api.get()`` for single-item lookups.
+        Read docs://script-writing-guide for the full template.
 
         Args:
             filename: Script filename (e.g., "onboard_device.py"). Must end in .py.
@@ -107,6 +113,8 @@ def register_script_tools(mcp, settings: Settings):
             tags: List of tags for categorization (e.g., ["onboarding", "glp"]).
             parameters: List of parameter definitions, each with keys:
                         name, type, description, required (bool), default (optional).
+            execute: If True, execute the script immediately after saving and return
+                     combined save + execution results.
 
         Returns:
             Confirmation message with the saved file path, or error details.
@@ -140,9 +148,17 @@ def register_script_tools(mcp, settings: Settings):
         _write_meta(script_path, meta)
 
         logger.info("script_saved", filename=filename, tags=tags)
-        return json.dumps({
+
+        save_result = {
             "status": "saved",
             "path": str(script_path),
             "filename": filename,
             "description": description,
-        })
+        }
+
+        if execute:
+            exec_result_json = _run_script(settings, filename, None)
+            exec_result = json.loads(exec_result_json)
+            save_result["execution"] = exec_result
+
+        return json.dumps(save_result, indent=2)

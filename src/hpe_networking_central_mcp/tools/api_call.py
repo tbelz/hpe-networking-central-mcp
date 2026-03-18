@@ -89,6 +89,10 @@ def register_api_call_tools(mcp, settings: Settings, client: CentralClient):
     ) -> str:
         """Make an authenticated request to any Central API endpoint.
 
+        For single-item lookups and one-off mutations ONLY.
+        To fetch all items from a collection endpoint (list devices, list sites, etc.),
+        write a script using ``api.paginate()`` instead — never pass ``limit`` to this tool.
+
         Always use get_api_endpoint_detail() first to verify path and parameters.
         For config APIs (network-config/), you need a scopeId — find it via
         query_graph on the relevant Site, SiteCollection, or Device node.
