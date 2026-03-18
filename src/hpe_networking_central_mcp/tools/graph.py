@@ -12,8 +12,28 @@ from mcp.types import ToolAnnotations
 from ..central_client import CentralClient
 from ..config import Settings
 from ..graph.manager import GraphManager
+from ..graph.schema import compact_schema_hint, get_node_properties
 
 logger = structlog.get_logger("tools.graph")
+
+
+def _build_error_hint(error_msg: str) -> str:
+    """Build a context-aware hint from a Cypher error message."""
+    msg_lower = error_msg.lower()
+
+    # Property not found → show valid properties for that table
+    if "cannot find property" in msg_lower or "property" in msg_lower and "does not exist" in msg_lower:
+        for table, props in get_node_properties().items():
+            if table.lower() in msg_lower:
+                return f"\n\nValid {table} properties: {', '.join(props)}"
+        # Couldn't match a specific table — show all
+        return f"\n\nAvailable node properties:\n{compact_schema_hint()}"
+
+    # Table not found → show valid table names
+    if "does not exist" in msg_lower or "cannot find" in msg_lower:
+        return f"\n\nAvailable node properties:\n{compact_schema_hint()}"
+
+    return ""
 
 
 def register_graph_tools(mcp, settings: Settings, client: CentralClient, graph: GraphManager):
@@ -26,21 +46,28 @@ def register_graph_tools(mcp, settings: Settings, client: CentralClient, graph: 
         """Execute a read-only Cypher query against the Central configuration graph.
 
         The graph models the Aruba Central hierarchy:
-        Org → SiteCollection → Site → Device, plus DeviceGroup → Device
-        and Org → ConfigProfile for library-level config metadata.
+        Org → SiteCollection → Site → Device, DeviceGroup → Device, Org → ConfigProfile.
 
-        Read the graph://schema resource first to see all node types,
-        relationships, properties, and example queries.
+        Node tables and their key properties:
+        - Org: scopeId, name
+        - SiteCollection: scopeId, name, siteCount, deviceCount
+        - Site: scopeId, name, address, city, country, deviceCount, collectionName
+        - DeviceGroup: scopeId, name, deviceCount
+        - Device: serial, name, mac, model, deviceType, status, ipv4, firmware,
+          persona, deviceFunction, siteId, siteName, configStatus, deviceGroupId
+        - ConfigProfile: id, name, category, scopeId, deviceFunction, objectType
 
-        Write operations (CREATE, DELETE, SET, MERGE, DROP, etc.) are blocked.
-        Use call_central_api() for live configuration reads/writes.
+        Relationships: HAS_COLLECTION, HAS_SITE, CONTAINS_SITE, HAS_DEVICE, HAS_MEMBER, HAS_CONFIG
+
+        Read graph://schema for full property lists and example queries.
+        Write operations are blocked — use call_central_api() for mutations.
 
         Args:
-            cypher: A Cypher query string. Must be read-only.
+            cypher: A read-only Cypher query string.
                     Example: MATCH (s:Site)-[:HAS_DEVICE]->(d:Device) RETURN s.name, d.name
 
         Returns:
-            JSON array of result rows. Each row is a dict of column→value.
+            JSON array of result rows.
         """
         if not cypher or not cypher.strip():
             raise ToolError("Cypher query cannot be empty.")
@@ -53,11 +80,7 @@ def register_graph_tools(mcp, settings: Settings, client: CentralClient, graph: 
             raise ToolError(str(exc))
         except Exception as exc:
             msg = str(exc)
-            hint = (
-                "\n\nHint: Read graph://schema for the correct node/relationship names and properties."
-                if "does not exist" in msg.lower() or "cannot" in msg.lower()
-                else ""
-            )
+            hint = _build_error_hint(msg)
             raise ToolError(f"Cypher query failed: {msg}{hint}")
 
         logger.info("query_graph_done", rows=len(rows))

@@ -17,6 +17,29 @@ logger = structlog.get_logger("tools.api_call")
 _WRITE_METHODS = {"POST", "PATCH", "PUT", "DELETE"}
 
 
+def _api_error_hint(exc: CentralAPIError, path: str, method: str) -> str:
+    """Build a contextual hint for common API errors."""
+    msg = (exc.message or "").lower()
+
+    # Scope restriction errors
+    if "restricted" in msg or "scope" in msg:
+        return (
+            "\n\nHint: Central config APIs require a valid scopeId and scopeType. "
+            "Use query_graph to find scopeId values from Site, SiteCollection, or Device nodes. "
+            "Use get_api_endpoint_detail() to check required parameters."
+        )
+
+    # 404 — wrong path
+    if exc.status_code == 404:
+        return "\n\nHint: Endpoint not found. Use search_api_catalog() to find the correct path."
+
+    # 400 — bad request
+    if exc.status_code == 400:
+        return "\n\nHint: Check parameters with get_api_endpoint_detail(method, path)."
+
+    return ""
+
+
 def _make_api_call(
     client: BaseAPIClient,
     platform: str,
@@ -41,7 +64,8 @@ def _make_api_call(
         return json.dumps(result, indent=2)
     except CentralAPIError as e:
         logger.error("api_call_failed", platform=platform, method=method, path=clean_path, status=e.status_code, error_code=e.error_code)
-        raise ToolError(f"API call failed [{e.status_code}]: {e.message}" + (f" (debugId: {e.debug_id})" if e.debug_id else ""))
+        hint = _api_error_hint(e, clean_path, method)
+        raise ToolError(f"API call failed [{e.status_code}]: {e.message}{hint}" + (f" (debugId: {e.debug_id})" if e.debug_id else ""))
     except Exception as e:
         logger.error("api_call_failed", platform=platform, method=method, path=clean_path, error=str(e))
         raise ToolError(f"API call failed: {e}")
@@ -65,12 +89,14 @@ def register_api_call_tools(mcp, settings: Settings, client: CentralClient):
     ) -> str:
         """Make an authenticated request to any Central API endpoint.
 
-        Use get_api_endpoint_detail() first to discover the correct path and parameters.
-        For multi-step workflows (create site + assign devices + configure), write
-        a script instead of chaining multiple calls.
+        Always use get_api_endpoint_detail() first to verify path and parameters.
+        For config APIs (network-config/), you need a scopeId — find it via
+        query_graph on the relevant Site, SiteCollection, or Device node.
+
+        For multi-step workflows, write a script instead of chaining API calls.
 
         Args:
-            path: API path (e.g., "network-monitoring/v1alpha1/devices").
+            path: API path (e.g., "network-monitoring/v1/device-inventory").
                   Do not include the base URL.
             method: HTTP method. Defaults to GET.
             query_params: Optional query parameters as key-value pairs.

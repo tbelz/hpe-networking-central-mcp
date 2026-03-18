@@ -41,7 +41,7 @@ direct API reads and reusable Python scripts.
    available endpoints. Use search_api_catalog("keyword") to find specific endpoints,
    then get_api_endpoint_detail(method, path) for full parameter and schema details.
 
-3. **Quick reads**: Use call_central_api(path, params) for GET requests - monitoring queries,
+3. **Quick reads**: Use call_central_api(path, query_params) for GET requests - monitoring queries,
    config lookups, health checks. This is the fastest way to read live data.
    Tip: Add `effective=true` to config endpoints for hierarchically merged config,
    and `detailed=true` for source annotations.
@@ -62,7 +62,7 @@ direct API reads and reusable Python scripts.
 7. **Error handling**: Scripts should catch `CentralAPIError` (or subclasses like
    `NotFoundError`) for graceful error handling. Import them from `central_helpers`.
 
-8. **GreenLake Platform**: Use call_greenlake_api(path, params) for HPE GreenLake APIs
+8. **GreenLake Platform**: Use call_greenlake_api(path, query_params) for HPE GreenLake APIs
    (device onboarding, subscriptions, licenses, locations, service catalog). These hit
    https://global.api.greenlake.hpe.com. In scripts, use `from central_helpers import glp`.
 

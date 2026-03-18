@@ -25,6 +25,11 @@ def register_resources(mcp, settings: Settings):
         """Guide for writing automation scripts that the MCP server can execute."""
         return SCRIPT_WRITING_GUIDE
 
+    @mcp.resource("docs://config-workflows")
+    def config_workflows() -> str:
+        """Central hierarchy, scope IDs, and configuration workflow patterns."""
+        return CONFIG_WORKFLOWS
+
 
 def _read_doc(path: Path, fallback: str = "Documentation not available.") -> str:
     """Read a documentation file, returning fallback if not found."""
@@ -196,4 +201,95 @@ Rate-limited requests (429) are retried once after the server-specified wait.
 - Manage OAuth2 tokens directly
 - Import httpx or requests for API calls
 - Hardcode credentials or base URLs
+"""
+
+CONFIG_WORKFLOWS = """\
+# Central Hierarchy & Configuration Workflows
+
+## Hierarchy Scopes (top → bottom)
+
+Central uses hierarchical scopes for configuration. Higher-scope config is
+inherited by all child scopes; lower-scope config takes precedence.
+
+| Level           | Description                                    | Precedence |
+|-----------------|------------------------------------------------|------------|
+| Library         | Template profiles assignable to any scope      | Lowest     |
+| Global (Org)    | Encapsulates all collections, sites, devices   | Low        |
+| Site Collection | Optional grouping of sites                     | Medium     |
+| Site            | Network site with devices                      | High       |
+| Device          | Individual device — overrides all above         | Highest    |
+
+**Device Groups** cut across the hierarchy — they group devices from any site
+for shared configuration. A device can belong to only one group.
+
+## Scope IDs
+
+Every config API operation requires a `scopeId` identifying the target scope.
+Scope IDs are available in the configuration graph:
+
+- **Site**: `MATCH (s:Site) RETURN s.scopeId, s.name`
+- **SiteCollection**: `MATCH (sc:SiteCollection) RETURN sc.scopeId, sc.name`
+- **DeviceGroup**: `MATCH (dg:DeviceGroup) RETURN dg.scopeId, dg.name`
+- **Device**: `MATCH (d:Device) RETURN d.serial, d.name` (serial = device scope ID)
+- **Org/Global**: `MATCH (o:Org) RETURN o.scopeId`
+
+## Configuration API Pattern
+
+Config endpoints are under `network-config/v1alpha1/`. They require `scopeId`
+and `scopeType` query parameters.
+
+### Read config at a scope
+```
+GET network-config/v1alpha1/{category}
+    ?scopeId=<id>&scopeType=<site|device|collection|org>
+```
+
+Add `effective=true` for merged inherited config. Add `detailed=true` for
+source annotations showing which scope each setting comes from.
+
+### Write config
+```
+POST/PATCH network-config/v1alpha1/{category}
+    ?scopeId=<id>&scopeType=<site|device|collection|org>
+    body: { ... config payload ... }
+```
+
+## Blast Radius Check (Before Mutations)
+
+Before applying config at a scope, check what devices will be affected:
+
+```cypher
+// Site-level blast radius
+MATCH (s:Site {name: 'MySite'})-[:HAS_DEVICE]->(d:Device)
+RETURN d.serial, d.name, d.deviceType, d.configStatus
+
+// Collection-level blast radius
+MATCH (sc:SiteCollection {name: 'MyCollection'})-[:CONTAINS_SITE]->(s:Site)-[:HAS_DEVICE]->(d:Device)
+RETURN s.name AS site, d.serial, d.name, d.deviceType
+```
+
+## Config Sync Verification (After Mutations)
+
+After applying config, verify sync status:
+
+1. Check `configStatus` on affected devices:
+   ```cypher
+   MATCH (s:Site {name: 'MySite'})-[:HAS_DEVICE]->(d:Device)
+   RETURN d.name, d.configStatus
+   ```
+
+2. Call `refresh_graph()` to pull latest state from APIs.
+
+3. Values: `synced` = config applied, `not_synced` = pending push, `failed` = error.
+
+## Device Function & Persona
+
+Devices have a `deviceFunction` (e.g., access, core, distribution) and
+`persona` that determine which config categories apply. Pushing incompatible
+config to a device will fail. Check a device's function before applying config:
+
+```cypher
+MATCH (d:Device {serial: 'SERIAL'})
+RETURN d.persona, d.deviceFunction, d.deviceType
+```
 """

@@ -8,6 +8,8 @@ Defines node and relationship tables that model:
 
 from __future__ import annotations
 
+import re
+
 SCHEMA_VERSION = 1
 
 # ── Node table DDL ───────────────────────────────────────────────────
@@ -250,3 +252,45 @@ RETURN d.firmware AS version, d.deviceType AS type, count(d) AS count
 ORDER BY type, count DESC
 ```
 """.format(version=SCHEMA_VERSION)
+
+
+# ── Helpers for dynamic property lookup (used by error hints) ────────
+
+_PROP_RE = re.compile(r"^\s+(\w+)\s+", re.MULTILINE)
+_TABLE_NAME_RE = re.compile(r"CREATE NODE TABLE IF NOT EXISTS (\w+)")
+
+
+def get_node_properties() -> dict[str, list[str]]:
+    """Extract {TableName: [property, ...]} from the DDL, always in sync."""
+    result: dict[str, list[str]] = {}
+    for ddl in NODE_TABLES:
+        m = _TABLE_NAME_RE.search(ddl)
+        if not m:
+            continue
+        table = m.group(1)
+        props = [p.group(1) for p in _PROP_RE.finditer(ddl)
+                 if p.group(1).upper() not in ("PRIMARY", "CREATE", "FROM", "TO")]
+        result[table] = props
+    return result
+
+
+def get_node_tables() -> list[str]:
+    """Return all node table names."""
+    return [m.group(1) for ddl in NODE_TABLES
+            if (m := _TABLE_NAME_RE.search(ddl))]
+
+
+def get_rel_tables() -> list[str]:
+    """Return all relationship table names."""
+    _rel_re = re.compile(r"CREATE REL TABLE IF NOT EXISTS (\w+)")
+    return [m.group(1) for ddl in REL_TABLES if (m := _rel_re.search(ddl))]
+
+
+def compact_schema_hint() -> str:
+    """One-line-per-table property summary for error messages."""
+    lines = []
+    for table, props in get_node_properties().items():
+        lines.append(f"  {table}: {', '.join(props)}")
+    rels = get_rel_tables()
+    lines.append(f"  Relationships: {', '.join(rels)}")
+    return "\n".join(lines)
