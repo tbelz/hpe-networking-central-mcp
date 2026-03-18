@@ -9,7 +9,7 @@ import structlog
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
-from ..central_client import CentralClient
+from ..central_client import CentralClient, CentralAPIError
 from ..config import Settings
 
 logger = structlog.get_logger("tools.api_call")
@@ -70,6 +70,9 @@ def register_api_call_tools(mcp, settings: Settings, client: CentralClient):
             result = client._request(method, clean_path, params=query_params, json_body=body)
             logger.info("api_call_done", method=method, path=clean_path)
             return json.dumps(result, indent=2)
+        except CentralAPIError as e:
+            logger.error("api_call_failed", method=method, path=clean_path, status=e.status_code, error_code=e.error_code)
+            raise ToolError(f"API call failed [{e.status_code}]: {e.message}" + (f" (debugId: {e.debug_id})" if e.debug_id else ""))
         except Exception as e:
             logger.error("api_call_failed", method=method, path=clean_path, error=str(e))
             raise ToolError(f"API call failed: {e}")

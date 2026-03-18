@@ -34,11 +34,12 @@ ENV PATH="/opt/venv/bin:$PATH"
 # (the Docker volume mount overrides this directory anyway)
 
 # Create required directories
-RUN mkdir -p /scripts/library
+RUN mkdir -p /scripts/library /data/oas_cache
 
 # Environment
 ENV PYTHONUNBUFFERED=1
 ENV SCRIPT_LIBRARY_PATH=/scripts/library
 ENV DOCS_PATH=/docs
+ENV SPEC_CACHE_DIR=/data/oas_cache
 
 ENTRYPOINT ["hpe-networking-central-mcp"]

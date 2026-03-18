@@ -6,7 +6,9 @@ Uses httpx instead of pycentral for a single, minimal HTTP stack.
 
 from __future__ import annotations
 
+import threading
 import time
+from datetime import datetime, timezone
 
 import httpx
 import structlog
@@ -16,8 +18,38 @@ logger = structlog.get_logger("central_client")
 TOKEN_URL = "https://sso.common.cloud.hpe.com/as/token.oauth2"
 
 
+# ── Error hierarchy ──────────────────────────────────────────────────
+
+
+class CentralAPIError(Exception):
+    """Base exception for Central API errors with structured error details."""
+
+    def __init__(self, status_code: int, error_code: str = "", message: str = "", debug_id: str = ""):
+        self.status_code = status_code
+        self.error_code = error_code
+        self.message = message
+        self.debug_id = debug_id
+        super().__init__(
+            f"[{status_code}] {error_code}: {message}" if error_code else f"[{status_code}] {message}"
+        )
+
+
+class AuthenticationError(CentralAPIError):
+    """401/403 authentication or authorization failure."""
+
+
+class RateLimitError(CentralAPIError):
+    """429 rate limit exceeded (after retry exhaustion)."""
+
+
+class NotFoundError(CentralAPIError):
+    """404 resource not found."""
+
+
 class CentralClient:
     """HTTP client for Central API with OAuth2 token lifecycle."""
+
+    _MAX_RATE_LIMIT_WAIT = 60  # seconds
 
     def __init__(self, base_url: str, client_id: str, client_secret: str) -> None:
         self._base_url = base_url.rstrip("/")
@@ -25,27 +57,29 @@ class CentralClient:
         self._client_secret = client_secret
         self._access_token: str = ""
         self._token_expires_at: float = 0.0
+        self._lock = threading.Lock()
         self._http = httpx.Client(timeout=30.0)
 
     def _ensure_token(self) -> None:
         """Generate or refresh the OAuth2 access token if expired."""
-        if self._access_token and time.time() < self._token_expires_at:
-            return
+        with self._lock:
+            if self._access_token and time.time() < self._token_expires_at:
+                return
 
-        logger.info("token_refresh_start")
-        resp = self._http.post(
-            TOKEN_URL,
-            data={"grant_type": "client_credentials"},
-            auth=(self._client_id, self._client_secret),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        resp.raise_for_status()
-        body = resp.json()
-        self._access_token = body["access_token"]
-        # Refresh 60s before expiry; default to 7200s if not provided
-        expires_in = int(body.get("expires_in", 7200))
-        self._token_expires_at = time.time() + expires_in - 60
-        logger.info("token_refresh_done", expires_in=expires_in)
+            logger.info("token_refresh_start")
+            resp = self._http.post(
+                TOKEN_URL,
+                data={"grant_type": "client_credentials"},
+                auth=(self._client_id, self._client_secret),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            self._access_token = body["access_token"]
+            # Refresh 60s before expiry; default to 7200s if not provided
+            expires_in = int(body.get("expires_in", 7200))
+            self._token_expires_at = time.time() + expires_in - 60
+            logger.info("token_refresh_done", expires_in=expires_in)
 
     def get(self, path: str, params: dict[str, str] | None = None) -> dict:
         """Make an authenticated GET request to Central API."""
@@ -76,7 +110,7 @@ class CentralClient:
         *,
         _retry: bool = True,
     ) -> dict:
-        """Internal request method with auto-retry on 401."""
+        """Internal request method with auto-retry on 401 and 429."""
         self._ensure_token()
         url = f"{self._base_url}/{path.lstrip('/')}"
         resp = self._http.request(
@@ -90,14 +124,49 @@ class CentralClient:
             },
         )
 
+        # 429 rate limit — retry once after waiting
+        if resp.status_code == 429:
+            wait = _parse_retry_wait(resp)
+            if wait > self._MAX_RATE_LIMIT_WAIT:
+                err = _parse_error_body(resp)
+                raise RateLimitError(
+                    429, err.get("errorCode", ""),
+                    f"Rate limited, retry after {wait}s exceeds {self._MAX_RATE_LIMIT_WAIT}s cap",
+                    err.get("debugId", ""),
+                )
+            logger.info("rate_limited_retry", wait_seconds=wait)
+            time.sleep(wait)
+            resp = self._http.request(
+                method, url,
+                params=params,
+                json=json_body,
+                headers={"Authorization": f"Bearer {self._access_token}", "Accept": "application/json"},
+            )
+            if resp.status_code == 429:
+                err = _parse_error_body(resp)
+                raise RateLimitError(429, err.get("errorCode", ""), "Rate limited after retry", err.get("debugId", ""))
+
         # Retry once on 401 (token may have been revoked server-side)
         if resp.status_code == 401 and _retry:
             logger.info("token_expired_retry")
-            self._access_token = ""
-            self._token_expires_at = 0.0
+            with self._lock:
+                self._access_token = ""
+                self._token_expires_at = 0.0
             return self._request(method, path, params=params, json_body=json_body, _retry=False)
 
-        resp.raise_for_status()
+        # Structured error handling for non-2xx responses
+        if resp.status_code >= 400:
+            err = _parse_error_body(resp)
+            status = resp.status_code
+            error_code = err.get("errorCode", "")
+            message = err.get("message", resp.text[:200])
+            debug_id = err.get("debugId", "")
+            if status in (401, 403):
+                raise AuthenticationError(status, error_code, message, debug_id)
+            if status == 404:
+                raise NotFoundError(status, error_code, message, debug_id)
+            raise CentralAPIError(status, error_code, message, debug_id)
+
         return resp.json()
 
     def validate(self) -> None:
@@ -111,3 +180,37 @@ class CentralClient:
     def close(self) -> None:
         """Close the underlying HTTP client."""
         self._http.close()
+
+
+# ── Module-level helpers ─────────────────────────────────────────────
+
+
+def _parse_error_body(resp: httpx.Response) -> dict:
+    """Try to parse the standard Central error JSON body."""
+    try:
+        return resp.json()
+    except Exception:
+        return {}
+
+
+def _parse_retry_wait(resp: httpx.Response) -> float:
+    """Extract wait time from rate-limit response headers."""
+    retry_after = resp.headers.get("Retry-After")
+    if retry_after:
+        try:
+            return max(float(retry_after), 1.0)
+        except ValueError:
+            pass
+
+    reset = resp.headers.get("X-RateLimit-Reset")
+    if reset:
+        try:
+            reset_time = datetime.fromisoformat(reset)
+            if reset_time.tzinfo is None:
+                reset_time = reset_time.replace(tzinfo=timezone.utc)
+            wait = (reset_time - datetime.now(timezone.utc)).total_seconds()
+            return max(wait, 1.0)
+        except (ValueError, TypeError):
+            pass
+
+    return 5.0  # default fallback

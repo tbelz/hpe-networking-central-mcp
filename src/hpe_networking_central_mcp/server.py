@@ -31,7 +31,8 @@ direct API reads and reusable Python scripts.
 ## How to work
 
 1. **Discover APIs**: Read the api://central/catalog resource for a complete overview of
-   available endpoints. Use get_api_details("keyword") to find specific endpoint details.
+   available endpoints. Use search_api_catalog("keyword") to find specific endpoints,
+   then get_api_endpoint_detail(method, path) for full parameter and schema details.
 
 2. **Quick reads**: Use call_central_api(path, params) for GET requests - monitoring queries,
    config lookups, health checks. This is the fastest way to read data.
@@ -48,7 +49,14 @@ direct API reads and reusable Python scripts.
    save_script() if needed. Execute with execute_script(). NEVER chain multiple
    call_central_api() calls for multi-step workflows.
 
-6. **Reuse**: Always check list_scripts() before writing a new script.
+6. **Paginated lists**: When scripts need ALL items from a list endpoint, use
+   `api.paginate(path)` instead of manual pagination loops. It auto-detects cursor vs
+   offset pagination and returns a flat list.
+
+7. **Error handling**: Scripts should catch `CentralAPIError` (or subclasses like
+   `NotFoundError`) for graceful error handling. Import them from `central_helpers`.
+
+8. **Reuse**: Always check list_scripts() before writing a new script.
 
 Read docs://script-writing-guide for the script template and authentication pattern.
 Scripts use `from central_helpers import api` — no OAuth2 boilerplate needed.""",
@@ -82,16 +90,13 @@ except Exception as exc:
     sys.exit(1)
 
 # Initialize API catalog in background to avoid blocking MCP handshake
-if settings.has_postman_key:
-    def _bg_catalog_init():
-        try:
-            initialize_catalog(settings)
-        except Exception as e:
-            logger.warning("startup_catalog_init_failed", error=str(e))
+def _bg_catalog_init():
+    try:
+        initialize_catalog(settings)
+    except Exception as e:
+        logger.warning("startup_catalog_init_failed", error=str(e))
 
-    threading.Thread(target=_bg_catalog_init, daemon=True).start()
-else:
-    logger.info("startup_catalog_skip", reason="no_postman_api_key")
+threading.Thread(target=_bg_catalog_init, daemon=True).start()
 
 # Ensure script library exists and central_helpers.py is available
 settings.script_library_path.mkdir(parents=True, exist_ok=True)
@@ -114,7 +119,6 @@ register_prompts(mcp)
 logger.info(
     "server_ready",
     credentials_configured=settings.has_credentials,
-    catalog_available=settings.has_postman_key,
     script_library=str(settings.script_library_path),
 )
 

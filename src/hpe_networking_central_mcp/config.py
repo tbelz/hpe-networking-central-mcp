@@ -7,11 +7,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-# Postman collection IDs (public identifiers, not secrets)
-POSTMAN_MRT_COLLECTION_ID = "32717089-365d5e19-1be4-4850-a0f1-4b7916d8cd3b"
-POSTMAN_CONFIG_COLLECTION_ID = "32717089-1d8b9f9e-2137-4a7d-b735-1b3c06f87e70"
-
-
 @dataclass(frozen=True)
 class Settings:
     """Server settings loaded from environment variables."""
@@ -25,9 +20,6 @@ class Settings:
     glp_client_id: str = ""
     glp_client_secret: str = ""
 
-    # Postman API key for dynamic API discovery
-    postman_api_key: str = ""
-
     # Paths
     script_library_path: Path = field(default_factory=lambda: Path("/scripts/library"))
     docs_path: Path = field(default_factory=lambda: Path("/docs"))
@@ -35,13 +27,13 @@ class Settings:
     # Inventory cache TTL in seconds
     inventory_cache_ttl: int = 300
 
+    # OpenAPI spec cache
+    spec_cache_dir: Path = field(default_factory=lambda: Path("/data/oas_cache"))
+    spec_cache_ttl: int = 86400  # 24 hours
+
     @property
     def has_credentials(self) -> bool:
         return bool(self.central_base_url and self.central_client_id and self.central_client_secret)
-
-    @property
-    def has_postman_key(self) -> bool:
-        return bool(self.postman_api_key)
 
     @property
     def effective_glp_client_id(self) -> str:
@@ -60,8 +52,9 @@ def load_settings() -> Settings:
         central_client_secret=os.environ.get("CENTRAL_CLIENT_SECRET", "").strip(),
         glp_client_id=os.environ.get("GLP_CLIENT_ID", "").strip(),
         glp_client_secret=os.environ.get("GLP_CLIENT_SECRET", "").strip(),
-        postman_api_key=os.environ.get("POSTMAN_API_KEY", "").strip(),
         script_library_path=Path(os.environ.get("SCRIPT_LIBRARY_PATH", "/scripts/library")),
         docs_path=Path(os.environ.get("DOCS_PATH", "/docs")),
         inventory_cache_ttl=int(os.environ.get("INVENTORY_CACHE_TTL", "300")),
+        spec_cache_dir=Path(os.environ.get("SPEC_CACHE_DIR", "/data/oas_cache")),
+        spec_cache_ttl=int(os.environ.get("SPEC_CACHE_TTL", "86400")),
     )

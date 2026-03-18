@@ -81,7 +81,8 @@ OAuth2 client credentials flow via https://sso.common.cloud.hpe.com/as/token.oau
 
 ## API Discovery
 Read the api://central/catalog resource for a complete list of all available endpoints.
-Use get_api_details("keyword") to search for specific endpoints.
+Use search_api_catalog("keyword") to find specific endpoints, then
+get_api_endpoint_detail(method, path) for full parameter and schema details.
 
 ## Environment Variables
 Scripts have these env vars available:
@@ -122,6 +123,17 @@ for d in devices.get("items", []):
     print(f"{d['serialNumber']} - {d['deviceType']} - {d['status']}")
 ```
 
+## List All Devices (Paginated)
+```python
+from central_helpers import api
+
+# Fetches ALL devices across all pages automatically
+all_devices = api.paginate("network-monitoring/v1alpha1/devices")
+print(f"Total: {len(all_devices)} devices")
+for d in all_devices:
+    print(f"{d['serialNumber']} - {d['deviceType']} - {d['status']}")
+```
+
 ## Configuration Profiles (CRUD)
 ```python
 from central_helpers import api
@@ -136,6 +148,19 @@ api.post("network-config/v1alpha1/dhcp-pool",
 
 # Get a specific pool
 pool = api.get("network-config/v1alpha1/dhcp-pool/office-pool")
+```
+
+## Error Handling
+```python
+from central_helpers import api, NotFoundError, CentralAPIError
+import sys
+
+try:
+    device = api.get("network-monitoring/v1alpha1/devices/SERIAL123")
+except NotFoundError:
+    print("Device not found", file=sys.stderr)
+except CentralAPIError as e:
+    print(f"Error [{e.status_code}]: {e.message}", file=sys.stderr)
 ```
 
 ## Site Management
@@ -222,8 +247,9 @@ All methods return the parsed JSON response as a dict. They raise
 ## API Discovery
 Before writing a script, use these tools to find the right endpoints:
 1. Read api://central/catalog for a complete endpoint overview
-2. Use get_api_details("keyword") to find specific endpoints and their parameters
-3. Use call_central_api() to test individual calls before scripting
+2. Use search_api_catalog("keyword") to find specific endpoints
+3. Use get_api_endpoint_detail(method, path) for full parameter and schema details
+4. Use call_central_api() to test individual calls before scripting
 
 ## Common API Patterns
 - Monitoring: GET network-monitoring/v1alpha1/devices (list), /devices?filter=... (filtered)

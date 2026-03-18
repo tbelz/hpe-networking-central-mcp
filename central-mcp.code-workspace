@@ -1,12 +1,6 @@
 {
 	"folders": [
 		{
-			"path": "../aruba-central-ansible-collection"
-		},
-		{
-			"path": "../pycentral"
-		},
-		{
 			"path": "."
 		}
 	],

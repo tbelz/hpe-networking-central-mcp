@@ -10,7 +10,7 @@ import structlog
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
-from ..central_client import CentralClient
+from ..central_client import CentralClient, CentralAPIError
 from ..config import Settings
 
 logger = structlog.get_logger("tools.inventory")
@@ -154,6 +154,8 @@ def register_inventory_tools(mcp, settings: Settings, client: CentralClient):
 
         try:
             devices = _get_cached_inventory(client, settings, force_refresh=force_refresh)
+        except CentralAPIError as e:
+            raise ToolError(f"Inventory fetch failed [{e.status_code}]: {e.message}")
         except Exception as e:
             raise ToolError(str(e))
 
@@ -187,6 +189,8 @@ def register_inventory_tools(mcp, settings: Settings, client: CentralClient):
 
         try:
             devices = _get_cached_inventory(client, settings)
+        except CentralAPIError as e:
+            raise ToolError(f"Inventory fetch failed [{e.status_code}]: {e.message}")
         except Exception as e:
             raise ToolError(str(e))
 
