@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 import structlog
+from mcp.types import ToolAnnotations
 
 from ..config import POSTMAN_CONFIG_COLLECTION_ID, POSTMAN_MRT_COLLECTION_ID, Settings
 
@@ -210,7 +211,9 @@ def register_catalog_tools(mcp, settings: Settings):
         """
         return get_catalog_overview()
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True),
+    )
     def get_api_details(search: str) -> str:
         """Search the API catalog for endpoint details.
 
@@ -268,7 +271,9 @@ def register_catalog_tools(mcp, settings: Settings):
 
         return json.dumps({"match_count": len(matches), "endpoints": matches}, indent=2)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True),
+    )
     def refresh_api_catalog() -> str:
         """Re-fetch Postman collections and rebuild the API catalog.
 

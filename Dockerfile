@@ -30,8 +30,8 @@ COPY --from=builder /opt/venv /opt/venv
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy seed scripts into default library
-COPY seeds/ /scripts/library/
+# Seed scripts and central_helpers.py are copied at runtime by server.py
+# (the Docker volume mount overrides this directory anyway)
 
 # Create required directories
 RUN mkdir -p /scripts/library

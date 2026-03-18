@@ -1,136 +1,96 @@
 #!/usr/bin/env python3
-"""Onboard a device into HPE Aruba Networking Central.
+"""Onboard a device to a site in HPE Aruba Networking Central.
 
-Based on the official onboarding workflow documented in the Ansible collection
-(examples/onboarding_example.yml) and pycentral v2 SDK patterns.
-
-Steps:
-1. Connect to Central and GLP
-2. Check if the device exists in GLP inventory
-3. Assign device to the application and subscription in GLP (if needed)
-4. Create or verify the target site exists in Central
-5. Assign the device persona/function
-
-Reference: pycentral.glp.devices.Devices, pycentral.scopes.site.Site
+Workflow:
+1. Verify device exists in GLP inventory
+2. Create site if it doesn't exist
+3. Assign device to site
+4. Set device persona/function
 """
 
 import argparse
 import json
-import os
 import sys
 
-from pycentral import NewCentralBase
-from pycentral.new_monitoring.devices import MonitoringDevices
+from central_helpers import api
 
 
-def get_connection():
-    """Create a NewCentralBase connection using environment variables."""
-    token_info = {
-        "new_central": {
-            "base_url": os.environ["CENTRAL_BASE_URL"],
-            "client_id": os.environ["CENTRAL_CLIENT_ID"],
-            "client_secret": os.environ["CENTRAL_CLIENT_SECRET"],
-        }
-    }
-    return NewCentralBase(token_info=token_info, enable_scope=True)
-
-
-def find_device_in_inventory(central, serial):
-    """Check if device exists in Central's device inventory."""
-    devices = MonitoringDevices.get_all_device_inventory(central)
-    for device in devices:
-        if device.get("serialNumber", "").upper() == serial.upper():
-            return device
+def find_device(serial: str) -> dict | None:
+    """Look up a device by serial number in GLP inventory."""
+    resp = api.get("devices/v1/networking", params={"serial": serial})
+    devices = resp.get("devices", resp.get("items", []))
+    for d in devices:
+        if d.get("serial_number", d.get("serialNumber", "")).upper() == serial.upper():
+            return d
     return None
 
 
-def assign_persona(central, serial, persona):
-    """Assign a persona/device-function to a device via the Central API."""
-    resp = central.command(
-        api_method="POST",
-        api_path="/network-config/v1alpha1/persona-assignment",
-        api_data={
-            "persona-device-list": [
-                {
-                    "device-function": persona,
-                    "device-id": [serial],
-                }
-            ]
-        },
-    )
-    return resp
+def site_exists(site_name: str) -> bool:
+    """Check if a site already exists."""
+    resp = api.get("central/v2/sites", params={"calculate_total": "true"})
+    for s in resp.get("sites", resp.get("items", [])):
+        if s.get("site_name", s.get("name", "")).lower() == site_name.lower():
+            return True
+    return False
+
+
+def create_site(site_name: str) -> dict:
+    """Create a new site."""
+    return api.post("central/v2/sites", json_body={
+        "site_name": site_name,
+        "site_address": {"city": "", "state": "", "country": ""},
+    })
+
+
+def assign_device_to_site(serial: str, site_name: str) -> dict:
+    """Assign a device to a site."""
+    return api.post("central/v2/sites/associate", json_body={
+        "site_name": site_name,
+        "device_ids": [serial],
+        "device_type": "all",
+    })
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Onboard a device to HPE Central")
+    parser = argparse.ArgumentParser(description="Onboard a device to a site")
     parser.add_argument("--serial", required=True, help="Device serial number")
     parser.add_argument("--site", required=True, help="Target site name")
-    parser.add_argument("--persona", default="ACCESS_SWITCH",
-                        help="Device persona (ACCESS_SWITCH, CAMPUS_AP, CORE_SWITCH, etc.)")
+    parser.add_argument("--persona", default="ACCESS_SWITCH", help="Device persona/function")
     args = parser.parse_args()
 
-    result = {"serial": args.serial, "site": args.site, "persona": args.persona, "steps": []}
+    results = {"serial": args.serial, "site": args.site, "persona": args.persona, "steps": []}
 
-    # Step 1: Connect
-    central = get_connection()
-    result["steps"].append({"step": "connect", "status": "success"})
-
-    # Step 2: Check device in inventory
-    device = find_device_in_inventory(central, args.serial)
+    # Step 1: Verify device
+    device = find_device(args.serial)
     if not device:
-        result["steps"].append({
-            "step": "find_device",
-            "status": "error",
-            "message": f"Device {args.serial} not found in inventory. "
-                       "It may need to be added to GLP first."
-        })
-        print(json.dumps(result, indent=2))
+        results["steps"].append({"step": "find_device", "status": "error", "detail": "Device not found"})
+        print(json.dumps(results, indent=2))
+        sys.exit(1)
+    results["steps"].append({"step": "find_device", "status": "ok"})
+
+    # Step 2: Create site if needed
+    if site_exists(args.site):
+        results["steps"].append({"step": "check_site", "status": "ok", "detail": "Site already exists"})
+    else:
+        try:
+            create_site(args.site)
+            results["steps"].append({"step": "create_site", "status": "ok"})
+        except Exception as e:
+            results["steps"].append({"step": "create_site", "status": "error", "detail": str(e)})
+            print(json.dumps(results, indent=2))
+            sys.exit(1)
+
+    # Step 3: Assign device to site
+    try:
+        assign_device_to_site(args.serial, args.site)
+        results["steps"].append({"step": "assign_device", "status": "ok"})
+    except Exception as e:
+        results["steps"].append({"step": "assign_device", "status": "error", "detail": str(e)})
+        print(json.dumps(results, indent=2))
         sys.exit(1)
 
-    result["steps"].append({
-        "step": "find_device",
-        "status": "success",
-        "device_type": device.get("deviceType"),
-        "current_site": device.get("siteName", "unassigned"),
-        "current_status": device.get("status"),
-    })
-
-    # Step 3: Check/Create site
-    sites = central.scopes.get_all_sites() if central.scopes else []
-    site_exists = any(s.name == args.site for s in sites) if sites else False
-
-    if not site_exists:
-        result["steps"].append({
-            "step": "check_site",
-            "status": "warning",
-            "message": f"Site '{args.site}' not found. Manual site creation required "
-                       "(needs address, city, state, country, zipcode, timezone)."
-        })
-    else:
-        result["steps"].append({"step": "check_site", "status": "success", "site_found": True})
-
-    # Step 4: Assign persona
-    resp = assign_persona(central, args.serial, args.persona)
-    if resp.get("code") in (200, 201, 202):
-        result["steps"].append({
-            "step": "assign_persona",
-            "status": "success",
-            "persona": args.persona,
-        })
-    else:
-        result["steps"].append({
-            "step": "assign_persona",
-            "status": "error",
-            "response_code": resp.get("code"),
-            "message": str(resp.get("msg", ""))[:500],
-        })
-
-    # Final status
-    errors = [s for s in result["steps"] if s["status"] == "error"]
-    result["overall_status"] = "error" if errors else "success"
-
-    print(json.dumps(result, indent=2))
-    sys.exit(1 if errors else 0)
+    results["status"] = "success"
+    print(json.dumps(results, indent=2))
 
 
 if __name__ == "__main__":

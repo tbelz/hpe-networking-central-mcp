@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
+from mcp.types import ToolAnnotations
 
 from ..config import Settings
 
@@ -45,7 +46,9 @@ def _write_meta(script_path: Path, meta: dict[str, Any]) -> None:
 def register_script_tools(mcp, settings: Settings):
     """Register script library management tools with the MCP server."""
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True),
+    )
     def list_scripts(tag: str | None = None) -> str:
         """List all scripts in the automation library.
 
@@ -80,7 +83,9 @@ def register_script_tools(mcp, settings: Settings):
 
         return json.dumps({"scripts": scripts, "total": len(scripts)}, indent=2)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True),
+    )
     def save_script(
         filename: str,
         content: str,
@@ -90,10 +95,10 @@ def register_script_tools(mcp, settings: Settings):
     ) -> str:
         """Save a Python script to the automation library for reuse.
 
-        The script should use the pycentral v2 SDK. Credentials are available as
-        environment variables (CENTRAL_BASE_URL, CENTRAL_CLIENT_ID, CENTRAL_CLIENT_SECRET)
-        and should be read via os.environ inside the script. Parameters should be accepted
-        via argparse CLI arguments.
+        Scripts should use ``from central_helpers import api`` for all API calls.
+        The central_helpers module is pre-installed in the script library and handles
+        OAuth2 authentication automatically. Parameters should be accepted via argparse
+        CLI arguments. Read docs://script-writing-guide for the full template.
 
         Args:
             filename: Script filename (e.g., "onboard_device.py"). Must end in .py.

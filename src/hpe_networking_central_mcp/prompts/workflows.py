@@ -21,35 +21,24 @@ def register_prompts(mcp):
 Follow this workflow:
 
 1. **Refresh Inventory**: Call refresh_inventory(detail_level="summary") to get the current network state.
-   - Verify the site "{site_name}" exists. If not, you will need to create it.
-   - Locate device {serial_number}. Check if it is in "unassigned" status or already assigned.
+   - Verify the site "{site_name}" exists. If not, the script will create it.
+   - Locate device {serial_number}. Check if it is already assigned to the target site.
    - If the device is already at the target site, report that and stop.
 
-2. **Discover APIs**: Use get_api_details("site") and get_api_details("device assign") to find the
-   relevant API endpoints for site creation and device assignment.
+2. **Check Existing Scripts**: Call list_scripts(tag="onboarding") to see if an onboarding script exists.
 
-3. **Check Existing Scripts**: Call list_scripts(tag="onboarding") to see if an onboarding script exists.
+3. **Execute the Script**:
+   - If an onboarding script exists (e.g., onboard_device.py), use it directly.
+   - If not, write a new script using `from central_helpers import api` for all API calls.
+     Save it via save_script() with tag "onboarding".
+   - Call execute_script() with the appropriate parameters:
+     - serial: {serial_number}
+     - site: {site_name}
+     - persona: {persona}
 
-4. **Create or Reuse Script**:
-   - If an onboarding script exists, review its parameters and reuse it.
-   - If not, write a new Python script using httpx that:
-     a. Authenticates via OAuth2 (client credentials flow to sso.common.cloud.hpe.com)
-     b. Creates the site if needed
-     c. Assigns the device to the site
-     d. Sets the device persona/function to "{persona}"
-     e. Accepts --serial, --site, and --persona as CLI arguments
-     f. Outputs results as JSON
-   - Save it via save_script().
+4. **Verify**: Call refresh_inventory(force_refresh=true) and confirm the device is now assigned to "{site_name}".
 
-5. **Execute**: Call execute_script() with the appropriate parameters:
-   - serial: {serial_number}
-   - site: {site_name}
-   - persona: {persona}
-
-6. **Verify**: Call refresh_inventory(force_refresh=true) and confirm the device is now assigned to "{site_name}".
-
-Read the docs://pycentral/authentication and docs://script-writing-guide resources for reference.
-Read api://central/catalog for the full list of available API endpoints.
+Read docs://script-writing-guide for the script template.
 """
 
     @mcp.prompt()

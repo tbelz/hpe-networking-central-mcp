@@ -7,6 +7,8 @@ import time
 from typing import Any, Literal
 
 import structlog
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import ToolAnnotations
 
 from ..central_client import CentralClient
 from ..config import Settings
@@ -25,35 +27,22 @@ _DEVICES_PATH = "network-monitoring/v1alpha1/devices"
 _PAGE_LIMIT = 100
 
 
-def _get_client(settings: Settings) -> CentralClient:
-    """Create a CentralClient from settings."""
-    return CentralClient(
-        base_url=settings.central_base_url,
-        client_id=settings.central_client_id,
-        client_secret=settings.central_client_secret,
-    )
-
-
-def _fetch_all_devices(settings: Settings) -> list[dict[str, Any]]:
+def _fetch_all_devices(client: CentralClient) -> list[dict[str, Any]]:
     """Fetch all monitored devices with automatic pagination."""
-    client = _get_client(settings)
-    try:
-        devices: list[dict[str, Any]] = []
-        page = 1
-        while True:
-            resp = client.get(_DEVICES_PATH, params={"limit": str(_PAGE_LIMIT), "next": str(page)})
-            items = resp.get("items", [])
-            devices.extend(items)
-            total = resp.get("total", 0)
-            if len(devices) >= total or not items:
-                break
-            page += 1
-        return devices
-    finally:
-        client.close()
+    devices: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        resp = client.get(_DEVICES_PATH, params={"limit": str(_PAGE_LIMIT), "next": str(page)})
+        items = resp.get("items", [])
+        devices.extend(items)
+        total = resp.get("total", 0)
+        if len(devices) >= total or not items:
+            break
+        page += 1
+    return devices
 
 
-def _get_cached_inventory(settings: Settings, force_refresh: bool = False) -> list[dict[str, Any]]:
+def _get_cached_inventory(client: CentralClient, settings: Settings, force_refresh: bool = False) -> list[dict[str, Any]]:
     """Return inventory data, using cache if valid."""
     global _inventory_cache, _cache_timestamp
 
@@ -63,7 +52,7 @@ def _get_cached_inventory(settings: Settings, force_refresh: bool = False) -> li
         return _inventory_cache
 
     logger.info("inventory_refresh_start")
-    data = _fetch_all_devices(settings)
+    data = _fetch_all_devices(client)
     _inventory_cache = data
     _cache_timestamp = now
     logger.info("inventory_refresh_done", device_count=len(data))
@@ -129,10 +118,12 @@ def _summarize_inventory(devices: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def register_inventory_tools(mcp, settings: Settings):
+def register_inventory_tools(mcp, settings: Settings, client: CentralClient):
     """Register inventory-related tools with the MCP server."""
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=True),
+    )
     def refresh_inventory(
         detail_level: Literal["summary", "full"] = "summary",
         force_refresh: bool = False,
@@ -156,15 +147,15 @@ def register_inventory_tools(mcp, settings: Settings):
             JSON string with inventory data - either summary metrics or full device list.
         """
         if not settings.has_credentials:
-            return json.dumps({
-                "error": "Central credentials not configured. "
+            raise ToolError(
+                "Central credentials not configured. "
                 "Set CENTRAL_BASE_URL, CENTRAL_CLIENT_ID, CENTRAL_CLIENT_SECRET."
-            })
+            )
 
         try:
-            devices = _get_cached_inventory(settings, force_refresh=force_refresh)
+            devices = _get_cached_inventory(client, settings, force_refresh=force_refresh)
         except Exception as e:
-            return json.dumps({"error": str(e)})
+            raise ToolError(str(e))
 
         filtered = _apply_filters(devices, filter_site, filter_type, filter_status)
 
@@ -174,7 +165,9 @@ def register_inventory_tools(mcp, settings: Settings):
         else:
             return json.dumps(_summarize_inventory(filtered), indent=2)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=True),
+    )
     def get_device_details(identifier: str) -> str:
         """Get detailed information about a specific network device.
 
@@ -190,12 +183,12 @@ def register_inventory_tools(mcp, settings: Settings):
             JSON string with device details, a candidate list, or an error.
         """
         if not settings.has_credentials:
-            return json.dumps({"error": "Central credentials not configured."})
+            raise ToolError("Central credentials not configured.")
 
         try:
-            devices = _get_cached_inventory(settings)
+            devices = _get_cached_inventory(client, settings)
         except Exception as e:
-            return json.dumps({"error": str(e)})
+            raise ToolError(str(e))
 
         search = identifier.strip().lower()
         matches: list[dict[str, Any]] = []

@@ -48,19 +48,24 @@ class CentralClient:
         logger.info("token_refresh_done", expires_in=expires_in)
 
     def get(self, path: str, params: dict[str, str] | None = None) -> dict:
-        """Make an authenticated GET request to Central API.
-
-        Args:
-            path: API path (e.g., "network-monitoring/v1alpha1/devices").
-            params: Optional query parameters.
-
-        Returns:
-            Parsed JSON response body.
-
-        Raises:
-            httpx.HTTPStatusError: On non-2xx responses (after one token-refresh retry on 401).
-        """
+        """Make an authenticated GET request to Central API."""
         return self._request("GET", path, params=params)
+
+    def post(self, path: str, json_body: dict | None = None, params: dict[str, str] | None = None) -> dict:
+        """Make an authenticated POST request to Central API."""
+        return self._request("POST", path, params=params, json_body=json_body)
+
+    def patch(self, path: str, json_body: dict | None = None, params: dict[str, str] | None = None) -> dict:
+        """Make an authenticated PATCH request to Central API."""
+        return self._request("PATCH", path, params=params, json_body=json_body)
+
+    def put(self, path: str, json_body: dict | None = None, params: dict[str, str] | None = None) -> dict:
+        """Make an authenticated PUT request to Central API."""
+        return self._request("PUT", path, params=params, json_body=json_body)
+
+    def delete(self, path: str, params: dict[str, str] | None = None) -> dict:
+        """Make an authenticated DELETE request to Central API."""
+        return self._request("DELETE", path, params=params)
 
     def _request(
         self,

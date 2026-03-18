@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import shutil
 import sys
 import threading
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
@@ -37,14 +39,19 @@ direct API reads and reusable Python scripts.
 3. **Inventory**: Use refresh_inventory() to get a structured overview of all devices, sites,
    and their status. Use get_device_details() for individual device lookup.
 
-4. **Writes and complex operations**: Write Python scripts using httpx + OAuth2, save with
-   save_script(), and execute with execute_script(). Scripts handle POST/PATCH/DELETE operations
-   and multi-step workflows.
+4. **Single writes**: Use call_central_api(path, method="POST", body={...}) for simple
+   write operations (create a VLAN, delete a profile, update a setting).
 
-5. **Reuse**: Always check list_scripts() before writing a new script.
+5. **Multi-step workflows**: For operations that involve multiple API calls (e.g., onboard
+   a device: check inventory → create site → assign device → set persona), ALWAYS use a
+   script. Check list_scripts() first for an existing script, then write a new one with
+   save_script() if needed. Execute with execute_script(). NEVER chain multiple
+   call_central_api() calls for multi-step workflows.
+
+6. **Reuse**: Always check list_scripts() before writing a new script.
 
 Read docs://script-writing-guide for the script template and authentication pattern.
-You decide freely whether to use call_central_api() or write a script based on the task.""",
+Scripts use `from central_helpers import api` — no OAuth2 boilerplate needed.""",
 )
 
 settings = load_settings()
@@ -59,13 +66,12 @@ if not settings.has_credentials:
     sys.exit(1)
 
 try:
-    _client = CentralClient(
+    client = CentralClient(
         settings.central_base_url,
         settings.central_client_id,
         settings.central_client_secret,
     )
-    _client.validate()
-    _client.close()
+    client.validate()
     logger.info("credentials_validated")
 except Exception as exc:
     logger.error(
@@ -87,15 +93,21 @@ if settings.has_postman_key:
 else:
     logger.info("startup_catalog_skip", reason="no_postman_api_key")
 
-# Ensure script library exists
+# Ensure script library exists and central_helpers.py is available
 settings.script_library_path.mkdir(parents=True, exist_ok=True)
 
+_helpers_src = Path(__file__).parent / "central_helpers.py"
+_helpers_dst = settings.script_library_path / "central_helpers.py"
+if _helpers_src.exists():
+    shutil.copy2(_helpers_src, _helpers_dst)
+    logger.info("central_helpers_copied", dest=str(_helpers_dst))
+
 # Register all components
-register_inventory_tools(mcp, settings)
+register_inventory_tools(mcp, settings, client)
 register_script_tools(mcp, settings)
 register_execution_tools(mcp, settings)
 register_catalog_tools(mcp, settings)
-register_api_call_tools(mcp, settings)
+register_api_call_tools(mcp, settings, client)
 register_resources(mcp, settings)
 register_prompts(mcp)
 

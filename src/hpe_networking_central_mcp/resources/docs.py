@@ -93,39 +93,20 @@ AUTH_GUIDE = """# Authentication Guide
 
 ## OAuth2 Client Credentials Flow
 
-Central uses standard OAuth2 with client credentials.
+Central uses standard OAuth2 with client credentials. Token management is handled
+automatically by `central_helpers` — you do NOT need to manage tokens in scripts.
 
-### Using httpx (recommended for MCP scripts)
+### In scripts (recommended)
 ```python
-import os
-import httpx
+from central_helpers import api
 
-TOKEN_URL = "https://sso.common.cloud.hpe.com/as/token.oauth2"
-
-def get_token():
-    resp = httpx.post(
-        TOKEN_URL,
-        data={"grant_type": "client_credentials"},
-        auth=(os.environ["CENTRAL_CLIENT_ID"], os.environ["CENTRAL_CLIENT_SECRET"]),
-    )
-    resp.raise_for_status()
-    return resp.json()["access_token"]
-
-def api_get(path, params=None):
-    token = get_token()
-    base = os.environ["CENTRAL_BASE_URL"]
-    resp = httpx.get(
-        f"{base}/{path}",
-        params=params,
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    resp.raise_for_status()
-    return resp.json()
+# Just call the API — auth is handled for you
+devices = api.get("network-monitoring/v1alpha1/devices", params={"limit": "100"})
 ```
 
 ### Token Lifecycle
 - Tokens expire after ~7200 seconds (2 hours)
-- Re-authenticate on 401 responses
+- `central_helpers` handles token refresh and 401 retry transparently
 - One token per client_id is sufficient for all API calls
 """
 
@@ -133,46 +114,36 @@ QUICKSTART = """# Quickstart
 
 ## List All Devices
 ```python
-import json, os, httpx
+from central_helpers import api
+import json
 
-TOKEN_URL = "https://sso.common.cloud.hpe.com/as/token.oauth2"
-BASE = os.environ["CENTRAL_BASE_URL"]
-
-# Get token
-token_resp = httpx.post(TOKEN_URL, data={"grant_type": "client_credentials"},
-    auth=(os.environ["CENTRAL_CLIENT_ID"], os.environ["CENTRAL_CLIENT_SECRET"]))
-token = token_resp.json()["access_token"]
-headers = {"Authorization": f"Bearer {token}"}
-
-# List devices
-devices = httpx.get(f"{BASE}/network-monitoring/v1alpha1/devices",
-    params={"limit": "100"}, headers=headers).json()
+devices = api.get("network-monitoring/v1alpha1/devices", params={"limit": "100"})
 for d in devices.get("items", []):
     print(f"{d['serialNumber']} - {d['deviceType']} - {d['status']}")
 ```
 
 ## Configuration Profiles (CRUD)
 ```python
+from central_helpers import api
+
 # List DHCP pools
-pools = httpx.get(f"{BASE}/network-config/v1alpha1/dhcp-pool",
-    headers=headers).json()
+pools = api.get("network-config/v1alpha1/dhcp-pool")
 
 # Create a DHCP pool
-httpx.post(f"{BASE}/network-config/v1alpha1/dhcp-pool",
-    headers=headers,
-    json={"name": "office-pool", "network": "10.0.1.0/24",
-          "range_start": "10.0.1.100", "range_end": "10.0.1.200"})
+api.post("network-config/v1alpha1/dhcp-pool",
+    json_body={"name": "office-pool", "network": "10.0.1.0/24",
+               "range_start": "10.0.1.100", "range_end": "10.0.1.200"})
 
 # Get a specific pool
-pool = httpx.get(f"{BASE}/network-config/v1alpha1/dhcp-pool/office-pool",
-    headers=headers).json()
+pool = api.get("network-config/v1alpha1/dhcp-pool/office-pool")
 ```
 
 ## Site Management
 ```python
+from central_helpers import api
+
 # List sites with health info
-sites = httpx.get(f"{BASE}/network-monitoring/v1alpha1/sites",
-    headers=headers).json()
+sites = api.get("network-monitoring/v1alpha1/sites")
 ```
 """
 
@@ -181,23 +152,27 @@ SCRIPT_WRITING_GUIDE = """# Script Writing Guide for HPE Central MCP
 ## When to Write a Script vs Use call_central_api()
 
 **Use call_central_api()** for:
-- Simple read operations (GET requests)
+- Single API calls: reads OR writes (GET, POST, PATCH, DELETE)
 - Quick lookups: device status, site health, config profiles
-- Monitoring queries: list devices, check AP stats
+- One-off writes: create a VLAN, delete a profile
 
 **Write a script** for:
-- Any write operation (POST, PATCH, DELETE)
-- Multi-step workflows (create site + assign devices + set persona)
-- Complex logic with conditionals or loops
-- Operations that need error handling and rollback
+- Multi-step workflows (create site → assign devices → set persona)
+- Complex logic with conditionals, loops, or error handling
+- Operations that need rollback on failure
+- Batch operations across many devices or sites
 
-## Script Structure
-Scripts are Python files. They should:
-1. Use `argparse` for CLI parameters
-2. Read credentials from environment variables
-3. Use `httpx` for HTTP requests with OAuth2 Bearer tokens
-4. Print results as JSON to stdout
-5. Use proper exit codes (0=success, 1=error)
+## How Scripts Work
+
+Scripts are Python files executed by the MCP server. The server injects
+credentials as environment variables and copies `central_helpers.py` into the
+script library. Scripts import the pre-authenticated API helper and make calls
+without any OAuth2 boilerplate.
+
+**Scripts should NEVER:**
+- Manage OAuth2 tokens directly
+- Import httpx or requests for Central API calls
+- Hardcode credentials or base URLs
 
 ## Template
 ```python
@@ -206,36 +181,9 @@ Scripts are Python files. They should:
 
 import argparse
 import json
-import os
 import sys
 
-import httpx
-
-TOKEN_URL = "https://sso.common.cloud.hpe.com/as/token.oauth2"
-
-
-def get_token():
-    resp = httpx.post(
-        TOKEN_URL,
-        data={"grant_type": "client_credentials"},
-        auth=(os.environ["CENTRAL_CLIENT_ID"], os.environ["CENTRAL_CLIENT_SECRET"]),
-    )
-    resp.raise_for_status()
-    return resp.json()["access_token"]
-
-
-def api_request(method, path, params=None, json_body=None):
-    token = get_token()
-    base = os.environ["CENTRAL_BASE_URL"]
-    resp = httpx.request(
-        method,
-        f"{base}/{path}",
-        params=params,
-        json=json_body,
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-    )
-    resp.raise_for_status()
-    return resp.json()
+from central_helpers import api
 
 
 def main():
@@ -243,8 +191,14 @@ def main():
     parser.add_argument("--param1", required=True, help="Description")
     args = parser.parse_args()
 
-    # Use api_request() for all API calls
-    result = api_request("GET", "network-monitoring/v1alpha1/devices", params={"limit": "10"})
+    # Make API calls — auth is handled automatically
+    result = api.get("network-monitoring/v1alpha1/devices", params={"limit": "10"})
+
+    # Write operations
+    # api.post("network-config/v1alpha1/dhcp-pool", json_body={...})
+    # api.patch("network-config/v1alpha1/dhcp-pool/pool1", json_body={...})
+    # api.delete("network-config/v1alpha1/dhcp-pool/pool1")
+
     print(json.dumps({"status": "success", "result": result}))
 
 
@@ -252,11 +206,24 @@ if __name__ == "__main__":
     main()
 ```
 
+## API Helper Reference
+
+`from central_helpers import api` gives you a pre-authenticated client with:
+
+- `api.get(path, params=None)` → dict
+- `api.post(path, json_body=None, params=None)` → dict
+- `api.patch(path, json_body=None, params=None)` → dict
+- `api.put(path, json_body=None, params=None)` → dict
+- `api.delete(path, params=None)` → dict
+
+All methods return the parsed JSON response as a dict. They raise
+`httpx.HTTPStatusError` on non-2xx responses (with automatic 401 retry).
+
 ## API Discovery
 Before writing a script, use these tools to find the right endpoints:
 1. Read api://central/catalog for a complete endpoint overview
 2. Use get_api_details("keyword") to find specific endpoints and their parameters
-3. Use call_central_api() to test GET requests before scripting
+3. Use call_central_api() to test individual calls before scripting
 
 ## Common API Patterns
 - Monitoring: GET network-monitoring/v1alpha1/devices (list), /devices?filter=... (filtered)

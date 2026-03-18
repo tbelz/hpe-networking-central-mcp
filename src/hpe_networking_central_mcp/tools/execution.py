@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
+from mcp.types import ToolAnnotations
 
 from ..config import Settings
 
@@ -35,7 +36,9 @@ def _build_env(settings: Settings) -> dict[str, str]:
 def register_execution_tools(mcp, settings: Settings):
     """Register script execution tools with the MCP server."""
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, openWorldHint=True),
+    )
     def execute_script(filename: str, parameters: dict[str, str] | None = None) -> str:
         """Execute a Python script from the automation library.
 

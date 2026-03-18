@@ -1,61 +1,75 @@
-"""Direct API call tool — GET-only access to Central APIs."""
+"""Direct API call tool — authenticated access to Central APIs."""
 
 from __future__ import annotations
 
 import json
+from typing import Literal
 
 import structlog
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import ToolAnnotations
 
 from ..central_client import CentralClient
 from ..config import Settings
 
 logger = structlog.get_logger("tools.api_call")
 
+_WRITE_METHODS = {"POST", "PATCH", "PUT", "DELETE"}
 
-def register_api_call_tools(mcp, settings: Settings):
+
+def register_api_call_tools(mcp, settings: Settings, client: CentralClient):
     """Register the direct API call tool with the MCP server."""
 
-    @mcp.tool()
-    def call_central_api(path: str, query_params: dict[str, str] | None = None) -> str:
-        """Make a read-only GET request to any Central API endpoint.
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+    )
+    def call_central_api(
+        path: str,
+        method: Literal["GET", "POST", "PATCH", "PUT", "DELETE"] = "GET",
+        query_params: dict[str, str] | None = None,
+        body: dict | None = None,
+    ) -> str:
+        """Make an authenticated request to any Central API endpoint.
 
         Use get_api_details() first to discover the correct path and parameters.
-        This tool only supports GET requests — for writes (POST, PATCH, DELETE),
-        write and execute a script instead.
+        For multi-step workflows (create site + assign devices + configure), write
+        a script instead of chaining multiple calls.
 
         Args:
             path: API path (e.g., "network-monitoring/v1alpha1/devices").
                   Do not include the base URL.
+            method: HTTP method. Defaults to GET.
             query_params: Optional query parameters as key-value pairs.
+            body: Optional JSON request body (for POST, PATCH, PUT).
 
         Returns:
-            JSON response from the Central API, or an error.
+            JSON response from the Central API.
         """
         if not settings.has_credentials:
-            return json.dumps({
-                "error": "Central credentials not configured. "
+            raise ToolError(
+                "Central credentials not configured. "
                 "Set CENTRAL_BASE_URL, CENTRAL_CLIENT_ID, CENTRAL_CLIENT_SECRET."
-            })
+            )
 
         # Basic path validation
         clean_path = path.strip().lstrip("/")
         if not clean_path:
-            return json.dumps({"error": "Path cannot be empty."})
+            raise ToolError("Path cannot be empty.")
         if ".." in clean_path:
-            return json.dumps({"error": "Path must not contain '..'."})
+            raise ToolError("Path must not contain '..'.")
 
-        client = CentralClient(
-            base_url=settings.central_base_url,
-            client_id=settings.central_client_id,
-            client_secret=settings.central_client_secret,
-        )
+        if body and method == "GET":
+            raise ToolError("Cannot send a request body with GET. Use POST, PATCH, or PUT.")
+
         try:
-            logger.info("api_call_start", path=clean_path, params=query_params)
-            result = client.get(clean_path, params=query_params)
-            logger.info("api_call_done", path=clean_path)
+            logger.info("api_call_start", method=method, path=clean_path, params=query_params)
+            result = client._request(method, clean_path, params=query_params, json_body=body)
+            logger.info("api_call_done", method=method, path=clean_path)
             return json.dumps(result, indent=2)
         except Exception as e:
-            logger.error("api_call_failed", path=clean_path, error=str(e))
-            return json.dumps({"error": f"API call failed: {e}"})
-        finally:
-            client.close()
+            logger.error("api_call_failed", method=method, path=clean_path, error=str(e))
+            raise ToolError(f"API call failed: {e}")
