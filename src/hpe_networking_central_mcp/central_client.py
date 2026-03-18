@@ -46,8 +46,13 @@ class NotFoundError(CentralAPIError):
     """404 resource not found."""
 
 
-class CentralClient:
-    """HTTP client for Central API with OAuth2 token lifecycle."""
+class BaseAPIClient:
+    """OAuth2-authenticated HTTP client base class.
+
+    Handles token acquisition via client-credentials grant, automatic
+    token refresh, 401 retry, 429 rate-limit retry, and structured
+    error parsing.
+    """
 
     _MAX_RATE_LIMIT_WAIT = 60  # seconds
 
@@ -180,6 +185,14 @@ class CentralClient:
     def close(self) -> None:
         """Close the underlying HTTP client."""
         self._http.close()
+
+
+class CentralClient(BaseAPIClient):
+    """HTTP client for HPE Aruba Networking Central API."""
+
+
+class GreenLakeClient(BaseAPIClient):
+    """HTTP client for HPE GreenLake Platform API."""
 
 
 # ── Module-level helpers ─────────────────────────────────────────────

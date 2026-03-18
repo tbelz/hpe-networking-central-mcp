@@ -9,12 +9,12 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from .central_client import CentralClient
+from .central_client import CentralClient, GreenLakeClient
 from .config import load_settings
 from .logging import setup_logging
 from .prompts.workflows import register_prompts
 from .resources.docs import register_resources
-from .tools.api_call import register_api_call_tools
+from .tools.api_call import register_api_call_tools, register_greenlake_api_call_tools
 from .tools.api_catalog import initialize_catalog, register_catalog_tools
 from .tools.execution import register_execution_tools
 from .tools.inventory import register_inventory_tools
@@ -56,10 +56,14 @@ direct API reads and reusable Python scripts.
 7. **Error handling**: Scripts should catch `CentralAPIError` (or subclasses like
    `NotFoundError`) for graceful error handling. Import them from `central_helpers`.
 
-8. **Reuse**: Always check list_scripts() before writing a new script.
+8. **GreenLake Platform**: Use call_greenlake_api(path, params) for HPE GreenLake APIs
+   (device onboarding, subscriptions, licenses, locations, service catalog). These hit
+   https://global.api.greenlake.hpe.com. In scripts, use `from central_helpers import glp`.
+
+9. **Reuse**: Always check list_scripts() before writing a new script.
 
 Read docs://script-writing-guide for the script template and authentication pattern.
-Scripts use `from central_helpers import api` — no OAuth2 boilerplate needed.""",
+Scripts use `from central_helpers import api, glp` — no OAuth2 boilerplate needed.""",
 )
 
 settings = load_settings()
@@ -98,6 +102,27 @@ def _bg_catalog_init():
 
 threading.Thread(target=_bg_catalog_init, daemon=True).start()
 
+# ── Optionally initialize GreenLake client ────────────────────────────
+glp_client: GreenLakeClient | None = None
+if settings.has_glp_credentials:
+    try:
+        glp_client = GreenLakeClient(
+            settings.glp_base_url,
+            settings.effective_glp_client_id,
+            settings.effective_glp_client_secret,
+        )
+        glp_client.validate()
+        logger.info("glp_credentials_validated")
+    except Exception as exc:
+        logger.warning(
+            "glp_validation_failed",
+            error=str(exc),
+            hint="GreenLake features will be unavailable. Central features still work.",
+        )
+        glp_client = None
+else:
+    logger.info("glp_credentials_not_configured", hint="GreenLake features disabled")
+
 # Ensure script library exists and central_helpers.py is available
 settings.script_library_path.mkdir(parents=True, exist_ok=True)
 
@@ -113,12 +138,14 @@ register_script_tools(mcp, settings)
 register_execution_tools(mcp, settings)
 register_catalog_tools(mcp, settings)
 register_api_call_tools(mcp, settings, client)
+register_greenlake_api_call_tools(mcp, settings, glp_client)
 register_resources(mcp, settings)
 register_prompts(mcp)
 
 logger.info(
     "server_ready",
     credentials_configured=settings.has_credentials,
+    glp_configured=glp_client is not None,
     script_library=str(settings.script_library_path),
 )
 

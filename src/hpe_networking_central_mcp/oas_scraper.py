@@ -271,3 +271,24 @@ def discover_and_scrape(
 
     logger.info("oas_scrape_complete", total_specs=len(all_specs))
     return all_specs
+
+
+# ----- SpecProvider wrapper ---------------------------------------------------
+
+
+class ReadMeSpecProvider:
+    """SpecProvider that scrapes OpenAPI specs from ReadMe.io-hosted docs.
+
+    Wraps :func:`discover_and_scrape` to conform to the
+    :class:`~hpe_networking_central_mcp.spec_provider.SpecProvider` protocol.
+    """
+
+    def __init__(self, sources: list[SpecSource] | None = None) -> None:
+        self._sources = sources
+
+    @property
+    def name(self) -> str:
+        return "Central"
+
+    def fetch_specs(self, cache_dir: Path, ttl: int) -> list[dict]:
+        return discover_and_scrape(sources=self._sources, cache_dir=cache_dir, ttl=ttl)

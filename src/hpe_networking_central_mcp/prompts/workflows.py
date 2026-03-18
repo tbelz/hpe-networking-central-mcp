@@ -11,37 +11,6 @@ def register_prompts(mcp):
     """Register workflow prompts with the MCP server."""
 
     @mcp.prompt()
-    def onboard_device(serial_number: str, site_name: str, persona: str = "ACCESS_SWITCH") -> str:
-        """Guide: onboard a network device to a site in HPE Aruba Networking Central.
-
-        Walks through: inventory check -> verify device -> discover APIs -> create/reuse script -> execute -> verify.
-        """
-        return f"""You are onboarding device {serial_number} to site "{site_name}" with persona "{persona}" in HPE Aruba Networking Central.
-
-Follow this workflow:
-
-1. **Refresh Inventory**: Call refresh_inventory(detail_level="summary") to get the current network state.
-   - Verify the site "{site_name}" exists. If not, the script will create it.
-   - Locate device {serial_number}. Check if it is already assigned to the target site.
-   - If the device is already at the target site, report that and stop.
-
-2. **Check Existing Scripts**: Call list_scripts(tag="onboarding") to see if an onboarding script exists.
-
-3. **Execute the Script**:
-   - If an onboarding script exists (e.g., onboard_device.py), use it directly.
-   - If not, write a new script using `from central_helpers import api` for all API calls.
-     Save it via save_script() with tag "onboarding".
-   - Call execute_script() with the appropriate parameters:
-     - serial: {serial_number}
-     - site: {site_name}
-     - persona: {persona}
-
-4. **Verify**: Call refresh_inventory(force_refresh=true) and confirm the device is now assigned to "{site_name}".
-
-Read docs://script-writing-guide for the script template.
-"""
-
-    @mcp.prompt()
     def analyze_inventory() -> str:
         """Guide: analyze the current network inventory and identify issues."""
         return """You are analyzing the HPE Aruba Networking Central inventory.

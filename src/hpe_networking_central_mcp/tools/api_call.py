@@ -1,4 +1,4 @@
-"""Direct API call tool — authenticated access to Central APIs."""
+"""Direct API call tools — authenticated access to Central and GreenLake APIs."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import structlog
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
-from ..central_client import CentralClient, CentralAPIError
+from ..central_client import BaseAPIClient, CentralAPIError, CentralClient, GreenLakeClient
 from ..config import Settings
 
 logger = structlog.get_logger("tools.api_call")
@@ -17,8 +17,38 @@ logger = structlog.get_logger("tools.api_call")
 _WRITE_METHODS = {"POST", "PATCH", "PUT", "DELETE"}
 
 
+def _make_api_call(
+    client: BaseAPIClient,
+    platform: str,
+    path: str,
+    method: str,
+    query_params: dict[str, str] | None,
+    body: dict | None,
+) -> str:
+    """Shared implementation for authenticated API calls."""
+    clean_path = path.strip().lstrip("/")
+    if not clean_path:
+        raise ToolError("Path cannot be empty.")
+    if ".." in clean_path:
+        raise ToolError("Path must not contain '..'.")
+    if body and method == "GET":
+        raise ToolError("Cannot send a request body with GET. Use POST, PATCH, or PUT.")
+
+    try:
+        logger.info("api_call_start", platform=platform, method=method, path=clean_path, params=query_params)
+        result = client._request(method, clean_path, params=query_params, json_body=body)
+        logger.info("api_call_done", platform=platform, method=method, path=clean_path)
+        return json.dumps(result, indent=2)
+    except CentralAPIError as e:
+        logger.error("api_call_failed", platform=platform, method=method, path=clean_path, status=e.status_code, error_code=e.error_code)
+        raise ToolError(f"API call failed [{e.status_code}]: {e.message}" + (f" (debugId: {e.debug_id})" if e.debug_id else ""))
+    except Exception as e:
+        logger.error("api_call_failed", platform=platform, method=method, path=clean_path, error=str(e))
+        raise ToolError(f"API call failed: {e}")
+
+
 def register_api_call_tools(mcp, settings: Settings, client: CentralClient):
-    """Register the direct API call tool with the MCP server."""
+    """Register the Central direct API call tool with the MCP server."""
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -35,7 +65,7 @@ def register_api_call_tools(mcp, settings: Settings, client: CentralClient):
     ) -> str:
         """Make an authenticated request to any Central API endpoint.
 
-        Use get_api_details() first to discover the correct path and parameters.
+        Use get_api_endpoint_detail() first to discover the correct path and parameters.
         For multi-step workflows (create site + assign devices + configure), write
         a script instead of chaining multiple calls.
 
@@ -55,24 +85,49 @@ def register_api_call_tools(mcp, settings: Settings, client: CentralClient):
                 "Set CENTRAL_BASE_URL, CENTRAL_CLIENT_ID, CENTRAL_CLIENT_SECRET."
             )
 
-        # Basic path validation
-        clean_path = path.strip().lstrip("/")
-        if not clean_path:
-            raise ToolError("Path cannot be empty.")
-        if ".." in clean_path:
-            raise ToolError("Path must not contain '..'.")
+        return _make_api_call(client, "central", path, method, query_params, body)
 
-        if body and method == "GET":
-            raise ToolError("Cannot send a request body with GET. Use POST, PATCH, or PUT.")
 
-        try:
-            logger.info("api_call_start", method=method, path=clean_path, params=query_params)
-            result = client._request(method, clean_path, params=query_params, json_body=body)
-            logger.info("api_call_done", method=method, path=clean_path)
-            return json.dumps(result, indent=2)
-        except CentralAPIError as e:
-            logger.error("api_call_failed", method=method, path=clean_path, status=e.status_code, error_code=e.error_code)
-            raise ToolError(f"API call failed [{e.status_code}]: {e.message}" + (f" (debugId: {e.debug_id})" if e.debug_id else ""))
-        except Exception as e:
-            logger.error("api_call_failed", method=method, path=clean_path, error=str(e))
-            raise ToolError(f"API call failed: {e}")
+def register_greenlake_api_call_tools(mcp, settings: Settings, glp_client: GreenLakeClient | None):
+    """Register the GreenLake direct API call tool with the MCP server."""
+
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+    )
+    def call_greenlake_api(
+        path: str,
+        method: Literal["GET", "POST", "PATCH", "PUT", "DELETE"] = "GET",
+        query_params: dict[str, str] | None = None,
+        body: dict | None = None,
+    ) -> str:
+        """Make an authenticated request to any HPE GreenLake Platform API endpoint.
+
+        Use for GreenLake-specific operations: device inventory management,
+        subscription/license management, service catalog, locations, etc.
+        The base URL is https://global.api.greenlake.hpe.com.
+
+        Use search_api_catalog() to discover available GreenLake endpoints — they
+        appear in the catalog under categories starting with "HPE GreenLake APIs for ...".
+
+        Args:
+            path: API path (e.g., "devices/v1/devices").
+                  Do not include the base URL.
+            method: HTTP method. Defaults to GET.
+            query_params: Optional query parameters as key-value pairs.
+            body: Optional JSON request body (for POST, PATCH, PUT).
+
+        Returns:
+            JSON response from the GreenLake API.
+        """
+        if glp_client is None:
+            raise ToolError(
+                "GreenLake credentials not configured. "
+                "Set GREENLAKE_CLIENT_ID and GREENLAKE_CLIENT_SECRET in your .env file "
+                "(or GLP_CLIENT_ID / GLP_CLIENT_SECRET)."
+            )
+
+        return _make_api_call(glp_client, "greenlake", path, method, query_params, body)

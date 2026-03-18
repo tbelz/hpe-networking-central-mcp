@@ -16,7 +16,8 @@ from mcp.types import ToolAnnotations
 
 from ..config import Settings
 from ..oas_index import CompactEntry, EndpointEntry, OASIndex
-from ..oas_scraper import discover_and_scrape
+from ..oas_scraper import ReadMeSpecProvider
+from ..spec_provider import SpecProvider
 
 logger = structlog.get_logger("tools.api_catalog")
 
@@ -25,14 +26,42 @@ _index = OASIndex()
 
 
 def initialize_catalog(settings: Settings) -> None:
-    """Scrape OpenAPI specs and build the searchable index. Called at startup."""
+    """Fetch OpenAPI specs from all providers and build the searchable index."""
     try:
         logger.info("catalog_fetch_start")
-        specs = discover_and_scrape(
-            cache_dir=settings.spec_cache_dir,
-            ttl=settings.spec_cache_ttl,
-        )
-        _index.build(specs)
+
+        # Always include Central specs
+        providers: list[SpecProvider] = [ReadMeSpecProvider()]
+
+        # Add GreenLake specs if credentials are available
+        if settings.has_glp_credentials:
+            from ..glp_spec_provider import GreenLakeSpecProvider
+            providers.append(GreenLakeSpecProvider())
+            logger.info("catalog_greenlake_enabled")
+        else:
+            logger.info("catalog_greenlake_skipped", reason="no GLP credentials")
+
+        all_specs: list[dict] = []
+        for provider in providers:
+            try:
+                specs = provider.fetch_specs(
+                    cache_dir=settings.spec_cache_dir,
+                    ttl=settings.spec_cache_ttl,
+                )
+                all_specs.extend(specs)
+                logger.info(
+                    "catalog_provider_done",
+                    provider=provider.name,
+                    spec_count=len(specs),
+                )
+            except Exception as e:
+                logger.warning(
+                    "catalog_provider_failed",
+                    provider=provider.name,
+                    error=str(e),
+                )
+
+        _index.build(all_specs)
         logger.info(
             "catalog_ready",
             total_endpoints=_index.total_endpoints,

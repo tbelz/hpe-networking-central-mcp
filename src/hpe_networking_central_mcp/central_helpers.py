@@ -303,3 +303,188 @@ def _detect_item_key(resp: dict) -> str | None:
 
 # Module-level singleton — ready to use on import
 api = CentralAPI()
+
+
+class GreenLakeAPI:
+    """Pre-authenticated HTTP client for HPE GreenLake Platform API.
+
+    Reads credentials from environment variables injected by the MCP server.
+    Same smart-client features as CentralAPI: token management, 401 retry,
+    429 rate-limit retry, structured error parsing, and pagination.
+
+    Usage inside a script::
+
+        from central_helpers import glp
+
+        devices = glp.get("devices/v1/devices", params={"limit": "100"})
+    """
+
+    _MAX_RATE_LIMIT_WAIT = 60
+
+    def __init__(self) -> None:
+        self._base_url = os.environ.get(
+            "GLP_BASE_URL", "https://global.api.greenlake.hpe.com"
+        ).rstrip("/")
+        self._client_id = os.environ.get(
+            "GREENLAKE_CLIENT_ID", os.environ.get("GLP_CLIENT_ID", "")
+        )
+        self._client_secret = os.environ.get(
+            "GREENLAKE_CLIENT_SECRET", os.environ.get("GLP_CLIENT_SECRET", "")
+        )
+        self._access_token: str = ""
+        self._token_expires_at: float = 0.0
+        self._lock = threading.Lock()
+        self._http = httpx.Client(timeout=30.0)
+
+    @property
+    def available(self) -> bool:
+        """True if GreenLake credentials are configured."""
+        return bool(self._client_id and self._client_secret)
+
+    def get(self, path: str, params: dict | None = None) -> dict:
+        return self._request("GET", path, params=params)
+
+    def post(self, path: str, json_body: dict | None = None, params: dict | None = None) -> dict:
+        return self._request("POST", path, params=params, json_body=json_body)
+
+    def patch(self, path: str, json_body: dict | None = None, params: dict | None = None) -> dict:
+        return self._request("PATCH", path, params=params, json_body=json_body)
+
+    def put(self, path: str, json_body: dict | None = None, params: dict | None = None) -> dict:
+        return self._request("PUT", path, params=params, json_body=json_body)
+
+    def delete(self, path: str, params: dict | None = None) -> dict:
+        return self._request("DELETE", path, params=params)
+
+    def _ensure_token(self) -> None:
+        with self._lock:
+            if self._access_token and time.time() < self._token_expires_at:
+                return
+            if not self.available:
+                raise AuthenticationError(
+                    0, "", "GreenLake credentials not configured. "
+                    "Set GREENLAKE_CLIENT_ID and GREENLAKE_CLIENT_SECRET."
+                )
+            resp = self._http.post(
+                TOKEN_URL,
+                data={"grant_type": "client_credentials"},
+                auth=(self._client_id, self._client_secret),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            self._access_token = body["access_token"]
+            self._token_expires_at = time.time() + int(body.get("expires_in", 7200)) - 60
+
+    def _request(self, method: str, path: str, params=None, json_body=None, *, _retry=True) -> dict:
+        self._ensure_token()
+        url = f"{self._base_url}/{path.lstrip('/')}"
+        resp = self._http.request(
+            method, url,
+            params=params,
+            json=json_body,
+            headers={"Authorization": f"Bearer {self._access_token}", "Accept": "application/json"},
+        )
+
+        if resp.status_code == 429:
+            wait = _parse_retry_wait(resp)
+            if wait > self._MAX_RATE_LIMIT_WAIT:
+                err = _parse_error_body(resp)
+                raise RateLimitError(
+                    429, err.get("errorCode", ""),
+                    f"Rate limited, retry after {wait}s exceeds {self._MAX_RATE_LIMIT_WAIT}s cap",
+                    err.get("debugId", ""),
+                )
+            print(f"Rate limited, waiting {wait:.0f}s before retry...", file=sys.stderr)
+            time.sleep(wait)
+            resp = self._http.request(
+                method, url,
+                params=params,
+                json=json_body,
+                headers={"Authorization": f"Bearer {self._access_token}", "Accept": "application/json"},
+            )
+            if resp.status_code == 429:
+                err = _parse_error_body(resp)
+                raise RateLimitError(429, err.get("errorCode", ""), "Rate limited after retry", err.get("debugId", ""))
+
+        if resp.status_code == 401 and _retry:
+            with self._lock:
+                self._access_token = ""
+                self._token_expires_at = 0.0
+            return self._request(method, path, params=params, json_body=json_body, _retry=False)
+
+        if resp.status_code >= 400:
+            err = _parse_error_body(resp)
+            status = resp.status_code
+            error_code = err.get("errorCode", "")
+            message = err.get("message", resp.text[:200])
+            debug_id = err.get("debugId", "")
+            if status in (401, 403):
+                raise AuthenticationError(status, error_code, message, debug_id)
+            if status == 404:
+                raise NotFoundError(status, error_code, message, debug_id)
+            raise CentralAPIError(status, error_code, message, debug_id)
+
+        return resp.json()
+
+    def paginate(
+        self,
+        path: str,
+        params: dict | None = None,
+        *,
+        max_pages: int = 50,
+        page_size: int = 100,
+        item_key: str | None = None,
+    ) -> list[dict]:
+        """Fetch all pages of a paginated GreenLake list endpoint.
+
+        Supports offset-based pagination (standard GreenLake pattern).
+        """
+        all_items: list[dict] = []
+        merged = dict(params or {})
+        merged["limit"] = str(page_size)
+
+        try:
+            resp = self._request("GET", path, params=merged)
+        except CentralAPIError as exc:
+            raise PaginationError(
+                exc.status_code, exc.error_code,
+                f"Pagination failed on first page: {exc.message}", exc.debug_id,
+            ) from exc
+
+        if not isinstance(resp, dict):
+            raise PaginationError(0, "", f"Expected dict response, got {type(resp).__name__}")
+
+        key = item_key or _detect_item_key(resp)
+        if key is None:
+            raise PaginationError(0, "", f"Cannot detect item array in response keys: {list(resp.keys())}")
+
+        items = resp.get(key, [])
+        all_items.extend(items)
+        total = resp.get("total", resp.get("count", 0))
+
+        for page_num in range(2, max_pages + 1):
+            if total and len(all_items) >= total:
+                break
+            if not items:
+                break
+
+            page_params = dict(merged)
+            page_params["offset"] = str(len(all_items))
+
+            try:
+                resp = self._request("GET", path, params=page_params)
+            except CentralAPIError as exc:
+                raise PaginationError(
+                    exc.status_code, exc.error_code,
+                    f"Pagination failed on page {page_num}: {exc.message}", exc.debug_id,
+                ) from exc
+
+            items = resp.get(key, [])
+            all_items.extend(items)
+
+        return all_items
+
+
+# Module-level GreenLake singleton — ready to use on import
+glp = GreenLakeAPI()

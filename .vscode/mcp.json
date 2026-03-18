@@ -4,9 +4,10 @@
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
+        "--pull", "always",
         "--env-file", "${workspaceFolder}/.env",
         "-v", "central-scripts:/scripts/library",
-        "hpe-networking-central-mcp:latest"
+        "ghcr.io/tbelz/hpe-networking-central-mcp:main"
       ]
     }
   }
