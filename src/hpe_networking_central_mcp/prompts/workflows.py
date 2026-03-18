@@ -12,36 +12,46 @@ def register_prompts(mcp):
 
     @mcp.prompt()
     def analyze_inventory() -> str:
-        """Guide: analyze the current network inventory and identify issues."""
-        return """You are analyzing the HPE Aruba Networking Central inventory.
+        """Guide: analyze the current network hierarchy, devices, and identify issues."""
+        return """You are analyzing the HPE Aruba Networking Central network using the configuration graph.
 
 Follow this workflow:
 
-1. **Refresh Inventory**: Call refresh_inventory(detail_level="summary") to get current counts.
+1. **Read Graph Schema**: Read the graph://schema resource to understand the data model.
 
-2. **Analyze Summary**: Review the data and identify:
-   - Total device count and breakdown by type (switches, APs, gateways)
-   - Devices per site
-   - Online vs offline devices - flag any offline devices
-   - Unassigned devices that need onboarding
-   - Device function/persona distribution
+2. **Explore Hierarchy**: Use query_graph() to understand the structure:
+   ```cypher
+   MATCH (o:Org)-[:HAS_COLLECTION]->(sc:SiteCollection)-[:CONTAINS_SITE]->(s:Site)
+   RETURN o.name AS org, sc.name AS collection, s.name AS site
+   ```
+   Also check standalone sites:
+   ```cypher
+   MATCH (o:Org)-[:HAS_SITE]->(s:Site)
+   RETURN s.name AS site, s.city AS city
+   ```
 
-3. **Deep Dive (if needed)**: For any anomalies, call refresh_inventory(detail_level="full") with filters:
-   - filter_status="OFFLINE" to see offline devices
-   - filter_site="<site>" to drill into a specific site
-   - filter_type="SWITCH" (or ACCESS_POINT, GATEWAY) for type-specific views
+3. **Device Overview**: Query devices per site and their status:
+   ```cypher
+   MATCH (s:Site)-[:HAS_DEVICE]->(d:Device)
+   RETURN s.name AS site, d.deviceType AS type, d.status AS status, count(d) AS count
+   ORDER BY s.name
+   ```
 
-4. **Get Specifics**: Use get_device_details(identifier) for any device that needs attention.
+4. **Find Issues**: Check for offline devices:
+   ```cypher
+   MATCH (s:Site)-[:HAS_DEVICE]->(d:Device {status: 'OFFLINE'})
+   RETURN s.name AS site, d.serial, d.name, d.model
+   ```
 
-5. **Explore Further**: Use call_central_api() for deeper monitoring queries:
-   - Site health: get_api_details("site health") to find the right endpoint
-   - AP stats: get_api_details("ap stats") for AP-specific metrics
-   - Client counts: get_api_details("clients") for connected client data
+5. **Deep Dive**: Use call_central_api() for live monitoring data:
+   - Site health endpoints
+   - AP/switch/gateway specific stats
+   - Client connection counts
 
-6. **Present Report**: Summarize findings in a structured format:
-   - Overall health score (% online)
-   - Site-by-site breakdown
-   - Action items (unassigned devices, offline devices, firmware inconsistencies)
+6. **Present Report**: Summarize findings:
+   - Hierarchy overview (collections → sites → devices)
+   - Overall health (% online)
+   - Action items (offline devices, firmware inconsistencies)
    - Recommendations
 
 Present data in tables where appropriate for readability.
@@ -54,30 +64,35 @@ Present data in tables where appropriate for readability.
 
 Follow this workflow:
 
-1. **Get Device Details**: Call get_device_details("{identifier}") to retrieve full device information.
-   - Note: serial number, device type, model, status, site, IP address, firmware version.
-   - If device is not found, suggest refresh_inventory(force_refresh=true).
+1. **Find Device in Graph**: Use query_graph() to locate the device and its context:
+   ```cypher
+   MATCH (s:Site)-[:HAS_DEVICE]->(d:Device)
+   WHERE d.serial CONTAINS '{identifier}' OR d.name CONTAINS '{identifier}'
+   RETURN d.serial, d.name, d.model, d.status, d.ipv4, d.firmware, s.name AS site
+   ```
 
-2. **Assess Status**:
-   - If ONLINE: device is reachable - check for configuration issues.
-   - If OFFLINE: device is unreachable - this is the primary issue to investigate.
+2. **Understand Context**: Check what else is at the same site:
+   ```cypher
+   MATCH (s:Site)-[:HAS_DEVICE]->(d:Device)
+   WHERE s.name = '<site_from_step_1>'
+   RETURN d.serial, d.name, d.deviceType, d.status
+   ```
 
-3. **Check Context**: Call refresh_inventory(detail_level="full", filter_site="<device_site>") to see:
-   - Are other devices at the same site also affected?
-   - Is this an isolated issue or a site-wide problem?
+3. **Check Blast Radius**: If the device is in a collection, understand the hierarchy:
+   ```cypher
+   MATCH (sc:SiteCollection)-[:CONTAINS_SITE]->(s:Site)-[:HAS_DEVICE]->(d:Device {{serial: '{identifier}'}})
+   RETURN sc.name AS collection, s.name AS site
+   ```
 
-4. **Explore Diagnostics**: Use get_api_details("troubleshoot") to find diagnostic API endpoints.
-   - Use call_central_api() for read-only diagnostic queries.
-   - For active tests (AAA, RADIUS), write and execute a script.
+4. **Live Diagnostics**: Use call_central_api() for real-time monitoring data.
+   Use search_api_catalog("troubleshoot") or search_api_catalog("diagnostics")
+   to find relevant endpoints.
 
 5. **Check Script Library**: Call list_scripts(tag="troubleshooting") for existing diagnostic scripts.
-   - If none exist, consider writing one that runs device health checks.
 
 6. **Present Findings**:
    - Device status and key attributes
+   - Hierarchy context (collection → site → device)
    - Comparison with other devices at the same site
    - Recommended actions
-   - If a script was run, present the diagnostic results.
-
-Read api://central/catalog for available diagnostic and monitoring endpoints.
 """

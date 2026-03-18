@@ -488,3 +488,61 @@ class GreenLakeAPI:
 
 # Module-level GreenLake singleton — ready to use on import
 glp = GreenLakeAPI()
+
+
+# ── Graph query helper for scripts ───────────────────────────────────
+
+
+class GraphQuery:
+    """Lightweight Cypher query client for use in automation scripts.
+
+    Usage::
+
+        from central_helpers import graph
+
+        results = graph.query("MATCH (s:Site) RETURN s.name")
+        for row in results:
+            print(row)
+    """
+
+    def __init__(self) -> None:
+        self._db = None
+        self._initialized = False
+
+    def _ensure_db(self) -> None:
+        if self._initialized:
+            return
+        try:
+            import kuzu
+            # Connect to the same in-memory database used by the MCP server.
+            # In the subprocess execution model the graph is NOT shared —
+            # this is a stub that informs the user to use query_graph instead.
+            self._db = None
+            self._initialized = True
+        except ImportError:
+            self._initialized = True
+
+    def query(self, cypher: str) -> list[dict]:
+        """Execute a read-only Cypher query.
+
+        Note: In subprocess-executed scripts, the graph database is not
+        directly accessible. Use the ``query_graph`` MCP tool instead,
+        or combine graph queries with API calls in the MCP conversation.
+
+        Returns:
+            Empty list with a warning message when called from a subprocess.
+        """
+        self._ensure_db()
+        if self._db is None:
+            print(
+                "Warning: graph.query() is not available in subprocess scripts. "
+                "Use the query_graph MCP tool in the conversation instead.",
+                file=sys.stderr,
+            )
+            return []
+        return []
+
+
+# Module-level graph singleton
+graph = GraphQuery()
+

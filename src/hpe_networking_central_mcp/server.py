@@ -11,13 +11,15 @@ from mcp.server.fastmcp import FastMCP
 
 from .central_client import CentralClient, GreenLakeClient
 from .config import load_settings
+from .graph import GraphManager
 from .logging import setup_logging
 from .prompts.workflows import register_prompts
 from .resources.docs import register_resources
+from .resources.graph import register_graph_resources
 from .tools.api_call import register_api_call_tools, register_greenlake_api_call_tools
 from .tools.api_catalog import initialize_catalog, register_catalog_tools
 from .tools.execution import register_execution_tools
-from .tools.inventory import register_inventory_tools
+from .tools.graph import register_graph_tools
 from .tools.scripts import register_script_tools
 
 logger = setup_logging()
@@ -30,15 +32,19 @@ direct API reads and reusable Python scripts.
 
 ## How to work
 
-1. **Discover APIs**: Read the api://central/catalog resource for a complete overview of
+1. **Understand the network**: Read the graph://schema resource to learn the graph model,
+   then use query_graph(cypher) to explore the hierarchy: Org → SiteCollections → Sites →
+   Devices. The graph is your structural map — use it for navigation, blast-radius analysis,
+   cross-site comparison, config provenance, and dependency tracking.
+
+2. **Discover APIs**: Read the api://central/catalog resource for a complete overview of
    available endpoints. Use search_api_catalog("keyword") to find specific endpoints,
    then get_api_endpoint_detail(method, path) for full parameter and schema details.
 
-2. **Quick reads**: Use call_central_api(path, params) for GET requests - monitoring queries,
-   config lookups, health checks. This is the fastest way to read data.
-
-3. **Inventory**: Use refresh_inventory() to get a structured overview of all devices, sites,
-   and their status. Use get_device_details() for individual device lookup.
+3. **Quick reads**: Use call_central_api(path, params) for GET requests - monitoring queries,
+   config lookups, health checks. This is the fastest way to read live data.
+   Tip: Add `effective=true` to config endpoints for hierarchically merged config,
+   and `detailed=true` for source annotations.
 
 4. **Single writes**: Use call_central_api(path, method="POST", body={...}) for simple
    write operations (create a VLAN, delete a profile, update a setting).
@@ -60,7 +66,10 @@ direct API reads and reusable Python scripts.
    (device onboarding, subscriptions, licenses, locations, service catalog). These hit
    https://global.api.greenlake.hpe.com. In scripts, use `from central_helpers import glp`.
 
-9. **Reuse**: Always check list_scripts() before writing a new script.
+9. **After changes**: Call refresh_graph() after making config changes via API or scripts
+   to keep the graph in sync with Central.
+
+10. **Reuse**: Always check list_scripts() before writing a new script.
 
 Read docs://script-writing-guide for the script template and authentication pattern.
 Scripts use `from central_helpers import api, glp` — no OAuth2 boilerplate needed.""",
@@ -102,6 +111,18 @@ def _bg_catalog_init():
 
 threading.Thread(target=_bg_catalog_init, daemon=True).start()
 
+# Initialize graph database and populate in background
+graph_manager = GraphManager()
+graph_manager.initialize()
+
+def _bg_graph_populate():
+    try:
+        graph_manager.populate(client)
+    except Exception as e:
+        logger.warning("startup_graph_populate_failed", error=str(e))
+
+threading.Thread(target=_bg_graph_populate, daemon=True).start()
+
 # ── Optionally initialize GreenLake client ────────────────────────────
 glp_client: GreenLakeClient | None = None
 if settings.has_glp_credentials:
@@ -133,13 +154,14 @@ if _helpers_src.exists():
     logger.info("central_helpers_copied", dest=str(_helpers_dst))
 
 # Register all components
-register_inventory_tools(mcp, settings, client)
+register_graph_tools(mcp, settings, client, graph_manager)
 register_script_tools(mcp, settings)
 register_execution_tools(mcp, settings)
 register_catalog_tools(mcp, settings)
 register_api_call_tools(mcp, settings, client)
 register_greenlake_api_call_tools(mcp, settings, glp_client)
 register_resources(mcp, settings)
+register_graph_resources(mcp, graph_manager)
 register_prompts(mcp)
 
 logger.info(

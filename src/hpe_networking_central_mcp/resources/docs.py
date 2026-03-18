@@ -38,7 +38,19 @@ def _read_doc(path: Path, fallback: str = "Documentation not available.") -> str
 CENTRAL_API_OVERVIEW = """\
 # HPE Aruba Networking Central & GreenLake — API Overview
 
-This MCP server provides authenticated access to two API platforms:
+This MCP server provides authenticated access to two API platforms and an in-memory
+configuration graph for structural navigation.
+
+## Configuration Graph (via `query_graph`)
+
+An in-memory Kùzu graph models the Central configuration hierarchy:
+Org → SiteCollection → Site → Device, DeviceGroup → Device, Org → ConfigProfile.
+
+Read the **graph://schema** resource for the full schema, relationships, and example
+Cypher queries. Use `query_graph(cypher)` for structural questions (hierarchy navigation,
+blast-radius analysis, cross-site comparison, device lookup).
+
+Use `refresh_graph()` after making changes to keep the graph in sync.
 
 ## 1. Aruba Central APIs (via `call_central_api`)
 

@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""End-to-end test for the Kùzu graph database integration.
+
+Tests the full pipeline:
+  1. Schema creation (in-memory)
+  2. Population from live Central APIs
+  3. Cypher queries against real data
+  4. Read-only enforcement
+  5. Refresh cycle
+
+Requires Central credentials in .env (same as the MCP server).
+"""
+
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+# Ensure the src directory is importable
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+PASS = "\033[92mPASS\033[0m"
+FAIL = "\033[91mFAIL\033[0m"
+WARN = "\033[93mWARN\033[0m"
+
+results: list[tuple[str, bool, str]] = []
+
+
+def run_test(name: str, func):
+    """Run a test function and record result."""
+    try:
+        func()
+        results.append((name, True, ""))
+        print(f"  [{PASS}] {name}")
+    except Exception as e:
+        results.append((name, False, str(e)))
+        print(f"  [{FAIL}] {name}: {e}")
+
+
+# Load .env manually (no python-dotenv dependency)
+env_path = Path(__file__).parent / ".env"
+if env_path.exists():
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip().replace("\r", "")
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip())
+
+
+# ======================================================================
+# Phase 1: Schema Creation
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("Phase 1: Graph Schema — in-memory Kùzu database")
+print("=" * 70)
+
+from hpe_networking_central_mcp.graph.manager import GraphManager
+from hpe_networking_central_mcp.graph.schema import (
+    NODE_TABLES,
+    REL_TABLES,
+    SCHEMA_DESCRIPTION,
+    SCHEMA_VERSION,
+)
+
+
+def test_schema_constants():
+    assert SCHEMA_VERSION >= 1
+    assert len(NODE_TABLES) >= 6, f"Expected >=6 node tables, got {len(NODE_TABLES)}"
+    assert len(REL_TABLES) >= 6, f"Expected >=6 rel tables, got {len(REL_TABLES)}"
+    assert "Org" in SCHEMA_DESCRIPTION
+    assert "Device" in SCHEMA_DESCRIPTION
+    print(f"    -> {len(NODE_TABLES)} node tables, {len(REL_TABLES)} rel tables, version {SCHEMA_VERSION}")
+
+
+_gm = GraphManager()
+
+
+def test_initialize():
+    _gm.initialize()
+    assert _gm._db is not None, "Database not created"
+    assert not _gm.ready, "Should not be ready before populate"
+    print("    -> Database initialized, schema applied")
+
+
+def test_schema_description():
+    desc = _gm.get_schema_description()
+    assert "Node Tables" in desc
+    assert "Relationship Tables" in desc
+    assert "Example Cypher" in desc
+    print(f"    -> Schema description: {len(desc)} chars")
+
+
+run_test("schema constants defined", test_schema_constants)
+run_test("GraphManager.initialize() creates DB + schema", test_initialize)
+run_test("get_schema_description() returns markdown", test_schema_description)
+
+
+# ======================================================================
+# Phase 2: Population from Live APIs
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("Phase 2: Population — live API data")
+print("=" * 70)
+
+base_url = os.environ.get("CENTRAL_BASE_URL", "")
+client_id = os.environ.get("CENTRAL_CLIENT_ID", "")
+client_secret = os.environ.get("CENTRAL_CLIENT_SECRET", "")
+
+if not all([base_url, client_id, client_secret]):
+    print(f"  [{WARN}] Skipping live API tests — Central credentials not configured")
+    print("         Set CENTRAL_BASE_URL, CENTRAL_CLIENT_ID, CENTRAL_CLIENT_SECRET in .env")
+    _has_creds = False
+else:
+    _has_creds = True
+
+_summary = {}
+
+if _has_creds:
+    from hpe_networking_central_mcp.central_client import CentralClient
+
+    _client = CentralClient(base_url, client_id, client_secret)
+
+    def test_credentials():
+        _client.validate()
+        print("    -> OAuth2 token acquired")
+
+    def test_populate():
+        global _summary
+        t0 = time.time()
+        _summary = _gm.populate(_client)
+        elapsed = time.time() - t0
+        assert _gm.ready, "Graph should be ready after populate"
+        assert _summary.get("sites", 0) > 0, f"No sites populated: {_summary}"
+        assert _summary.get("devices", 0) > 0, f"No devices populated: {_summary}"
+        print(f"    -> Populated in {elapsed:.1f}s: {json.dumps({k:v for k,v in _summary.items() if k != 'errors'})}")
+        if _summary.get("errors"):
+            print(f"    -> Errors: {_summary['errors']}")
+
+    run_test("Central credentials valid", test_credentials)
+    run_test("populate() fetches and inserts live data", test_populate)
+
+
+# ======================================================================
+# Phase 3: Cypher Queries
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("Phase 3: Cypher Queries — structural navigation")
+print("=" * 70)
+
+if _has_creds and _gm.ready:
+
+    def test_query_all_sites():
+        rows = _gm.query("MATCH (s:Site) RETURN s.name AS name ORDER BY s.name")
+        assert len(rows) > 0, "No sites returned"
+        names = [r["name"] for r in rows]
+        print(f"    -> {len(rows)} sites: {names}")
+
+    def test_query_all_devices():
+        rows = _gm.query(
+            "MATCH (d:Device) RETURN d.serial AS serial, d.name AS name, "
+            "d.deviceType AS type, d.status AS status ORDER BY d.serial"
+        )
+        assert len(rows) > 0, "No devices returned"
+        print(f"    -> {len(rows)} devices")
+        for r in rows[:5]:
+            print(f"       {r['serial']} | {r['name']} | {r['type']} | {r['status']}")
+
+    def test_query_hierarchy():
+        rows = _gm.query(
+            "MATCH (o:Org)-[:HAS_COLLECTION]->(sc:SiteCollection)-[:CONTAINS_SITE]->(s:Site) "
+            "RETURN o.name AS org, sc.name AS collection, s.name AS site"
+        )
+        # May be empty if no collections, but should not error
+        print(f"    -> {len(rows)} collection→site paths")
+        for r in rows:
+            print(f"       {r['org']} → {r['collection']} → {r['site']}")
+
+    def test_query_standalone_sites():
+        rows = _gm.query(
+            "MATCH (o:Org)-[:HAS_SITE]->(s:Site) RETURN s.name AS site"
+        )
+        print(f"    -> {len(rows)} standalone sites")
+
+    def test_query_site_devices():
+        rows = _gm.query(
+            "MATCH (s:Site)-[:HAS_DEVICE]->(d:Device) "
+            "RETURN s.name AS site, d.serial AS serial, d.name AS device, d.status AS status "
+            "ORDER BY s.name, d.serial"
+        )
+        assert len(rows) > 0, "No site→device relationships"
+        print(f"    -> {len(rows)} site→device relationships")
+
+    def test_query_blast_radius():
+        # Find the first collection and query blast radius
+        colls = _gm.query("MATCH (sc:SiteCollection) RETURN sc.name AS name LIMIT 1")
+        if not colls:
+            print("    -> No collections to test blast radius on")
+            return
+        cname = colls[0]["name"]
+        # Use string interpolation (safe — cname comes from our own graph, not user input)
+        rows = _gm.query(
+            f"MATCH (sc:SiteCollection)-[:CONTAINS_SITE]->(s:Site)-[:HAS_DEVICE]->(d:Device) "
+            f"WHERE sc.name = '{cname}' "
+            f"RETURN sc.name AS collection, s.name AS site, d.serial, d.name AS device"
+        )
+        print(f"    -> Blast radius for '{cname}': {len(rows)} devices")
+
+    def test_query_device_groups():
+        rows = _gm.query(
+            "MATCH (dg:DeviceGroup) RETURN dg.name AS name, dg.deviceCount AS count"
+        )
+        print(f"    -> {len(rows)} device groups")
+        for r in rows:
+            print(f"       {r['name']} ({r['count']} devices)")
+
+    def test_query_config_profiles():
+        rows = _gm.query(
+            "MATCH (o:Org)-[:HAS_CONFIG]->(cp:ConfigProfile) "
+            "RETURN cp.category AS category, cp.name AS name "
+            "ORDER BY cp.category, cp.name"
+        )
+        print(f"    -> {len(rows)} library-level config profiles")
+        # Show by category
+        cats: dict[str, int] = {}
+        for r in rows:
+            cats[r["category"]] = cats.get(r["category"], 0) + 1
+        for cat, count in sorted(cats.items()):
+            print(f"       {cat}: {count}")
+
+    def test_query_device_count_per_site():
+        rows = _gm.query(
+            "MATCH (s:Site)-[:HAS_DEVICE]->(d:Device) "
+            "RETURN s.name AS site, count(d) AS devices "
+            "ORDER BY devices DESC"
+        )
+        print(f"    -> Device count per site:")
+        for r in rows:
+            print(f"       {r['site']}: {r['devices']}")
+
+    def test_query_firmware_versions():
+        rows = _gm.query(
+            "MATCH (d:Device) WHERE d.firmware <> '' "
+            "RETURN d.firmware AS version, d.deviceType AS type, count(d) AS count "
+            "ORDER BY type, count DESC"
+        )
+        print(f"    -> {len(rows)} firmware combos")
+        for r in rows[:10]:
+            print(f"       {r['type']}: {r['version']} ({r['count']})")
+
+    run_test("MATCH all sites", test_query_all_sites)
+    run_test("MATCH all devices", test_query_all_devices)
+    run_test("MATCH Org→SiteCollection→Site hierarchy", test_query_hierarchy)
+    run_test("MATCH standalone Org→Site", test_query_standalone_sites)
+    run_test("MATCH Site→Device relationships", test_query_site_devices)
+    run_test("MATCH blast radius for collection", test_query_blast_radius)
+    run_test("MATCH device groups", test_query_device_groups)
+    run_test("MATCH config profiles", test_query_config_profiles)
+    run_test("COUNT devices per site", test_query_device_count_per_site)
+    run_test("MATCH firmware versions", test_query_firmware_versions)
+
+else:
+    print(f"  [{WARN}] Skipping query tests — graph not populated")
+
+
+# ======================================================================
+# Phase 4: Safety & Refresh
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("Phase 4: Safety — read-only enforcement & refresh")
+print("=" * 70)
+
+
+def test_write_blocked():
+    """Verify that write queries are rejected."""
+    # Use a fresh manager to avoid needing live data
+    gm2 = GraphManager()
+    gm2.initialize()
+    # Force ready state for testing
+    gm2._ready = True
+
+    write_queries = [
+        "CREATE (n:Org {scopeId: 'evil', name: 'hacked'})",
+        "MATCH (n:Org) DELETE n",
+        "MATCH (n:Org) SET n.name = 'hacked'",
+        "MATCH (n:Org) DETACH DELETE n",
+        "DROP TABLE Org",
+        "MERGE (n:Org {scopeId: 'evil'})",
+    ]
+    for q in write_queries:
+        try:
+            gm2.query(q, read_only=True)
+            raise AssertionError(f"Should have blocked: {q}")
+        except ValueError as e:
+            assert "Write operations are not allowed" in str(e)
+    print(f"    -> All {len(write_queries)} write patterns blocked")
+
+
+def test_not_ready_error():
+    """Verify query returns error when graph not ready."""
+    gm3 = GraphManager()
+    gm3.initialize()
+    # Don't populate — ready should be False
+    try:
+        gm3.query("MATCH (s:Site) RETURN s.name")
+        raise AssertionError("Should have raised RuntimeError")
+    except RuntimeError as e:
+        assert "still loading" in str(e)
+    print("    -> Not-ready error returned correctly")
+
+
+run_test("write queries blocked (CREATE, DELETE, SET, ...)", test_write_blocked)
+run_test("query before populate returns 'still loading'", test_not_ready_error)
+
+
+if _has_creds and _gm.ready:
+    def test_refresh():
+        t0 = time.time()
+        summary = _gm.refresh(_client)
+        elapsed = time.time() - t0
+        assert _gm.ready
+        assert summary.get("sites", 0) > 0
+        assert summary.get("devices", 0) > 0
+        print(f"    -> Refreshed in {elapsed:.1f}s: sites={summary['sites']}, devices={summary['devices']}")
+
+    run_test("refresh() re-populates graph", test_refresh)
+
+
+# ======================================================================
+# Summary
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("SUMMARY")
+print("=" * 70)
+
+passed = sum(1 for _, ok, _ in results if ok)
+failed = sum(1 for _, ok, _ in results if not ok)
+
+if failed:
+    print(f"\n  {passed} passed, {failed} FAILED\n")
+    for name, ok, err in results:
+        if not ok:
+            print(f"  [{FAIL}] {name}: {err}")
+    sys.exit(1)
+else:
+    print(f"\n  All {passed} tests passed\n")
+    sys.exit(0)
