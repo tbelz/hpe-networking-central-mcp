@@ -69,13 +69,13 @@ direct API reads and reusable Python scripts.
 
 9. **Graph enrichment**: The graph is populated and enriched by scripts.
    Use `list_scripts(tag="graph")` to find enrichment scripts.
-   Use `read_script(filename)` to understand how an existing enrichment script works.
+   Use `get_script_content(filename)` to understand how an existing enrichment script works.
    To refresh the graph, execute `refresh_graph()` — this resets and re-runs all auto-run
    seed scripts.  To add custom enrichments, write new scripts that use
    `from central_helpers import graph` and call `graph.execute(cypher, params)`.
 
 10. **Reuse**: Always check list_scripts() before writing a new script.
-    Use read_script() to inspect existing scripts and learn patterns.
+    Use get_script_content() to inspect existing scripts and learn patterns.
 
 Read docs://script-writing-guide for the script template and authentication pattern.
 Scripts use `from central_helpers import api, glp, graph` — no OAuth2 boilerplate needed.

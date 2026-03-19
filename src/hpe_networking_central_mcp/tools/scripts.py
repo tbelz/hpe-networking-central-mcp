@@ -87,12 +87,12 @@ def register_script_tools(mcp, settings: Settings):
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True),
     )
-    def read_script(filename: str) -> str:
+    def get_script_content(filename: str) -> str:
         """Read the source code of a script from the automation library.
 
         Use this to inspect how an existing script works before running it,
         or to learn patterns (e.g., how seed scripts use central_helpers.graph
-        for graph enrichment).
+        for graph enrichment). Also known as read_script.
 
         Args:
             filename: Script filename in the library (e.g., "populate_base_graph.py").
