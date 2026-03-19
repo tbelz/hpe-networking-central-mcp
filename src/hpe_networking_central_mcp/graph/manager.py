@@ -73,11 +73,14 @@ class GraphManager:
                 logger.debug("graph_db_reopened")
 
     def reset(self) -> None:
-        """Delete the database directory and re-initialize with empty schema."""
+        """Delete the database and re-initialize with empty schema."""
         logger.info("graph_reset_start")
         self._db = None
         if self._db_path.exists():
-            shutil.rmtree(self._db_path)
+            if self._db_path.is_dir():
+                shutil.rmtree(self._db_path)
+            else:
+                self._db_path.unlink()
         self.initialize()
 
     # ── Query ─────────────────────────────────────────────────────
