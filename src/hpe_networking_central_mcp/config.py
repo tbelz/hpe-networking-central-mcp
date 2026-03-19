@@ -26,6 +26,7 @@ class Settings:
     # Paths
     script_library_path: Path = field(default_factory=lambda: Path("/scripts/library"))
     docs_path: Path = field(default_factory=lambda: Path("/docs"))
+    graph_db_path: Path = field(default_factory=lambda: Path("/data/graph_db"))
 
     # Inventory cache TTL in seconds
     inventory_cache_ttl: int = 300
@@ -69,4 +70,5 @@ def load_settings() -> Settings:
         spec_cache_dir=Path(os.environ.get("SPEC_CACHE_DIR", "/data/oas_cache")),
         spec_cache_ttl=int(os.environ.get("SPEC_CACHE_TTL", "86400")),
         glp_included_slugs=os.environ.get("GLP_INCLUDED_SLUGS", "").strip(),
+        graph_db_path=Path(os.environ.get("GRAPH_DB_PATH", "/data/graph_db")),
     )

@@ -73,14 +73,16 @@ configuration graph for structural navigation.
 
 ## Configuration Graph (via `query_graph`)
 
-An in-memory Kùzu graph models the Central configuration hierarchy:
+A file-backed Kùzu graph models the Central configuration hierarchy:
 Org → SiteCollection → Site → Device, DeviceGroup → Device, Org → ConfigProfile.
 
 Read the **graph://schema** resource for the full schema, relationships, and example
 Cypher queries. Use `query_graph(cypher)` for structural questions (hierarchy navigation,
 blast-radius analysis, cross-site comparison, device lookup).
 
-Use `refresh_graph()` after making changes to keep the graph in sync.
+The graph is populated and enriched by seed scripts at startup. Use `refresh_graph()`
+after making changes to reset and re-populate from live APIs. Scripts can also write
+directly to the graph using `from central_helpers import graph`.
 
 ## 1. Aruba Central APIs (via `call_central_api`)
 
@@ -165,7 +167,7 @@ import argparse
 import json
 import sys
 
-from central_helpers import api, glp
+from central_helpers import api, glp, graph
 
 
 def main():
@@ -201,6 +203,31 @@ if __name__ == "__main__":
 
 Same methods as `api` above, but targeting `https://global.api.greenlake.hpe.com`.
 
+### Graph Database: `from central_helpers import graph`
+
+Scripts can read from and write to the shared Kùzu graph database.
+
+- `graph.query(cypher, params=None)` → list[dict] — Read-only Cypher query.
+- `graph.execute(cypher, params=None)` → list[dict] — Read-write Cypher query (CREATE, MERGE, SET, DELETE).
+
+```python
+from central_helpers import api, graph
+
+# Read existing graph data
+sites = graph.query("MATCH (s:Site) RETURN s.scopeId, s.name")
+
+# Enrich the graph with data from APIs
+for site in sites:
+    health = api.get(f"network-monitoring/v1alpha1/sites/{site['s.scopeId']}/health")
+    graph.execute(
+        "MATCH (s:Site {scopeId: $sid}) SET s.health = $h",
+        {"sid": site["s.scopeId"], "h": health.get("overall", "unknown")},
+    )
+```
+
+The graph database is file-backed and shared between the MCP server and scripts.
+Changes made by scripts are immediately visible to `query_graph()`.
+
 ### Error Handling
 
 ```python
@@ -226,6 +253,7 @@ Rate-limited requests (429) are retried once after the server-specified wait.
 - `CENTRAL_CLIENT_ID` / `CENTRAL_CLIENT_SECRET` — Central OAuth2 credentials
 - `GREENLAKE_CLIENT_ID` / `GREENLAKE_CLIENT_SECRET` — GreenLake OAuth2 credentials
 - `GLP_BASE_URL` — GreenLake API base URL (default: https://global.api.greenlake.hpe.com)
+- `GRAPH_DB_PATH` — Path to the shared file-backed Kùzu graph database
 
 **Scripts should NEVER:**
 - Manage OAuth2 tokens directly

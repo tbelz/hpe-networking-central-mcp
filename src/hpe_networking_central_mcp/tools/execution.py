@@ -108,6 +108,7 @@ def _build_env(settings: Settings) -> dict[str, str]:
     env["GREENLAKE_CLIENT_ID"] = settings.effective_glp_client_id
     env["GREENLAKE_CLIENT_SECRET"] = settings.effective_glp_client_secret
     env["GLP_BASE_URL"] = settings.glp_base_url
+    env["GRAPH_DB_PATH"] = str(settings.graph_db_path)
     # Ensure no stale values leak through from host environment
     for key in ("BASE_URL", "CLIENT_ID", "CLIENT_SECRET"):
         env.pop(key, None)

@@ -10,6 +10,12 @@ Usage inside a script::
 
     devices = api.get("network-monitoring/v1alpha1/devices", params={"limit": "100"})
     api.post("network-config/v1alpha1/dhcp-pool", json_body={"name": "pool1", ...})
+
+    # Graph access (for enrichment scripts)
+    from central_helpers import graph
+
+    graph.execute("MERGE (n:Device {serial: $s}) SET n.name = $name", {"s": "SN1", "name": "SW1"})
+    rows = graph.query("MATCH (d:Device) RETURN d.serial, d.name")
 """
 
 from __future__ import annotations
@@ -490,59 +496,66 @@ class GreenLakeAPI:
 glp = GreenLakeAPI()
 
 
-# ── Graph query helper for scripts ───────────────────────────────────
+# ── Graph helper for enrichment scripts ──────────────────────────────
 
 
-class GraphQuery:
-    """Lightweight Cypher query client for use in automation scripts.
+class GraphHelper:
+    """Read/write access to the shared Kùzu graph database for scripts.
+
+    The server passes GRAPH_DB_PATH as an environment variable.  Scripts
+    that import ``from central_helpers import graph`` get a lazy-initialized
+    connection to the same file-backed Kùzu database the server owns.
 
     Usage::
 
         from central_helpers import graph
 
-        results = graph.query("MATCH (s:Site) RETURN s.name")
-        for row in results:
-            print(row)
+        graph.execute("MERGE (n:Device {serial: $s}) SET n.name = $name",
+                      {"s": "SN1", "name": "Switch-1"})
+        rows = graph.query("MATCH (d:Device) RETURN d.serial, d.name")
     """
 
     def __init__(self) -> None:
         self._db = None
-        self._initialized = False
+        self._conn = None
 
-    def _ensure_db(self) -> None:
-        if self._initialized:
+    def _ensure_conn(self):
+        if self._conn is not None:
             return
-        try:
-            import kuzu
-            # Connect to the same in-memory database used by the MCP server.
-            # In the subprocess execution model the graph is NOT shared —
-            # this is a stub that informs the user to use query_graph instead.
-            self._db = None
-            self._initialized = True
-        except ImportError:
-            self._initialized = True
-
-    def query(self, cypher: str) -> list[dict]:
-        """Execute a read-only Cypher query.
-
-        Note: In subprocess-executed scripts, the graph database is not
-        directly accessible. Use the ``query_graph`` MCP tool instead,
-        or combine graph queries with API calls in the MCP conversation.
-
-        Returns:
-            Empty list with a warning message when called from a subprocess.
-        """
-        self._ensure_db()
-        if self._db is None:
-            print(
-                "Warning: graph.query() is not available in subprocess scripts. "
-                "Use the query_graph MCP tool in the conversation instead.",
-                file=sys.stderr,
+        db_path = os.environ.get("GRAPH_DB_PATH", "")
+        if not db_path:
+            raise RuntimeError(
+                "GRAPH_DB_PATH not set — graph access is only available in scripts "
+                "executed via the MCP server."
             )
-            return []
-        return []
+        import kuzu
+
+        self._db = kuzu.Database(db_path)
+        self._conn = kuzu.Connection(self._db)
+
+    def query(self, cypher: str, params: dict | None = None) -> list[dict]:
+        """Execute a read-only Cypher query and return rows as dicts."""
+        self._ensure_conn()
+        result = self._conn.execute(cypher, params or {})
+        rows: list[dict] = []
+        while result.has_next():
+            row = result.get_next()
+            columns = result.get_column_names()
+            rows.append(dict(zip(columns, row)))
+        return rows
+
+    def execute(self, cypher: str, params: dict | None = None) -> list[dict]:
+        """Execute a Cypher statement (including writes) and return rows."""
+        self._ensure_conn()
+        result = self._conn.execute(cypher, params or {})
+        rows: list[dict] = []
+        while result.has_next():
+            row = result.get_next()
+            columns = result.get_column_names()
+            rows.append(dict(zip(columns, row)))
+        return rows
 
 
 # Module-level graph singleton
-graph = GraphQuery()
+graph = GraphHelper()
 

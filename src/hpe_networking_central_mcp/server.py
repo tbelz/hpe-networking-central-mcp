@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import threading
@@ -18,7 +19,7 @@ from .resources.docs import register_resources
 from .resources.graph import register_graph_resources
 from .tools.api_call import register_api_call_tools, register_greenlake_api_call_tools
 from .tools.api_catalog import initialize_catalog, register_catalog_tools
-from .tools.execution import register_execution_tools
+from .tools.execution import register_execution_tools, _run_script
 from .tools.graph import register_graph_tools
 from .tools.scripts import register_script_tools
 
@@ -66,13 +67,18 @@ direct API reads and reusable Python scripts.
    (device onboarding, subscriptions, licenses, locations, service catalog). These hit
    https://global.api.greenlake.hpe.com. In scripts, use `from central_helpers import glp`.
 
-9. **After changes**: Call refresh_graph() after making config changes via API or scripts
-   to keep the graph in sync with Central.
+9. **Graph enrichment**: The graph is populated and enriched by scripts.
+   Use `list_scripts(tag="graph")` to find enrichment scripts.
+   Use `read_script(filename)` to understand how an existing enrichment script works.
+   To refresh the graph, execute `refresh_graph()` — this resets and re-runs all auto-run
+   seed scripts.  To add custom enrichments, write new scripts that use
+   `from central_helpers import graph` and call `graph.execute(cypher, params)`.
 
 10. **Reuse**: Always check list_scripts() before writing a new script.
+    Use read_script() to inspect existing scripts and learn patterns.
 
 Read docs://script-writing-guide for the script template and authentication pattern.
-Scripts use `from central_helpers import api, glp` — no OAuth2 boilerplate needed.
+Scripts use `from central_helpers import api, glp, graph` — no OAuth2 boilerplate needed.
 
 ## MANDATORY: Research before scripting
 
@@ -129,17 +135,9 @@ def _bg_catalog_init():
 
 threading.Thread(target=_bg_catalog_init, daemon=True).start()
 
-# Initialize graph database and populate in background
-graph_manager = GraphManager()
+# Initialize file-backed graph database (schema only — population via seed scripts)
+graph_manager = GraphManager(settings.graph_db_path)
 graph_manager.initialize()
-
-def _bg_graph_populate():
-    try:
-        graph_manager.populate(client)
-    except Exception as e:
-        logger.warning("startup_graph_populate_failed", error=str(e))
-
-threading.Thread(target=_bg_graph_populate, daemon=True).start()
 
 # ── Optionally initialize GreenLake client ────────────────────────────
 glp_client: GreenLakeClient | None = None
@@ -179,8 +177,49 @@ if _seeds_dir.is_dir():
             shutil.copy2(seed_file, settings.script_library_path / seed_file.name)
             logger.info("seed_script_copied", filename=seed_file.name)
 
+
+# Run auto-run seed scripts in background to populate graph on startup
+def _get_auto_run_seeds() -> list[str]:
+    """Return seed script filenames that have auto_run: true in their metadata."""
+    seeds: list[str] = []
+    lib = settings.script_library_path
+    for meta_file in sorted(lib.glob("*.meta.json")):
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            if meta.get("auto_run"):
+                script_name = meta_file.name.replace(".meta.json", ".py")
+                if (lib / script_name).exists():
+                    seeds.append(script_name)
+        except Exception:
+            continue
+    return seeds
+
+
+def _bg_auto_run_seeds():
+    """Execute all auto_run seed scripts sequentially in a background thread."""
+    for script_name in _get_auto_run_seeds():
+        logger.info("auto_run_seed_start", filename=script_name)
+        try:
+            result_json = _run_script(settings, script_name)
+            result = json.loads(result_json)
+            exit_code = result.get("exit_code", -1)
+            if exit_code == 0:
+                logger.info("auto_run_seed_done", filename=script_name)
+            else:
+                logger.warning(
+                    "auto_run_seed_failed",
+                    filename=script_name,
+                    exit_code=exit_code,
+                    stderr=result.get("stderr", "")[:500],
+                )
+        except Exception as e:
+            logger.warning("auto_run_seed_error", filename=script_name, error=str(e))
+
+
+threading.Thread(target=_bg_auto_run_seeds, daemon=True).start()
+
 # Register all components
-register_graph_tools(mcp, settings, client, graph_manager)
+register_graph_tools(mcp, settings, graph_manager)
 register_script_tools(mcp, settings)
 register_execution_tools(mcp, settings)
 register_catalog_tools(mcp, settings)

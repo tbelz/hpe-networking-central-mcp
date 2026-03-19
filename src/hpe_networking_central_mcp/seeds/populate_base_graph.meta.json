@@ -1,0 +1,6 @@
+{
+  "description": "Populate the base configuration graph from Central APIs (sites, collections, groups, devices, config profiles).",
+  "tags": ["graph", "population", "startup"],
+  "parameters": [],
+  "auto_run": true
+}

@@ -85,6 +85,41 @@ def register_script_tools(mcp, settings: Settings):
         return json.dumps({"scripts": scripts, "total": len(scripts)}, indent=2)
 
     @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True),
+    )
+    def read_script(filename: str) -> str:
+        """Read the source code of a script from the automation library.
+
+        Use this to inspect how an existing script works before running it,
+        or to learn patterns (e.g., how seed scripts use central_helpers.graph
+        for graph enrichment).
+
+        Args:
+            filename: Script filename in the library (e.g., "populate_base_graph.py").
+
+        Returns:
+            The full Python source code of the script, or an error message.
+        """
+        error = _validate_filename(filename)
+        if error:
+            return json.dumps({"error": error})
+
+        lib = settings.script_library_path
+        script_path = lib / filename
+        if not script_path.exists():
+            return json.dumps({
+                "error": f"Script '{filename}' not found. Use list_scripts() to see available scripts."
+            })
+
+        content = script_path.read_text(encoding="utf-8")
+        meta = _read_meta(script_path)
+        return json.dumps({
+            "filename": filename,
+            "description": meta.get("description", "No description"),
+            "content": content,
+        }, indent=2)
+
+    @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True),
     )
     def save_script(

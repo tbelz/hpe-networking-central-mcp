@@ -1,17 +1,17 @@
-"""GraphManager — owns the Kùzu in-memory database and exposes query/populate/refresh."""
+"""GraphManager — owns the Kùzu file-backed database and exposes query/populate/refresh."""
 
 from __future__ import annotations
 
 import re
+import shutil
 import threading
+from pathlib import Path
 from typing import Any
 
 import kuzu
 import structlog
 
-from ..central_client import CentralClient
-from .population import populate_graph, populate_topology
-from .schema import NODE_TABLES, REL_TABLES, TOPOLOGY_REL_TABLES, SCHEMA_DESCRIPTION
+from .schema import NODE_TABLES, REL_TABLES, TOPOLOGY_REL_TABLES
 
 logger = structlog.get_logger("graph.manager")
 
@@ -23,38 +23,31 @@ _WRITE_KEYWORDS = re.compile(
 
 
 class GraphManager:
-    """Manages the Kùzu in-memory graph database lifecycle.
+    """Manages the Kùzu file-backed graph database lifecycle.
+
+    The database is stored on disk so that script subprocesses can open it
+    for direct reads and writes via ``central_helpers.graph``.
 
     Thread safety: the Database object is thread-safe; Connection is not.
     We use a threading.Lock to serialise connection access.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, db_path: Path) -> None:
+        self._db_path = db_path
         self._db: kuzu.Database | None = None
         self._lock = threading.Lock()
-        self._ready = False
-        self._topology_ready = False
-        self._population_summary: dict[str, Any] = {}
-        self._topology_summary: dict[str, Any] = {}
 
     @property
-    def ready(self) -> bool:
-        return self._ready
-
-    @property
-    def topology_ready(self) -> bool:
-        return self._topology_ready
-
-    @property
-    def population_summary(self) -> dict[str, Any]:
-        return dict(self._population_summary)
+    def db_path(self) -> Path:
+        return self._db_path
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
     def initialize(self) -> None:
-        """Create the in-memory database and apply schema DDL."""
-        logger.info("graph_init_start")
-        self._db = kuzu.Database()
+        """Create (or open) the file-backed database and apply schema DDL."""
+        logger.info("graph_init_start", db_path=str(self._db_path))
+        self._db_path.mkdir(parents=True, exist_ok=True)
+        self._db = kuzu.Database(str(self._db_path))
         conn = self._get_conn()
         all_ddl = NODE_TABLES + REL_TABLES + TOPOLOGY_REL_TABLES
         for ddl in all_ddl:
@@ -65,141 +58,13 @@ class GraphManager:
             rel_tables=len(REL_TABLES) + len(TOPOLOGY_REL_TABLES),
         )
 
-    def populate(self, client: CentralClient) -> dict[str, Any]:
-        """Populate the graph from live Central APIs.
-
-        Args:
-            client: Authenticated CentralClient.
-
-        Returns:
-            Summary dict with entity counts.
-        """
-        if self._db is None:
-            raise RuntimeError("Graph not initialized — call initialize() first")
-
-        logger.info("graph_populate_start")
-        conn = self._get_conn()
-        summary = populate_graph(client, conn)
-        self._population_summary = summary
-        self._ready = True
-        logger.info("graph_populate_done", **{k: v for k, v in summary.items() if k != "errors"})
-        return summary
-
-    def refresh(self, client: CentralClient) -> dict[str, Any]:
-        """Drop all data and re-populate from APIs.
-
-        Args:
-            client: Authenticated CentralClient.
-
-        Returns:
-            Summary dict with entity counts.
-        """
-        if self._db is None:
-            raise RuntimeError("Graph not initialized — call initialize() first")
-
-        logger.info("graph_refresh_start")
-        self._ready = False
-        self._topology_ready = False
-        conn = self._get_conn()
-
-        # Clear all relationship data first (including topology), then node data
-        all_rels = REL_TABLES + TOPOLOGY_REL_TABLES
-        for ddl in all_rels:
-            table_name = _extract_table_name(ddl)
-            if table_name:
-                try:
-                    conn.execute(f"MATCH ()-[r:{table_name}]->() DELETE r")
-                except Exception:
-                    pass  # Table may be empty
-
-        for ddl in NODE_TABLES:
-            table_name = _extract_table_name(ddl)
-            if table_name:
-                try:
-                    conn.execute(f"MATCH (n:{table_name}) DELETE n")
-                except Exception:
-                    pass
-
-        return self.populate(client)
-
-    def load_topology(self, client: CentralClient) -> dict[str, Any]:
-        """Lazily populate L2 topology data from per-site topology APIs.
-
-        Fetches all Site scopeIds from the graph, then calls the topology
-        API for each site to create CONNECTED_TO / LINKED_TO edges and
-        UnmanagedDevice nodes.
-
-        If topology is already loaded, this is a no-op (returns cached summary).
-        Use ``refresh_topology()`` to force a re-load.
-
-        Args:
-            client: Authenticated CentralClient.
-
-        Returns:
-            Summary dict with topology counts.
-        """
-        if self._topology_ready:
-            return dict(self._topology_summary)
-        return self._do_load_topology(client)
-
-    def refresh_topology(self, client: CentralClient) -> dict[str, Any]:
-        """Clear and re-populate topology data.
-
-        Args:
-            client: Authenticated CentralClient.
-
-        Returns:
-            Summary dict with topology counts.
-        """
-        if self._db is None:
-            raise RuntimeError("Graph not initialized — call initialize() first")
-
-        logger.info("topology_refresh_start")
-        self._topology_ready = False
-        conn = self._get_conn()
-
-        # Clear topology relationships and unmanaged device nodes
-        for ddl in TOPOLOGY_REL_TABLES:
-            table_name = _extract_table_name(ddl)
-            if table_name:
-                try:
-                    conn.execute(f"MATCH ()-[r:{table_name}]->() DELETE r")
-                except Exception:
-                    pass
-        # Clear HAS_UNMANAGED edges, then UnmanagedDevice nodes
-        try:
-            conn.execute("MATCH ()-[r:HAS_UNMANAGED]->() DELETE r")
-        except Exception:
-            pass
-        try:
-            conn.execute("MATCH (u:UnmanagedDevice) DELETE u")
-        except Exception:
-            pass
-
-        return self._do_load_topology(client)
-
-    def _do_load_topology(self, client: CentralClient) -> dict[str, Any]:
-        """Internal: fetch site IDs from graph and populate topology."""
-        if self._db is None:
-            raise RuntimeError("Graph not initialized")
-        if not self._ready:
-            raise RuntimeError("Graph must be populated before loading topology")
-
-        conn = self._get_conn()
-        # Get all site IDs from the graph
-        result = conn.execute("MATCH (s:Site) RETURN s.scopeId AS sid")
-        site_ids: list[str] = []
-        while result.has_next():
-            row = result.get_next()
-            if row[0]:
-                site_ids.append(str(row[0]))
-
-        logger.info("topology_load_start", sites=len(site_ids))
-        summary = populate_topology(client, conn, site_ids)
-        self._topology_summary = summary
-        self._topology_ready = True
-        logger.info("topology_load_done", **{k: v for k, v in summary.items() if k != "errors"})
-        return summary
+    def reset(self) -> None:
+        """Delete the database directory and re-initialize with empty schema."""
+        logger.info("graph_reset_start")
+        self._db = None
+        if self._db_path.exists():
+            shutil.rmtree(self._db_path)
+        self.initialize()
 
     # ── Query ─────────────────────────────────────────────────────
 
@@ -215,15 +80,10 @@ class GraphManager:
 
         Raises:
             ValueError: If read_only=True and query contains write keywords.
-            RuntimeError: If graph is not ready.
+            RuntimeError: If graph is not initialized.
         """
         if self._db is None:
-            raise RuntimeError("Graph not initialized")
-        if not self._ready:
-            raise RuntimeError(
-                "Graph is still loading. Population runs in the background on startup — "
-                "please retry in a few seconds."
-            )
+            raise RuntimeError("Graph not initialized — call initialize() first")
 
         if read_only and _WRITE_KEYWORDS.search(cypher):
             raise ValueError(
@@ -240,42 +100,137 @@ class GraphManager:
             rows.append(dict(zip(columns, row)))
         return rows
 
+    def execute(self, cypher: str, params: dict | None = None) -> list[dict[str, Any]]:
+        """Execute a Cypher statement (including writes) and return results.
+
+        Used by seed scripts via central_helpers.graph and by internal refresh.
+
+        Args:
+            cypher: Cypher statement.
+            params: Optional parameter dict.
+
+        Returns:
+            List of result rows as dicts (empty for write statements).
+        """
+        if self._db is None:
+            raise RuntimeError("Graph not initialized — call initialize() first")
+
+        conn = self._get_conn()
+        result = conn.execute(cypher, params or {})
+        rows: list[dict[str, Any]] = []
+        while result.has_next():
+            row = result.get_next()
+            columns = result.get_column_names()
+            rows.append(dict(zip(columns, row)))
+        return rows
+
     def get_schema_description(self) -> str:
-        """Return the human-readable schema description."""
-        status = "populated" if self._ready else "loading..."
-        summary_lines = ""
-        if self._population_summary:
-            s = self._population_summary
-            summary_lines = (
-                f"\n## Current Population\n"
-                f"- Sites: {s.get('sites', 0)}\n"
-                f"- Site Collections: {s.get('site_collections', 0)}\n"
-                f"- Device Groups: {s.get('device_groups', 0)}\n"
-                f"- Devices: {s.get('devices', 0)}\n"
-                f"- Config Profiles: {s.get('config_profiles', 0)}\n"
-                f"- Status: {status}\n"
-            )
-            if s.get("errors"):
-                summary_lines += f"- Population errors: {'; '.join(s['errors'])}\n"
+        """Return a dynamic schema description by introspecting the Kùzu catalog."""
+        if self._db is None:
+            return "Graph not initialized."
 
-        # Topology status
-        if self._topology_ready and self._topology_summary:
-            t = self._topology_summary
-            summary_lines += (
-                f"\n## Topology Population\n"
-                f"- Sites processed: {t.get('sites_processed', 0)}\n"
-                f"- CONNECTED_TO edges (Device→Device): {t.get('connected_to', 0)}\n"
-                f"- LINKED_TO edges (Device→UnmanagedDevice): {t.get('linked_to', 0)}\n"
-                f"- Unmanaged devices discovered: {t.get('unmanaged_devices', 0)}\n"
-                f"- Status: populated\n"
-            )
-        else:
-            summary_lines += (
-                "\n## Topology Population\n"
-                "- Status: not loaded (call load_topology or refresh_graph to populate)\n"
-            )
+        conn = self._get_conn()
+        lines = ["# Graph Schema — Aruba Central Configuration & Topology\n"]
 
-        return SCHEMA_DESCRIPTION + summary_lines
+        # Node tables
+        lines.append("## Node Tables\n")
+        lines.append("| Table | Primary Key | Properties | Row Count |")
+        lines.append("|-------|-------------|------------|-----------|")
+        try:
+            node_result = conn.execute("CALL show_tables() RETURN * WHERE type = 'NODE'")
+            node_tables = []
+            while node_result.has_next():
+                row = node_result.get_next()
+                node_tables.append(row[1])  # name column
+        except Exception:
+            node_tables = []
+
+        for table in sorted(node_tables):
+            try:
+                prop_result = conn.execute(f"CALL table_info('{table}') RETURN *")
+                props = []
+                pk = ""
+                while prop_result.has_next():
+                    prow = prop_result.get_next()
+                    prop_name = prow[1]  # name
+                    if prow[3]:  # isPrimaryKey
+                        pk = prop_name
+                    else:
+                        props.append(prop_name)
+                # Count rows
+                count_result = conn.execute(f"MATCH (n:{table}) RETURN count(n) AS cnt")
+                cnt = 0
+                if count_result.has_next():
+                    cnt = count_result.get_next()[0]
+                lines.append(f"| {table} | {pk} | {', '.join(props)} | {cnt} |")
+            except Exception:
+                lines.append(f"| {table} | — | — | — |")
+
+        # Relationship tables
+        lines.append("\n## Relationship Tables\n")
+        lines.append("| Relationship | From → To | Properties | Edge Count |")
+        lines.append("|-------------|-----------|------------|------------|")
+        try:
+            rel_result = conn.execute("CALL show_tables() RETURN * WHERE type = 'REL'")
+            rel_tables = []
+            while rel_result.has_next():
+                row = rel_result.get_next()
+                rel_tables.append(row[1])
+        except Exception:
+            rel_tables = []
+
+        for rel in sorted(rel_tables):
+            try:
+                # Get connection info
+                conn_result = conn.execute(f"CALL show_connection('{rel}') RETURN *")
+                from_to = ""
+                if conn_result.has_next():
+                    crow = conn_result.get_next()
+                    from_to = f"{crow[0]} → {crow[1]}"
+                # Get properties
+                prop_result = conn.execute(f"CALL table_info('{rel}') RETURN *")
+                props = []
+                while prop_result.has_next():
+                    prow = prop_result.get_next()
+                    props.append(prow[1])
+                # Count edges
+                count_result = conn.execute(
+                    f"MATCH ()-[r:{rel}]->() RETURN count(r) AS cnt"
+                )
+                cnt = 0
+                if count_result.has_next():
+                    cnt = count_result.get_next()[0]
+                prop_str = ", ".join(props) if props else "—"
+                lines.append(f"| {rel} | {from_to} | {prop_str} | {cnt} |")
+            except Exception:
+                lines.append(f"| {rel} | — | — | — |")
+
+        # Hierarchy diagram
+        lines.append("""
+## Hierarchy
+
+```
+Org (root)
+├── SiteCollection
+│   └── Site
+│       ├── Device ──CONNECTED_TO──► Device
+│       │           └──LINKED_TO──► UnmanagedDevice
+│       └── UnmanagedDevice
+├── Site (standalone, not in a collection)
+│   └── Device / UnmanagedDevice
+├── DeviceGroup (cross-cutting, devices from any site)
+│   └── Device
+└── ConfigProfile (library-level, inherited by all scopes)
+```
+
+## Tips
+- Use `list_scripts()` to find enrichment scripts (e.g., populate_base_graph, enrich_topology).
+- Execute enrichment scripts to populate/enrich graph data on demand.
+- Read `graph://schema` for up-to-date schema introspection after enrichment.
+- Write operations are blocked in `query_graph()` — enrichment happens via scripts only.
+""")
+
+        return "\n".join(lines)
 
     # ── Internal ──────────────────────────────────────────────────
 
@@ -283,12 +238,3 @@ class GraphManager:
         """Get a connection, serialised via lock."""
         with self._lock:
             return kuzu.Connection(self._db)
-
-
-def _extract_table_name(ddl: str) -> str | None:
-    """Extract table name from a CREATE ... TABLE IF NOT EXISTS <name> DDL."""
-    m = re.search(r"TABLE\s+IF\s+NOT\s+EXISTS\s+(\w+)", ddl, re.IGNORECASE)
-    if m:
-        return m.group(1)
-    m = re.search(r"TABLE\s+(\w+)", ddl, re.IGNORECASE)
-    return m.group(1) if m else None

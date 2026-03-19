@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 import structlog
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
-from ..central_client import CentralClient
 from ..config import Settings
 from ..graph.manager import GraphManager
 from ..graph.schema import compact_schema_hint, get_node_properties
+from .execution import _run_script
 
 logger = structlog.get_logger("tools.graph")
 
@@ -21,22 +20,36 @@ def _build_error_hint(error_msg: str) -> str:
     """Build a context-aware hint from a Cypher error message."""
     msg_lower = error_msg.lower()
 
-    # Property not found → show valid properties for that table
     if "cannot find property" in msg_lower or "property" in msg_lower and "does not exist" in msg_lower:
         for table, props in get_node_properties().items():
             if table.lower() in msg_lower:
                 return f"\n\nValid {table} properties: {', '.join(props)}"
-        # Couldn't match a specific table — show all
         return f"\n\nAvailable node properties:\n{compact_schema_hint()}"
 
-    # Table not found → show valid table names
     if "does not exist" in msg_lower or "cannot find" in msg_lower:
         return f"\n\nAvailable node properties:\n{compact_schema_hint()}"
 
     return ""
 
 
-def register_graph_tools(mcp, settings: Settings, client: CentralClient, graph: GraphManager):
+def _get_auto_run_seeds(settings: Settings) -> list[str]:
+    """Return seed script filenames that have auto_run: true in their metadata."""
+    import json as _json
+    seeds: list[str] = []
+    lib = settings.script_library_path
+    for meta_file in sorted(lib.glob("*.meta.json")):
+        try:
+            meta = _json.loads(meta_file.read_text(encoding="utf-8"))
+            if meta.get("auto_run"):
+                script_name = meta_file.name.replace(".meta.json", ".py")
+                if (lib / script_name).exists():
+                    seeds.append(script_name)
+        except Exception:
+            continue
+    return seeds
+
+
+def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
     """Register graph query and refresh tools with the MCP server."""
 
     @mcp.tool(
@@ -63,10 +76,9 @@ def register_graph_tools(mcp, settings: Settings, client: CentralClient, graph: 
         HAS_CONFIG, HAS_UNMANAGED, CONNECTED_TO (Device→Device), LINKED_TO (Device→UnmanagedDevice)
 
         Topology edges have: fromPorts, toPorts, speed, edgeType, health, lag, stpState, isSibling.
-        Topology data is populated lazily — call load_topology() first if CONNECTED_TO returns empty.
 
-        Read graph://schema for full property lists and example queries.
-        Write operations are blocked — use call_central_api() for mutations.
+        Read graph://schema for full property lists, dynamic row counts, and enrichment status.
+        Write operations are blocked — enrichment happens via scripts only.
 
         Args:
             cypher: A read-only Cypher query string.
@@ -96,62 +108,38 @@ def register_graph_tools(mcp, settings: Settings, client: CentralClient, graph: 
         annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True, openWorldHint=True),
     )
     def refresh_graph() -> str:
-        """Refresh the Central configuration graph from live APIs.
+        """Reset and re-populate the configuration & topology graph from live APIs.
 
-        Drops all existing graph data (including topology) and re-populates
-        from the Central APIs. Use this after making configuration changes
-        via call_central_api() or execute_script() to ensure the graph
-        reflects the current state.
+        Deletes all graph data, re-creates the schema, then runs all auto-run
+        seed scripts (populate_base_graph, enrich_topology, etc.) to rebuild
+        the graph from scratch.
 
-        This does NOT automatically reload topology data.
-        Call load_topology() afterwards if you need L2 link data.
+        Use this after making configuration changes to ensure the graph
+        reflects the current state of Central.
 
         Returns:
-            JSON summary of refreshed entity counts.
+            JSON summary of the refresh operation with per-script results.
         """
         if not settings.has_credentials:
             raise ToolError("Central credentials not configured.")
 
         try:
-            summary = graph.refresh(client)
+            graph.reset()
         except Exception as exc:
-            raise ToolError(f"Graph refresh failed: {exc}")
+            raise ToolError(f"Graph reset failed: {exc}")
 
-        logger.info("refresh_graph_done", **{k: v for k, v in summary.items() if k != "errors"})
-        return json.dumps(summary, indent=2)
+        results = {}
+        for script_name in _get_auto_run_seeds(settings):
+            logger.info("refresh_seed_start", filename=script_name)
+            try:
+                result_json = _run_script(settings, script_name)
+                result = json.loads(result_json)
+                results[script_name] = {
+                    "exit_code": result.get("exit_code", -1),
+                    "stdout": result.get("stdout", "")[:2000],
+                }
+            except Exception as e:
+                results[script_name] = {"error": str(e)}
 
-    @mcp.tool(
-        annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True, openWorldHint=True),
-    )
-    def load_topology() -> str:
-        """Load physical L2 topology data into the graph.
-
-        Fetches per-site LLDP topology from Central and creates:
-        - CONNECTED_TO edges between managed Device nodes
-        - LINKED_TO edges from Device to UnmanagedDevice (third-party LLDP neighbours)
-        - UnmanagedDevice nodes for discovered third-party devices
-
-        Edge properties: fromPorts, toPorts, speed (Gbps), edgeType, health,
-        lag, stpState, isSibling.
-
-        This is lazy — first call fetches from APIs, subsequent calls return
-        cached data. Use refresh_graph() to clear and start fresh.
-
-        The configuration graph must be populated first (happens automatically
-        at startup).
-
-        Returns:
-            JSON summary of topology counts.
-        """
-        if not settings.has_credentials:
-            raise ToolError("Central credentials not configured.")
-
-        try:
-            summary = graph.load_topology(client)
-        except RuntimeError as exc:
-            raise ToolError(str(exc))
-        except Exception as exc:
-            raise ToolError(f"Topology load failed: {exc}")
-
-        logger.info("load_topology_done", **{k: v for k, v in summary.items() if k != "errors"})
-        return json.dumps(summary, indent=2)
+        logger.info("refresh_graph_done", scripts=len(results))
+        return json.dumps({"status": "refreshed", "scripts": results}, indent=2)
