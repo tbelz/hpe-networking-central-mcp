@@ -35,8 +35,8 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Seed scripts and central_helpers.py are copied at runtime by server.py
 # (the Docker volume mount overrides this directory anyway)
 
-# Create required directories
-RUN mkdir -p /scripts/library /data/oas_cache /data/graph_db
+# Create required directories (Kùzu creates graph_db dir itself)
+RUN mkdir -p /scripts/library /data/oas_cache
 
 # Environment
 ENV PYTHONUNBUFFERED=1

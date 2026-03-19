@@ -46,7 +46,8 @@ class GraphManager:
     def initialize(self) -> None:
         """Create (or open) the file-backed database and apply schema DDL."""
         logger.info("graph_init_start", db_path=str(self._db_path))
-        self._db_path.mkdir(parents=True, exist_ok=True)
+        # Ensure parent directory exists; Kùzu creates the DB directory itself.
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = kuzu.Database(str(self._db_path))
         conn = self._get_conn()
         all_ddl = NODE_TABLES + REL_TABLES + TOPOLOGY_REL_TABLES
