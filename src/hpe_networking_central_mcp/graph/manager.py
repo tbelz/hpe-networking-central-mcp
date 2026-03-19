@@ -15,9 +15,10 @@ from .schema import KNOWLEDGE_NODE_TABLES, KNOWLEDGE_REL_TABLES, NODE_TABLES, RE
 
 logger = structlog.get_logger("graph.manager")
 
-# Cypher keywords that mutate the graph — blocked in read-only query tool
+# Cypher keywords that mutate the graph — blocked in read-only query tool.
+# LOAD FROM is included because Kùzu can read arbitrary filesystem paths.
 _WRITE_KEYWORDS = re.compile(
-    r"\b(CREATE|DELETE|DETACH|SET|REMOVE|MERGE|DROP|ALTER|COPY|INSERT)\b",
+    r"\b(CREATE|DELETE|DETACH|SET|REMOVE|MERGE|DROP|ALTER|COPY|INSERT|LOAD)\b",
     re.IGNORECASE,
 )
 

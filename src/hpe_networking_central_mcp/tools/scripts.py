@@ -30,7 +30,7 @@ def _validate_filename(filename: str) -> str | None:
         return "Filename must end with .py"
     if "/" in filename or "\\" in filename or ".." in filename:
         return "Filename must not contain path separators or '..'."
-    if not re.match(r"^[a-zA-Z0-9_\\-]+\\.py$", filename):
+    if not re.match(r"^[a-zA-Z0-9_-]+\.py$", filename):
         return "Filename must contain only alphanumeric characters, underscores, and hyphens."
     return None
 
