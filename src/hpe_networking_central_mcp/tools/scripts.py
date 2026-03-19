@@ -1,4 +1,4 @@
-"""Script library management tools."""
+"""Script library management tools — scripts stored in the graph database."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from mcp.types import ToolAnnotations
@@ -14,7 +14,12 @@ from mcp.types import ToolAnnotations
 from ..config import Settings
 from .execution import _run_script
 
+if TYPE_CHECKING:
+    from ..graph.manager import GraphManager
+
 logger = structlog.get_logger("tools.scripts")
+
+_graph_manager: GraphManager | None = None
 
 
 def _validate_filename(filename: str) -> str | None:
@@ -25,27 +30,15 @@ def _validate_filename(filename: str) -> str | None:
         return "Filename must end with .py"
     if "/" in filename or "\\" in filename or ".." in filename:
         return "Filename must not contain path separators or '..'."
-    if not re.match(r"^[a-zA-Z0-9_\-]+\.py$", filename):
+    if not re.match(r"^[a-zA-Z0-9_\\-]+\\.py$", filename):
         return "Filename must contain only alphanumeric characters, underscores, and hyphens."
     return None
 
 
-def _read_meta(script_path: Path) -> dict[str, Any]:
-    """Read the .meta.json companion file for a script."""
-    meta_path = script_path.with_suffix(".meta.json")
-    if meta_path.exists():
-        return json.loads(meta_path.read_text(encoding="utf-8"))
-    return {}
-
-
-def _write_meta(script_path: Path, meta: dict[str, Any]) -> None:
-    """Write the .meta.json companion file for a script."""
-    meta_path = script_path.with_suffix(".meta.json")
-    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-
-
-def register_script_tools(mcp, settings: Settings):
+def register_script_tools(mcp, settings: Settings, graph_manager: GraphManager):
     """Register script library management tools with the MCP server."""
+    global _graph_manager
+    _graph_manager = graph_manager
 
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True),
@@ -53,7 +46,6 @@ def register_script_tools(mcp, settings: Settings):
     def list_scripts(tag: str | None = None) -> str:
         """List all scripts in the automation library.
 
-        Scans the script library directory for Python scripts and their metadata.
         Use this before writing a new script to check if a reusable one already exists.
 
         Args:
@@ -62,25 +54,42 @@ def register_script_tools(mcp, settings: Settings):
         Returns:
             JSON list of scripts with name, description, tags, parameters, and last-run info.
         """
-        lib = settings.script_library_path
-        if not lib.exists():
-            return json.dumps({"scripts": [], "message": "Script library is empty."})
+        gm = _graph_manager
+        if gm is None or not gm.is_available:
+            return json.dumps({"scripts": [], "message": "Graph database not available."})
+
+        if tag:
+            rows = gm.query(
+                "MATCH (s:Script) WHERE list_contains(s.tags, $tag) "
+                "RETURN s.filename, s.description, s.tags, s.parameters, "
+                "s.created_at, s.last_run, s.last_exit_code ORDER BY s.filename",
+                {"tag": tag},
+                read_only=True,
+            )
+        else:
+            rows = gm.query(
+                "MATCH (s:Script) "
+                "RETURN s.filename, s.description, s.tags, s.parameters, "
+                "s.created_at, s.last_run, s.last_exit_code ORDER BY s.filename",
+                read_only=True,
+            )
 
         scripts = []
-        for py_file in sorted(lib.glob("*.py")):
-            meta = _read_meta(py_file)
-            entry = {
-                "filename": py_file.name,
-                "description": meta.get("description", "No description"),
-                "tags": meta.get("tags", []),
-                "parameters": meta.get("parameters", []),
-                "created_at": meta.get("created_at"),
-                "last_run": meta.get("last_run"),
-                "last_exit_code": meta.get("last_exit_code"),
-            }
-            if tag and tag.lower() not in [t.lower() for t in entry["tags"]]:
-                continue
-            scripts.append(entry)
+        for row in rows:
+            params_raw = row.get("s.parameters", "[]")
+            try:
+                params = json.loads(params_raw) if params_raw else []
+            except (json.JSONDecodeError, TypeError):
+                params = []
+            scripts.append({
+                "filename": row.get("s.filename", ""),
+                "description": row.get("s.description", "No description"),
+                "tags": row.get("s.tags", []) or [],
+                "parameters": params,
+                "created_at": row.get("s.created_at"),
+                "last_run": row.get("s.last_run"),
+                "last_exit_code": row.get("s.last_exit_code"),
+            })
 
         return json.dumps({"scripts": scripts, "total": len(scripts)}, indent=2)
 
@@ -104,19 +113,24 @@ def register_script_tools(mcp, settings: Settings):
         if error:
             return json.dumps({"error": error})
 
-        lib = settings.script_library_path
-        script_path = lib / filename
-        if not script_path.exists():
+        gm = _graph_manager
+        if gm is None or not gm.is_available:
+            return json.dumps({"error": "Graph database not available."})
+
+        rows = gm.query(
+            "MATCH (s:Script {filename: $fn}) RETURN s.content, s.description",
+            {"fn": filename},
+            read_only=True,
+        )
+        if not rows:
             return json.dumps({
                 "error": f"Script '{filename}' not found. Use list_scripts() to see available scripts."
             })
 
-        content = script_path.read_text(encoding="utf-8")
-        meta = _read_meta(script_path)
         return json.dumps({
             "filename": filename,
-            "description": meta.get("description", "No description"),
-            "content": content,
+            "description": rows[0].get("s.description", "No description"),
+            "content": rows[0].get("s.content", ""),
         }, indent=2)
 
     @mcp.tool(
@@ -158,35 +172,40 @@ def register_script_tools(mcp, settings: Settings):
         if error:
             return json.dumps({"error": error})
 
+        gm = _graph_manager
+        if gm is None or not gm.is_available:
+            return json.dumps({"error": "Graph database not available."})
+
+        created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        params_json = json.dumps(parameters or [])
+
+        # Store script in graph database
+        gm.execute(
+            "MERGE (s:Script {filename: $fn}) "
+            "ON CREATE SET s.content = $content, s.description = $descr, "
+            "s.tags = $tags, s.parameters = $params, s.created_at = $created "
+            "ON MATCH SET s.content = $content, s.description = $descr, "
+            "s.tags = $tags, s.parameters = $params, s.created_at = $created",
+            {
+                "fn": filename,
+                "content": content,
+                "descr": description,
+                "tags": tags,
+                "params": params_json,
+                "created": created_at,
+            },
+        )
+
+        # Also write to disk so subprocess can execute it
         lib = settings.script_library_path
         lib.mkdir(parents=True, exist_ok=True)
         script_path = lib / filename
-
-        # Write script
         script_path.write_text(content, encoding="utf-8")
-
-        # Write metadata
-        meta = {
-            "description": description,
-            "tags": tags,
-            "parameters": parameters or [],
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "last_run": None,
-            "last_exit_code": None,
-        }
-        # Preserve last_run from existing meta if overwriting
-        existing_meta = _read_meta(script_path)
-        if existing_meta.get("last_run"):
-            meta["last_run"] = existing_meta["last_run"]
-            meta["last_exit_code"] = existing_meta.get("last_exit_code")
-
-        _write_meta(script_path, meta)
 
         logger.info("script_saved", filename=filename, tags=tags)
 
         save_result = {
             "status": "saved",
-            "path": str(script_path),
             "filename": filename,
             "description": description,
         }
@@ -196,4 +215,59 @@ def register_script_tools(mcp, settings: Settings):
             exec_result = json.loads(exec_result_json)
             save_result["execution"] = exec_result
 
+            # Update run metadata in graph
+            gm.execute(
+                "MATCH (s:Script {filename: $fn}) "
+                "SET s.last_run = $lr, s.last_exit_code = $ec",
+                {
+                    "fn": filename,
+                    "lr": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "ec": exec_result.get("exit_code", -1),
+                },
+            )
+
         return json.dumps(save_result, indent=2)
+
+
+def sync_seeds_to_graph(graph_manager: GraphManager, seeds_dir: Path, lib_dir: Path) -> None:
+    """Copy seed scripts into the graph DB and the script library on disk.
+
+    Called at server startup to ensure seeds from the package are available
+    both in the graph (for list_scripts/get_script_content) and on disk
+    (for subprocess execution).
+    """
+    import shutil
+
+    lib_dir.mkdir(parents=True, exist_ok=True)
+
+    for seed_file in sorted(seeds_dir.iterdir()):
+        if seed_file.suffix == ".py" and seed_file.name != "__init__.py":
+            # Copy to disk
+            shutil.copy2(seed_file, lib_dir / seed_file.name)
+
+            # Read metadata
+            meta_path = seed_file.with_suffix(".meta.json")
+            meta: dict[str, Any] = {}
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                shutil.copy2(meta_path, lib_dir / meta_path.name)
+
+            content = seed_file.read_text(encoding="utf-8")
+            params_json = json.dumps(meta.get("parameters", []))
+
+            graph_manager.execute(
+                "MERGE (s:Script {filename: $fn}) "
+                "ON CREATE SET s.content = $content, s.description = $descr, "
+                "s.tags = $tags, s.parameters = $params, s.created_at = $created "
+                "ON MATCH SET s.content = $content, s.description = $descr, "
+                "s.tags = $tags, s.parameters = $params, s.created_at = $created",
+                {
+                    "fn": seed_file.name,
+                    "content": content,
+                    "descr": meta.get("description", "Seed script"),
+                    "tags": meta.get("tags", []),
+                    "params": params_json,
+                    "created": meta.get("created_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
+                },
+            )
+            logger.info("seed_synced", filename=seed_file.name)

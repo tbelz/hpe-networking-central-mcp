@@ -20,6 +20,7 @@ Usage inside a script::
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -500,11 +501,11 @@ glp = GreenLakeAPI()
 
 
 class GraphHelper:
-    """Read/write access to the shared Kùzu graph database for scripts.
+    """Read/write access to the shared Kùzu graph database via IPC.
 
-    The server passes GRAPH_DB_PATH as an environment variable.  Scripts
-    that import ``from central_helpers import graph`` get a lazy-initialized
-    connection to the same file-backed Kùzu database the server owns.
+    The MCP server runs a Unix domain socket IPC server that holds the
+    Kùzu database open.  Scripts connect to it via GRAPH_IPC_SOCKET and
+    send JSON requests instead of opening the database directly.
 
     Usage::
 
@@ -516,44 +517,49 @@ class GraphHelper:
     """
 
     def __init__(self) -> None:
-        self._db = None
-        self._conn = None
+        self._sock = None
+        self._rfile = None
+        self._wfile = None
+        self._req_id = 0
 
     def _ensure_conn(self):
-        if self._conn is not None:
+        if self._sock is not None:
             return
-        db_path = os.environ.get("GRAPH_DB_PATH", "")
-        if not db_path:
+        import socket as _socket
+
+        sock_path = os.environ.get("GRAPH_IPC_SOCKET", "")
+        if not sock_path:
             raise RuntimeError(
-                "GRAPH_DB_PATH not set — graph access is only available in scripts "
+                "GRAPH_IPC_SOCKET not set — graph access is only available in scripts "
                 "executed via the MCP server."
             )
-        import kuzu
+        self._sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        self._sock.connect(sock_path)
+        self._rfile = self._sock.makefile("rb")
+        self._wfile = self._sock.makefile("wb")
 
-        self._db = kuzu.Database(db_path)
-        self._conn = kuzu.Connection(self._db)
+    def _call(self, method: str, cypher: str, params: dict | None = None) -> list[dict]:
+        self._ensure_conn()
+        self._req_id += 1
+        req = {"id": self._req_id, "method": method, "cypher": cypher, "params": params or {}}
+        data = (json.dumps(req) + "\n").encode("utf-8")
+        self._wfile.write(data)
+        self._wfile.flush()
+        line = self._rfile.readline()
+        if not line:
+            raise RuntimeError("IPC connection closed by server")
+        resp = json.loads(line)
+        if "error" in resp:
+            raise RuntimeError(f"Graph IPC error: {resp['error']}")
+        return resp.get("result", [])
 
     def query(self, cypher: str, params: dict | None = None) -> list[dict]:
         """Execute a read-only Cypher query and return rows as dicts."""
-        self._ensure_conn()
-        result = self._conn.execute(cypher, params or {})
-        rows: list[dict] = []
-        while result.has_next():
-            row = result.get_next()
-            columns = result.get_column_names()
-            rows.append(dict(zip(columns, row)))
-        return rows
+        return self._call("query", cypher, params)
 
     def execute(self, cypher: str, params: dict | None = None) -> list[dict]:
         """Execute a Cypher statement (including writes) and return rows."""
-        self._ensure_conn()
-        result = self._conn.execute(cypher, params or {})
-        rows: list[dict] = []
-        while result.has_next():
-            row = result.get_next()
-            columns = result.get_column_names()
-            rows.append(dict(zip(columns, row)))
-        return rows
+        return self._call("execute", cypher, params)
 
 
 # Module-level graph singleton

@@ -1,0 +1,45 @@
+name: Update Knowledge Database
+
+on:
+  schedule:
+    - cron: "0 4 * * *"   # Daily at 04:00 UTC
+  workflow_dispatch:        # Manual trigger
+
+permissions:
+  contents: write          # Needed for creating releases
+
+jobs:
+  build-knowledge-db:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Build knowledge database
+        run: python scripts/build_knowledge_db.py --output-dir build --tar
+
+      - name: Generate release tag
+        id: tag
+        run: echo "tag=knowledge-db-$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Knowledge DB ${{ steps.tag.outputs.tag }}"
+          body: |
+            Auto-generated knowledge database snapshot.
+            Contains scraped API endpoints and seed scripts for the MCP server.
+          files: build/knowledge_db.tar.gz
+          prerelease: false

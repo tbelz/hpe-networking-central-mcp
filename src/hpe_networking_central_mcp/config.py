@@ -27,16 +27,16 @@ class Settings:
     script_library_path: Path = field(default_factory=lambda: Path("/scripts/library"))
     docs_path: Path = field(default_factory=lambda: Path("/docs"))
     graph_db_path: Path = field(default_factory=lambda: Path("/data/graph_db"))
+    graph_ipc_socket: Path = field(default_factory=lambda: Path("/tmp/kuzu_graph.sock"))
 
     # Inventory cache TTL in seconds
     inventory_cache_ttl: int = 300
 
-    # OpenAPI spec cache
-    spec_cache_dir: Path = field(default_factory=lambda: Path("/data/oas_cache"))
-    spec_cache_ttl: int = 86400  # 24 hours
-
     # GreenLake service slugs to include (comma-separated, or "*" for all)
     glp_included_slugs: str = ""
+
+    # GitHub release repository for knowledge DB (owner/repo)
+    knowledge_release_repo: str = ""
 
     @property
     def has_credentials(self) -> bool:
@@ -67,8 +67,8 @@ def load_settings() -> Settings:
         script_library_path=Path(os.environ.get("SCRIPT_LIBRARY_PATH", "/scripts/library")),
         docs_path=Path(os.environ.get("DOCS_PATH", "/docs")),
         inventory_cache_ttl=int(os.environ.get("INVENTORY_CACHE_TTL", "300")),
-        spec_cache_dir=Path(os.environ.get("SPEC_CACHE_DIR", "/data/oas_cache")),
-        spec_cache_ttl=int(os.environ.get("SPEC_CACHE_TTL", "86400")),
         glp_included_slugs=os.environ.get("GLP_INCLUDED_SLUGS", "").strip(),
         graph_db_path=Path(os.environ.get("GRAPH_DB_PATH", "/data/graph_db")),
+        graph_ipc_socket=Path(os.environ.get("GRAPH_IPC_SOCKET", "/tmp/kuzu_graph.sock")),
+        knowledge_release_repo=os.environ.get("KNOWLEDGE_RELEASE_REPO", "").strip(),
     )

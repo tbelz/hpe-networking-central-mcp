@@ -11,7 +11,7 @@ from typing import Any
 import kuzu
 import structlog
 
-from .schema import NODE_TABLES, REL_TABLES, TOPOLOGY_REL_TABLES
+from .schema import KNOWLEDGE_NODE_TABLES, KNOWLEDGE_REL_TABLES, NODE_TABLES, REL_TABLES, TOPOLOGY_REL_TABLES
 
 logger = structlog.get_logger("graph.manager")
 
@@ -50,7 +50,7 @@ class GraphManager:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = kuzu.Database(str(self._db_path))
         conn = self._get_conn()
-        all_ddl = NODE_TABLES + REL_TABLES + TOPOLOGY_REL_TABLES
+        all_ddl = NODE_TABLES + KNOWLEDGE_NODE_TABLES + REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES
         for ddl in all_ddl:
             conn.execute(ddl.strip())
         logger.info(
@@ -59,23 +59,16 @@ class GraphManager:
             rel_tables=len(REL_TABLES) + len(TOPOLOGY_REL_TABLES),
         )
 
-    def close(self) -> None:
-        """Release the database so script subprocesses can access it."""
-        with self._lock:
-            self._db = None
-        logger.debug("graph_db_closed")
-
-    def reopen(self) -> None:
-        """Re-open the database after a script subprocess finishes."""
-        with self._lock:
-            if self._db is None:
-                self._db = kuzu.Database(str(self._db_path))
-                logger.debug("graph_db_reopened")
+    def is_available(self) -> bool:
+        """Return True if the database is open and ready."""
+        return self._db is not None
 
     def reset(self) -> None:
         """Delete the database and re-initialize with empty schema."""
         logger.info("graph_reset_start")
-        self._db = None
+        if self._db is not None:
+            self._db.close()
+            self._db = None
         if self._db_path.exists():
             if self._db_path.is_dir():
                 shutil.rmtree(self._db_path)
@@ -83,13 +76,37 @@ class GraphManager:
                 self._db_path.unlink()
         self.initialize()
 
+    def replace_db(self, new_db_path: Path) -> None:
+        """Replace the database directory with a pre-built one.
+
+        Closes the current DB, replaces the directory, and reopens.
+        Used to swap in a knowledge DB downloaded from a GitHub release.
+        """
+        logger.info("graph_replace_start", new_path=str(new_db_path))
+        with self._lock:
+            if self._db is not None:
+                self._db.close()
+                self._db = None
+        if self._db_path.exists():
+            if self._db_path.is_dir():
+                shutil.rmtree(self._db_path)
+            else:
+                self._db_path.unlink()
+        if new_db_path.is_dir():
+            shutil.copytree(new_db_path, self._db_path)
+        else:
+            shutil.copy2(new_db_path, self._db_path)
+        self._db = kuzu.Database(str(self._db_path))
+        logger.info("graph_replace_done")
+
     # ── Query ─────────────────────────────────────────────────────
 
-    def query(self, cypher: str, *, read_only: bool = True) -> list[dict[str, Any]]:
+    def query(self, cypher: str, params: dict | None = None, *, read_only: bool = True) -> list[dict[str, Any]]:
         """Execute a Cypher query and return results as a list of dicts.
 
         Args:
             cypher: Cypher query string.
+            params: Optional parameter dict for parameterized queries.
             read_only: If True, reject queries containing write keywords.
 
         Returns:
@@ -106,10 +123,10 @@ class GraphManager:
             )
 
         if self._db is None:
-            raise RuntimeError("Graph database is temporarily unavailable (a script is executing). Try again shortly.")
+            raise RuntimeError("Graph database is not initialized.")
 
         conn = self._get_conn()
-        result = conn.execute(cypher)
+        result = conn.execute(cypher, params or {})
         rows: list[dict[str, Any]] = []
         while result.has_next():
             row = result.get_next()
@@ -130,7 +147,7 @@ class GraphManager:
             List of result rows as dicts (empty for write statements).
         """
         if self._db is None:
-            raise RuntimeError("Graph database is temporarily unavailable.")
+            raise RuntimeError("Graph database is not initialized.")
 
         conn = self._get_conn()
         result = conn.execute(cypher, params or {})

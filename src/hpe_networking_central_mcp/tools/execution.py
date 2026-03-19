@@ -7,22 +7,16 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import structlog
 from mcp.types import ToolAnnotations
 
 from ..config import Settings
 
-if TYPE_CHECKING:
-    from ..graph.manager import GraphManager
-
 logger = structlog.get_logger("tools.execution")
 
 EXECUTION_TIMEOUT = 300  # 5 minutes
-
-# Module-level reference set by register_execution_tools for graph DB close/reopen
-_graph_manager: GraphManager | None = None
 
 
 def _run_script(
@@ -31,8 +25,7 @@ def _run_script(
     """Execute a script from the library and return JSON result.
 
     Shared implementation used by both execute_script() and save_script(execute=True).
-    Closes the graph database before script execution so the subprocess can access
-    the file-backed Kùzu DB, then re-opens it afterwards.
+    Scripts access the graph database via IPC (Unix domain socket).
     """
     lib = settings.script_library_path
     script_path = lib / filename
@@ -62,11 +55,6 @@ def _run_script(
     start_time = time.time()
 
     logger.info("script_execution_start", filename=filename, parameters=parameters)
-
-    # Close graph DB so the subprocess can access the file-backed Kùzu DB
-    gm = _graph_manager
-    if gm is not None:
-        gm.close()
 
     try:
         result = subprocess.run(
@@ -108,10 +96,6 @@ def _run_script(
     except Exception as e:
         logger.error("script_execution_error", filename=filename, error=str(e))
         return json.dumps({"error": f"Execution failed: {str(e)}"})
-    finally:
-        # Always re-open the graph DB after script execution
-        if gm is not None:
-            gm.reopen()
 
 
 def _build_env(settings: Settings) -> dict[str, str]:
@@ -126,16 +110,15 @@ def _build_env(settings: Settings) -> dict[str, str]:
     env["GREENLAKE_CLIENT_SECRET"] = settings.effective_glp_client_secret
     env["GLP_BASE_URL"] = settings.glp_base_url
     env["GRAPH_DB_PATH"] = str(settings.graph_db_path)
+    env["GRAPH_IPC_SOCKET"] = str(settings.graph_ipc_socket)
     # Ensure no stale values leak through from host environment
     for key in ("BASE_URL", "CLIENT_ID", "CLIENT_SECRET"):
         env.pop(key, None)
     return env
 
 
-def register_execution_tools(mcp, settings: Settings, graph_manager=None):
+def register_execution_tools(mcp, settings: Settings):
     """Register script execution tools with the MCP server."""
-    global _graph_manager
-    _graph_manager = graph_manager
 
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, openWorldHint=True),

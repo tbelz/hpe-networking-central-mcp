@@ -106,6 +106,62 @@ NODE_TABLES: list[str] = [
     """,
 ]
 
+# ── Knowledge layer node tables (populated by GH runner or runtime fallback) ─
+
+KNOWLEDGE_NODE_TABLES: list[str] = [
+    """
+    CREATE NODE TABLE IF NOT EXISTS ApiEndpoint (
+        endpoint_id    STRING,
+        method         STRING,
+        path           STRING,
+        summary        STRING,
+        description    STRING,
+        operationId    STRING,
+        category       STRING,
+        deprecated     BOOLEAN,
+        tags           STRING[],
+        parameterNames STRING[],
+        hasRequestBody BOOLEAN,
+        PRIMARY KEY (endpoint_id)
+    )
+    """,
+    """
+    CREATE NODE TABLE IF NOT EXISTS ApiCategory (
+        name           STRING,
+        endpointCount  INT64,
+        sourceProvider STRING,
+        PRIMARY KEY (name)
+    )
+    """,
+    """
+    CREATE NODE TABLE IF NOT EXISTS DocSection (
+        section_id STRING,
+        title      STRING,
+        content    STRING,
+        source     STRING,
+        url        STRING,
+        PRIMARY KEY (section_id)
+    )
+    """,
+    """
+    CREATE NODE TABLE IF NOT EXISTS Script (
+        filename    STRING,
+        description STRING,
+        tags        STRING[],
+        content     STRING,
+        parameters  STRING,
+        created_at  STRING,
+        last_run    STRING,
+        last_exit_code INT64,
+        PRIMARY KEY (filename)
+    )
+    """,
+]
+
+KNOWLEDGE_REL_TABLES: list[str] = [
+    "CREATE REL TABLE IF NOT EXISTS BELONGS_TO_CATEGORY (FROM ApiEndpoint TO ApiCategory)",
+]
+
 # ── Relationship table DDL ───────────────────────────────────────────
 
 REL_TABLES: list[str] = [
@@ -415,7 +471,7 @@ _TABLE_NAME_RE = re.compile(r"CREATE NODE TABLE IF NOT EXISTS (\w+)")
 def get_node_properties() -> dict[str, list[str]]:
     """Extract {TableName: [property, ...]} from the DDL, always in sync."""
     result: dict[str, list[str]] = {}
-    for ddl in NODE_TABLES:
+    for ddl in NODE_TABLES + KNOWLEDGE_NODE_TABLES:
         m = _TABLE_NAME_RE.search(ddl)
         if not m:
             continue
@@ -428,14 +484,14 @@ def get_node_properties() -> dict[str, list[str]]:
 
 def get_node_tables() -> list[str]:
     """Return all node table names."""
-    return [m.group(1) for ddl in NODE_TABLES
+    return [m.group(1) for ddl in NODE_TABLES + KNOWLEDGE_NODE_TABLES
             if (m := _TABLE_NAME_RE.search(ddl))]
 
 
 def get_rel_tables() -> list[str]:
     """Return all relationship table names (including topology)."""
     _rel_re = re.compile(r"CREATE REL TABLE IF NOT EXISTS (\w+)")
-    all_ddl = REL_TABLES + TOPOLOGY_REL_TABLES
+    all_ddl = REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES
     return [m.group(1) for ddl in all_ddl if (m := _rel_re.search(ddl))]
 
 

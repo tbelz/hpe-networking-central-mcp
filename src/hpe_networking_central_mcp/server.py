@@ -2,26 +2,31 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import shutil
 import sys
+import tarfile
+import tempfile
 import threading
 from pathlib import Path
 
+import httpx
 from mcp.server.fastmcp import FastMCP
 
 from .central_client import CentralClient, GreenLakeClient
 from .config import load_settings
 from .graph import GraphManager
+from .graph.ipc_server import GraphIPCServer
 from .logging import setup_logging
 from .prompts.workflows import register_prompts
 from .resources.docs import register_resources
 from .resources.graph import register_graph_resources
 from .tools.api_call import register_api_call_tools, register_greenlake_api_call_tools
-from .tools.api_catalog import initialize_catalog, register_catalog_tools
+from .tools.api_catalog import register_catalog_tools
 from .tools.execution import register_execution_tools, _run_script
 from .tools.graph import register_graph_tools
-from .tools.scripts import register_script_tools
+from .tools.scripts import register_script_tools, sync_seeds_to_graph
 
 logger = setup_logging()
 
@@ -126,18 +131,94 @@ except Exception as exc:
     )
     sys.exit(1)
 
-# Initialize API catalog in background to avoid blocking MCP handshake
-def _bg_catalog_init():
+# ── Download knowledge DB from GitHub release (if configured) ─────────
+def _download_knowledge_db(repo: str, db_path: Path) -> bool:
+    """Download the latest knowledge DB tar.gz from a GitHub release.
+
+    Returns True if a DB was downloaded and extracted, False otherwise.
+    """
+    if not repo:
+        logger.info("knowledge_db_skip", reason="KNOWLEDGE_RELEASE_REPO not set")
+        return False
+
+    api_url = f"https://api.github.com/repos/{repo}/releases/latest"
     try:
-        initialize_catalog(settings)
-    except Exception as e:
-        logger.warning("startup_catalog_init_failed", error=str(e))
+        resp = httpx.get(api_url, timeout=30, follow_redirects=True)
+        resp.raise_for_status()
+        release = resp.json()
+    except Exception as exc:
+        logger.warning("knowledge_db_fetch_failed", error=str(exc))
+        return False
 
-threading.Thread(target=_bg_catalog_init, daemon=True).start()
+    # Find the knowledge_db.tar.gz asset
+    asset_url = None
+    for asset in release.get("assets", []):
+        if asset["name"] == "knowledge_db.tar.gz":
+            asset_url = asset["browser_download_url"]
+            break
 
-# Initialize file-backed graph database (schema only — population via seed scripts)
+    if not asset_url:
+        logger.warning("knowledge_db_no_asset", release=release.get("tag_name"))
+        return False
+
+    logger.info("knowledge_db_downloading", url=asset_url)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tar_path = Path(tmp) / "knowledge_db.tar.gz"
+            with httpx.stream("GET", asset_url, timeout=120, follow_redirects=True) as r:
+                r.raise_for_status()
+                with open(tar_path, "wb") as f:
+                    for chunk in r.iter_bytes(chunk_size=65536):
+                        f.write(chunk)
+
+            with tarfile.open(tar_path, "r:gz") as tf:
+                # Security: validate member paths to prevent path traversal
+                for member in tf.getmembers():
+                    if member.name.startswith("/") or ".." in member.name:
+                        raise ValueError(f"Unsafe tar member: {member.name}")
+                tf.extractall(tmp)
+
+            extracted_db = Path(tmp) / "knowledge_db"
+            if not extracted_db.exists():
+                logger.warning("knowledge_db_extract_failed", reason="knowledge_db not found in archive")
+                return False
+
+            # Replace current DB (may be file or directory depending on Kùzu version)
+            if db_path.exists():
+                if db_path.is_dir():
+                    shutil.rmtree(db_path)
+                else:
+                    db_path.unlink()
+            if extracted_db.is_dir():
+                shutil.copytree(extracted_db, db_path)
+            else:
+                shutil.copy2(extracted_db, db_path)
+
+            # Copy manifest.json if present in archive
+            extracted_manifest = Path(tmp) / "manifest.json"
+            if extracted_manifest.exists():
+                shutil.copy2(extracted_manifest, db_path.parent / "manifest.json")
+
+            logger.info("knowledge_db_installed", tag=release.get("tag_name"))
+            return True
+    except Exception as exc:
+        logger.warning("knowledge_db_download_failed", error=str(exc))
+        return False
+
+
+# Try to download knowledge DB before initializing graph
+knowledge_downloaded = _download_knowledge_db(
+    settings.knowledge_release_repo, settings.graph_db_path
+)
+
+# Initialize file-backed graph database
 graph_manager = GraphManager(settings.graph_db_path)
 graph_manager.initialize()
+
+# Start IPC server for script subprocesses
+ipc_server = GraphIPCServer(settings.graph_ipc_socket, graph_manager)
+ipc_server.start()
+atexit.register(ipc_server.stop)
 
 # ── Optionally initialize GreenLake client ────────────────────────────
 glp_client: GreenLakeClient | None = None
@@ -169,13 +250,10 @@ if _helpers_src.exists():
     shutil.copy2(_helpers_src, _helpers_dst)
     logger.info("central_helpers_copied", dest=str(_helpers_dst))
 
-# Copy seed scripts into script library (always overwrite — server is source of truth)
+# Sync seed scripts into graph DB and disk library
 _seeds_dir = Path(__file__).parent / "seeds"
 if _seeds_dir.is_dir():
-    for seed_file in _seeds_dir.iterdir():
-        if seed_file.suffix in (".py", ".json") and seed_file.name != "__init__.py":
-            shutil.copy2(seed_file, settings.script_library_path / seed_file.name)
-            logger.info("seed_script_copied", filename=seed_file.name)
+    sync_seeds_to_graph(graph_manager, _seeds_dir, settings.script_library_path)
 
 
 # Run auto-run seed scripts in background to populate graph on startup
@@ -216,24 +294,25 @@ def _bg_auto_run_seeds():
             logger.warning("auto_run_seed_error", filename=script_name, error=str(e))
 
 
-# Register all components (execution first so _graph_manager is set before bg thread)
-register_execution_tools(mcp, settings, graph_manager)
+# Register all components
+register_execution_tools(mcp, settings)
 register_graph_tools(mcp, settings, graph_manager)
-register_script_tools(mcp, settings)
-register_catalog_tools(mcp, settings)
+register_script_tools(mcp, settings, graph_manager)
+register_catalog_tools(mcp, settings, graph_manager)
 register_api_call_tools(mcp, settings, client)
 register_greenlake_api_call_tools(mcp, settings, glp_client)
 register_resources(mcp, settings)
 register_graph_resources(mcp, graph_manager)
-register_prompts(mcp)
+register_prompts(mcp, graph_manager)
 
-# Start auto-run seeds AFTER execution tools are registered (needs _graph_manager)
+# Start auto-run seeds in background AFTER tools are registered
 threading.Thread(target=_bg_auto_run_seeds, daemon=True).start()
 
 logger.info(
     "server_ready",
     credentials_configured=settings.has_credentials,
     glp_configured=glp_client is not None,
+    knowledge_db_loaded=knowledge_downloaded,
     script_library=str(settings.script_library_path),
 )
 

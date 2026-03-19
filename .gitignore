@@ -36,5 +36,6 @@ Thumbs.db
 htmlcov/
 *.sh
 
-# Script library (runtime artifact)
-scripts/
+# Script library (runtime artifact, populated at startup)
+scripts/library/
+scripts/__pycache__/
