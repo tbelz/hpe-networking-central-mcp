@@ -35,92 +35,40 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
 
     @mcp.resource("api://central/catalog")
     def api_catalog_resource() -> str:
-        """Compact overview of all available API categories.
+        """Complete API catalog — every endpoint stub grouped by category.
 
-        Shows category names and endpoint counts. Use search_api_catalog()
-        to find specific endpoints, and get_api_endpoint_detail() for full schemas.
+        Contains method, path, and summary for all endpoints. Read this to
+        understand what APIs are available before writing scripts or making
+        API calls. Use get_api_endpoint_detail(method, path) for full
+        parameter schemas of a specific endpoint.
         """
         gm = _graph_manager
         if gm is None or not gm.is_available:
             return "API catalog not available — graph database not initialized."
 
         rows = gm.query(
-            "MATCH (c:ApiCategory) RETURN c.name, c.endpointCount ORDER BY c.name",
+            "MATCH (e:ApiEndpoint) "
+            "RETURN e.category, e.method, e.path, e.summary "
+            "ORDER BY e.category, e.path",
             read_only=True,
         )
         if not rows:
-            return "API catalog is empty. Knowledge database may not be loaded."
+            return "API catalog is empty. Run refresh_knowledge_db() to download it."
 
-        total = sum(r.get("c.endpointCount", 0) for r in rows)
-        lines = [f"# Central API Catalog ({total} endpoints)\n"]
+        # Group by category
+        categories: dict[str, list[str]] = {}
         for r in rows:
-            lines.append(f"- **{r['c.name']}**: {r['c.endpointCount']} endpoints")
-        lines.append("\nUse search_api_catalog(query) to search, "
-                      "get_api_endpoint_detail(method, path) for full schemas.")
+            cat = r.get("e.category", "Uncategorized")
+            line = f"  {r.get('e.method', '?'):6s} {r.get('e.path', '?')}  — {r.get('e.summary', '')}"
+            categories.setdefault(cat, []).append(line)
+
+        lines = [f"# Central API Catalog ({len(rows)} endpoints)\n"]
+        for cat in sorted(categories):
+            lines.append(f"## {cat} ({len(categories[cat])} endpoints)")
+            lines.extend(categories[cat])
+            lines.append("")
+        lines.append("Use get_api_endpoint_detail(method, path) for full parameter schemas.")
         return "\n".join(lines)
-
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
-    def search_api_catalog(
-        query: str,
-        include_deprecated: bool = False,
-    ) -> str:
-        """Search the API catalog for endpoints matching a keyword.
-
-        Returns a compact list of matching endpoints (method, path, summary).
-        Use get_api_endpoint_detail() to get full parameter and schema details
-        for a specific endpoint.
-
-        Args:
-            query: Search term — path fragment (e.g. "dhcp", "vlan") or keyword.
-            include_deprecated: Include deprecated endpoints in results.
-
-        Returns:
-            JSON with matching endpoints or suggestions.
-        """
-        gm = _graph_manager
-        if gm is None or not gm.is_available:
-            return json.dumps({"error": "Graph database not available."})
-
-        # Use Cypher CONTAINS for keyword search across multiple fields
-        dep_filter = "" if include_deprecated else "AND (e.deprecated = false OR e.deprecated IS NULL) "
-        cypher = (
-            "MATCH (e:ApiEndpoint) "
-            "WHERE (e.path CONTAINS $q OR e.summary CONTAINS $q "
-            "OR e.operationId CONTAINS $q OR e.category CONTAINS $q OR e.description CONTAINS $q) "
-            f"{dep_filter}"
-            "RETURN e.method, e.path, e.summary, e.category, e.deprecated "
-            "ORDER BY e.category, e.path LIMIT 40"
-        )
-        rows = gm.query(cypher, {"q": query}, read_only=True)
-
-        if not rows:
-            # Get categories for hint
-            cats = gm.query(
-                "MATCH (c:ApiCategory) RETURN c.name ORDER BY c.name",
-                read_only=True,
-            )
-            return json.dumps({
-                "message": f"No endpoints match '{query}'.",
-                "hint": "Try a broader term or use list_api_categories() to browse.",
-                "categories": [r["c.name"] for r in cats],
-            }, indent=2)
-
-        endpoints = []
-        for r in rows:
-            d: dict[str, Any] = {
-                "method": r.get("e.method", ""),
-                "path": r.get("e.path", ""),
-                "summary": r.get("e.summary", ""),
-                "category": r.get("e.category", ""),
-            }
-            if r.get("e.deprecated"):
-                d["deprecated"] = True
-            endpoints.append(d)
-
-        return json.dumps({
-            "match_count": len(endpoints),
-            "endpoints": endpoints,
-        }, indent=2)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
     def get_api_endpoint_detail(
@@ -175,29 +123,6 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             d["has_request_body"] = True
 
         return json.dumps(d, indent=2)
-
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
-    def list_api_categories() -> str:
-        """List all API categories with endpoint counts.
-
-        Returns:
-            JSON with category names and their endpoint counts.
-        """
-        gm = _graph_manager
-        if gm is None or not gm.is_available:
-            return json.dumps({"error": "Graph database not available."})
-
-        rows = gm.query(
-            "MATCH (c:ApiCategory) RETURN c.name, c.endpointCount ORDER BY c.name",
-            read_only=True,
-        )
-        total = sum(r.get("c.endpointCount", 0) for r in rows)
-        cats = {r["c.name"]: r["c.endpointCount"] for r in rows}
-
-        return json.dumps({
-            "total_endpoints": total,
-            "categories": cats,
-        }, indent=2)
 
     @mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
     def refresh_knowledge_db() -> str:

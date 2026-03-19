@@ -90,8 +90,8 @@ Follow this workflow:
    ```
 
 4. **Live Diagnostics**: Use call_central_api() for real-time monitoring data.
-   Use search_api_catalog("troubleshoot") or search_api_catalog("diagnostics")
-   to find relevant endpoints.
+   Read the api://central/catalog resource to find relevant monitoring endpoints,
+   then get_api_endpoint_detail(method, path) for parameter details.
 
 5. **Check Script Library**: Call list_scripts(tag="troubleshooting") for existing diagnostic scripts.
 
@@ -186,9 +186,11 @@ except CentralAPIError as e:
 Use the exact paths shown above. For endpoint details (parameters, request body),
 call `get_api_endpoint_detail(method, path)`.
 
+You can also read the `api://central/catalog` resource for the same information.
+
 ## Rules
 
-1. Use ONLY endpoints listed above — NEVER guess API paths.
+1. Use ONLY endpoints from the catalog above — NEVER guess API paths.
 2. Use `api.paginate()` for any list/collection endpoint.
 3. Always handle errors with try/except CentralAPIError.
 4. Print results as JSON to stdout.
