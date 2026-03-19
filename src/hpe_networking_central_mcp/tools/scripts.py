@@ -85,7 +85,7 @@ def register_script_tools(mcp, settings: Settings):
         return json.dumps({"scripts": scripts, "total": len(scripts)}, indent=2)
 
     @mcp.tool(
-        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True),
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
     )
     def read_script(filename: str) -> str:
         """Read the source code of a script from the automation library.

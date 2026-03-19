@@ -216,18 +216,19 @@ def _bg_auto_run_seeds():
             logger.warning("auto_run_seed_error", filename=script_name, error=str(e))
 
 
-threading.Thread(target=_bg_auto_run_seeds, daemon=True).start()
-
-# Register all components
+# Register all components (execution first so _graph_manager is set before bg thread)
+register_execution_tools(mcp, settings, graph_manager)
 register_graph_tools(mcp, settings, graph_manager)
 register_script_tools(mcp, settings)
-register_execution_tools(mcp, settings)
 register_catalog_tools(mcp, settings)
 register_api_call_tools(mcp, settings, client)
 register_greenlake_api_call_tools(mcp, settings, glp_client)
 register_resources(mcp, settings)
 register_graph_resources(mcp, graph_manager)
 register_prompts(mcp)
+
+# Start auto-run seeds AFTER execution tools are registered (needs _graph_manager)
+threading.Thread(target=_bg_auto_run_seeds, daemon=True).start()
 
 logger.info(
     "server_ready",

@@ -59,6 +59,19 @@ class GraphManager:
             rel_tables=len(REL_TABLES) + len(TOPOLOGY_REL_TABLES),
         )
 
+    def close(self) -> None:
+        """Release the database so script subprocesses can access it."""
+        with self._lock:
+            self._db = None
+        logger.debug("graph_db_closed")
+
+    def reopen(self) -> None:
+        """Re-open the database after a script subprocess finishes."""
+        with self._lock:
+            if self._db is None:
+                self._db = kuzu.Database(str(self._db_path))
+                logger.debug("graph_db_reopened")
+
     def reset(self) -> None:
         """Delete the database directory and re-initialize with empty schema."""
         logger.info("graph_reset_start")
@@ -83,14 +96,14 @@ class GraphManager:
             ValueError: If read_only=True and query contains write keywords.
             RuntimeError: If graph is not initialized.
         """
-        if self._db is None:
-            raise RuntimeError("Graph not initialized — call initialize() first")
-
         if read_only and _WRITE_KEYWORDS.search(cypher):
             raise ValueError(
                 "Write operations are not allowed via query_graph. "
                 "Only read queries (MATCH, RETURN, WITH, WHERE, ORDER BY, LIMIT, UNION, UNWIND, CALL) are permitted."
             )
+
+        if self._db is None:
+            raise RuntimeError("Graph database is temporarily unavailable (a script is executing). Try again shortly.")
 
         conn = self._get_conn()
         result = conn.execute(cypher)
@@ -114,7 +127,7 @@ class GraphManager:
             List of result rows as dicts (empty for write statements).
         """
         if self._db is None:
-            raise RuntimeError("Graph not initialized — call initialize() first")
+            raise RuntimeError("Graph database is temporarily unavailable.")
 
         conn = self._get_conn()
         result = conn.execute(cypher, params or {})
