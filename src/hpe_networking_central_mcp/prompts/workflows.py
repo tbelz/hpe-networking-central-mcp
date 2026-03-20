@@ -90,7 +90,7 @@ Follow this workflow:
    ```
 
 4. **Live Diagnostics**: Use call_central_api() for real-time monitoring data.
-   Read the api://central/catalog resource to find relevant monitoring endpoints,
+   Use search_api_catalog(query) to find relevant monitoring endpoints,
    then get_api_endpoint_detail(method, path) for parameter details.
 
 5. **Check Script Library**: Call list_scripts(tag="troubleshooting") for existing diagnostic scripts.
@@ -103,21 +103,88 @@ Follow this workflow:
 """
 
     @mcp.prompt()
+    def analyze_config(scope: str = "") -> str:
+        """Guide: analyze configuration profiles and policy assignments across scopes."""
+        scope_clause = f' Focus on scope: "{scope}".' if scope else ""
+        return f"""You are analyzing configuration policy in HPE Aruba Networking Central.{scope_clause}
+
+Follow this workflow:
+
+1. **Discover Config Categories**: Query the graph for available categories:
+   ```cypher
+   MATCH (cp:ConfigProfile)
+   RETURN DISTINCT cp.category AS category, count(cp) AS profiles,
+          collect(DISTINCT cp.mergeStrategy)[0] AS mergeStrategy
+   ORDER BY category
+   ```
+
+2. **Check Library Profiles**: See what config profiles exist at the org level:
+   ```cypher
+   MATCH (o:Org)-[:HAS_CONFIG]->(cp:ConfigProfile)
+   RETURN cp.category, cp.name, cp.mergeStrategy, cp.isDefault, cp.deviceFunction
+   ORDER BY cp.category, cp.name
+   ```
+
+3. **Scope Assignments**: Check what's assigned at each hierarchy level:
+   ```cypher
+   // Site-level assignments
+   MATCH (s:Site)-[:SITE_ASSIGNS_CONFIG]->(cp:ConfigProfile)
+   RETURN s.name AS site, cp.category, cp.name AS profile
+   ORDER BY s.name, cp.category
+   ```
+   Also check collection, group, and device-level assignments using the
+   COLLECTION_ASSIGNS_CONFIG, GROUP_ASSIGNS_CONFIG, and DEVICE_ASSIGNS_CONFIG
+   relationships.
+
+4. **Effective Config per Device**: See what config a device actually receives:
+   ```cypher
+   MATCH (d:Device {{serial: '<serial>'}})-[r:EFFECTIVE_CONFIG]->(cp:ConfigProfile)
+   RETURN cp.category, cp.name, r.sourceScope, r.sourceScopeId
+   ORDER BY cp.category
+   ```
+
+5. **Blast Radius for Config Change**: Before modifying config at a scope:
+   ```cypher
+   MATCH (s:Site {{name: 'MySite'}})-[:HAS_DEVICE]->(d:Device)
+   RETURN d.serial, d.name, d.deviceType, d.configStatus
+   ```
+
+6. **Merge Strategy Analysis**: Understand how profiles combine:
+   - **additive** (e.g., wlan-ssids): profiles from parent scopes are combined
+   - **atomic** (e.g., ntp): child scope overrides parent completely
+
+7. **Present Report**:
+   - Config categories with profile counts and merge strategies
+   - Hierarchy overview showing where config is assigned
+   - Per-device effective config (with inheritance source)
+   - Anomalies: unassigned profiles, conflicting overrides
+   - Recommendations
+"""
+
+    @mcp.prompt()
     def write_script(task_description: str) -> str:
         """Guide: write a Python automation script for a given task.
 
-        Assembles the script-writing guide and a compact map of every API endpoint
-        from the knowledge graph so the agent can write correct code without guessing.
+        Provides the script-writing template and instructs the agent to discover
+        API endpoints via search_api_catalog() instead of embedding the full catalog.
 
         Args:
             task_description: What the script should accomplish.
         """
-        api_map = _build_api_map(graph_manager)
-
         return f"""You are writing a Python automation script for HPE Aruba Networking Central.
 
 ## Task
 {task_description}
+
+## Step 1 — Discover Endpoints
+
+Before writing ANY code you MUST:
+1. Call `search_api_catalog(query)` with keywords relevant to the task to find candidate endpoints.
+2. Call `get_api_endpoint_detail(method, path)` for each endpoint you plan to use — get exact
+   parameter names, types, and request/response schemas.
+3. Call `list_api_categories()` if you need to explore what API areas exist.
+
+NEVER guess or hardcode API paths — always discover them first.
 
 ## Script Template
 
@@ -179,55 +246,11 @@ except CentralAPIError as e:
 - Print diagnostics/progress to stderr: `print("Processing...", file=sys.stderr)`
 - Exit 0 on success, non-zero on failure.
 
-## Available API Endpoints
-
-{api_map}
-
-Use the exact paths shown above. For endpoint details (parameters, request body),
-call `get_api_endpoint_detail(method, path)`.
-
-You can also read the `api://central/catalog` resource for the same information.
-
 ## Rules
 
-1. Use ONLY endpoints from the catalog above — NEVER guess API paths.
+1. Use ONLY endpoints discovered via search_api_catalog — NEVER guess API paths.
 2. Use `api.paginate()` for any list/collection endpoint.
 3. Always handle errors with try/except CentralAPIError.
 4. Print results as JSON to stdout.
 5. Keep scripts focused — one task per script.
 """
-
-
-def _build_api_map(graph_manager: GraphManager) -> str:
-    """Query ApiEndpoint nodes and format a compact API map grouped by category."""
-    if not graph_manager.is_available:
-        return "(API catalog not available — knowledge database not loaded.)"
-
-    try:
-        rows = graph_manager.query(
-            "MATCH (e:ApiEndpoint) "
-            "RETURN e.category, e.method, e.path, e.summary "
-            "ORDER BY e.category, e.path",
-            read_only=True,
-        )
-    except Exception as exc:
-        logger.warning("write_script_api_map_failed", error=str(exc))
-        return "(Failed to load API map from graph.)"
-
-    if not rows:
-        return "(No API endpoints in knowledge database. Run refresh_knowledge_db() or check GH releases.)"
-
-    # Group by category
-    categories: dict[str, list[str]] = {}
-    for r in rows:
-        cat = r.get("e.category", "Uncategorized")
-        line = f"  {r.get('e.method', '?'):6s} {r.get('e.path', '?')}  — {r.get('e.summary', '')}"
-        categories.setdefault(cat, []).append(line)
-
-    lines: list[str] = []
-    for cat in sorted(categories):
-        lines.append(f"### {cat} ({len(categories[cat])} endpoints)")
-        lines.extend(categories[cat])
-        lines.append("")
-
-    return "\n".join(lines)
