@@ -28,6 +28,7 @@ from hpe_networking_central_mcp.graph.schema import (  # noqa: E402
     KNOWLEDGE_NODE_TABLES,
     KNOWLEDGE_REL_TABLES,
     NODE_TABLES,
+    POLICY_REL_TABLES,
     REL_TABLES,
     TOPOLOGY_REL_TABLES,
 )
@@ -47,7 +48,7 @@ except ImportError:
 def _apply_schema(db: lb.Database) -> None:
     """Apply full schema DDL (live + knowledge tables)."""
     conn = lb.Connection(db)
-    all_ddl = NODE_TABLES + KNOWLEDGE_NODE_TABLES + REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES
+    all_ddl = NODE_TABLES + KNOWLEDGE_NODE_TABLES + REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES
     for ddl in all_ddl:
         conn.execute(ddl.strip())
     print(f"  Schema applied: {len(all_ddl)} DDL statements")
