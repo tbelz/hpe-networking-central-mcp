@@ -2,9 +2,12 @@
 """Populate config policy layer — discover categories, profiles, and scope assignments.
 
 Dynamically discovers configuration categories from the Central API,
-fetches library-level profiles with extended metadata, and creates
-scope assignment relationships (ORG/COLLECTION/SITE/GROUP_ASSIGNS_CONFIG
-edges) from scopes to ConfigProfile nodes in the graph.
+fetches library-level profiles with extended metadata, creates scope
+assignment relationships (*_ASSIGNS_CONFIG edges), and computes
+EFFECTIVE_CONFIG edges per device by walking the scope hierarchy.
+
+For atomic categories the closest scope wins (Device > Group > Site >
+Collection > Org).  For additive categories all scope levels contribute.
 
 Merge strategy is detected by inspecting the API response shape:
   - A list of multiple named profiles → additive (e.g., wlan-ssids)
@@ -234,6 +237,93 @@ def resolve_scope_assignments(category: str, merge_strategy: str) -> dict:
     return stats
 
 
+# ── Effective config computation ─────────────────────────────────────
+
+def compute_effective_config(category: str, merge_strategy: str) -> int:
+    """Walk the scope hierarchy and write EFFECTIVE_CONFIG edges for every device.
+
+    For **atomic** categories the closest (most-specific) scope wins:
+        Device > DeviceGroup > Site > SiteCollection > Org
+    For **additive** categories every scope that assigns a profile contributes.
+
+    Returns the number of EFFECTIVE_CONFIG edges created.
+    """
+    edges = 0
+
+    # Precedence layers, from highest to lowest.  Each entry:
+    #   (relationship_type, path_from_device, scope_label)
+    # We walk the graph *from* each Device backward through each scope.
+    layers = [
+        # Device-level override (direct assignment)
+        ("DEVICE_ASSIGNS_CONFIG", "(d:Device)-[:DEVICE_ASSIGNS_CONFIG]->", "device", "d.serial"),
+        # DeviceGroup (device ←HAS_MEMBER- group)
+        ("GROUP_ASSIGNS_CONFIG",
+         "(d:Device)<-[:HAS_MEMBER]-(dg:DeviceGroup)-[:GROUP_ASSIGNS_CONFIG]->",
+         "device-group", "dg.scopeId"),
+        # Site (device ←HAS_DEVICE- site)
+        ("SITE_ASSIGNS_CONFIG",
+         "(d:Device)<-[:HAS_DEVICE]-(s:Site)-[:SITE_ASSIGNS_CONFIG]->",
+         "site", "s.scopeId"),
+        # SiteCollection (device ←HAS_DEVICE- site ←CONTAINS_SITE- collection)
+        ("COLLECTION_ASSIGNS_CONFIG",
+         "(d:Device)<-[:HAS_DEVICE]-(s:Site)<-[:CONTAINS_SITE]-(sc:SiteCollection)-[:COLLECTION_ASSIGNS_CONFIG]->",
+         "collection", "sc.scopeId"),
+        # Org
+        ("ORG_ASSIGNS_CONFIG",
+         "(d:Device)<-[:HAS_DEVICE]-(:Site)<-[:HAS_SITE|CONTAINS_SITE]-(:Org|SiteCollection)-[:ORG_ASSIGNS_CONFIG]->",
+         "org", "'org-root'"),
+    ]
+
+    # Get all devices
+    devices = graph.query("MATCH (d:Device) RETURN d.serial")
+
+    for dev_row in devices:
+        serial = dev_row.get("d.serial", "")
+        if not serial:
+            continue
+
+        # Collect profiles that apply to this device for this category
+        seen_profiles: set[str] = set()  # profile ids already covered
+        found_atomic = False  # for atomic: stop after first scope with profiles
+
+        for _rel, path, scope_label, scope_id_expr in layers:
+            if merge_strategy == "atomic" and found_atomic:
+                break  # closest scope already won
+
+            cypher = (
+                f"MATCH {path}(cp:ConfigProfile) "
+                f"WHERE d.serial = $serial AND cp.category = $cat "
+                f"RETURN cp.id AS pid, {scope_id_expr} AS scopeId"
+            )
+            try:
+                rows = graph.query(cypher, {"serial": serial, "cat": category})
+            except Exception:
+                continue
+
+            scope_has_profiles = False
+            for row in rows:
+                pid = row.get("pid", "")
+                scope_id = str(row.get("scopeId", ""))
+                if not pid or pid in seen_profiles:
+                    continue
+                seen_profiles.add(pid)
+                scope_has_profiles = True
+
+                graph.execute(
+                    "MATCH (d:Device {serial: $serial}), (cp:ConfigProfile {id: $pid}) "
+                    "MERGE (d)-[r:EFFECTIVE_CONFIG]->(cp) "
+                    "SET r.sourceScope = $scope, r.sourceScopeId = $scopeId",
+                    {"serial": serial, "pid": pid,
+                     "scope": scope_label, "scopeId": scope_id},
+                )
+                edges += 1
+
+            if scope_has_profiles:
+                found_atomic = True  # relevant only for atomic
+
+    return edges
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 def main():
@@ -280,6 +370,15 @@ def main():
         # Step 3: Resolve per-scope assignments
         stats = resolve_scope_assignments(cat, merge_strategy)
         summary["scope_assignments"][cat] = stats
+
+    # Step 4: Compute EFFECTIVE_CONFIG edges per device from the graph hierarchy
+    print("Computing effective config per device...", file=sys.stderr)
+    effective_edges = 0
+    for cat in categories:
+        ms = summary["merge_strategies"].get(cat, "unknown")
+        effective_edges += compute_effective_config(cat, ms)
+    summary["effective_config_edges"] = effective_edges
+    print(f"  Created {effective_edges} EFFECTIVE_CONFIG edges", file=sys.stderr)
 
     print(json.dumps(summary, indent=2))
 

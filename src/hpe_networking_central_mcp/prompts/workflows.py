@@ -136,12 +136,30 @@ Follow this workflow:
    COLLECTION_ASSIGNS_CONFIG, GROUP_ASSIGNS_CONFIG, and DEVICE_ASSIGNS_CONFIG
    relationships.
 
-4. **Effective Config per Device**: See what config a device actually receives:
+4. **Effective Config per Device** (graph-computed, from scope hierarchy walk):
    ```cypher
    MATCH (d:Device {{serial: '<serial>'}})-[r:EFFECTIVE_CONFIG]->(cp:ConfigProfile)
-   RETURN cp.category, cp.name, r.sourceScope, r.sourceScopeId
+   RETURN cp.category, cp.name, cp.mergeStrategy, r.sourceScope, r.sourceScopeId
    ORDER BY cp.category
    ```
+   This shows the graph's pre-computed view.  For **atomic** categories the
+   closest scope wins (Device > Group > Site > Collection > Org).  For
+   **additive** categories all contributing scopes appear.
+
+   **On-demand API verification** — if you need the authoritative effective
+   config for a specific device (e.g., to verify overrides or see live state),
+   call the Central API directly:
+   ```
+   call_central_api(
+       "network-config/v1alpha1/{{category}}",
+       query_params={{"scopeId": "<serial>", "scopeType": "device",
+                     "effective": "true", "detailed": "true"}}
+   )
+   ```
+   The `detailed=true` response includes `sourceScope` and `sourceScopeId`
+   annotations from Central's own resolution engine.  Use this when the
+   graph-computed result needs validation or when device-level overrides
+   are suspected.
 
 5. **Blast Radius for Config Change**: Before modifying config at a scope:
    ```cypher

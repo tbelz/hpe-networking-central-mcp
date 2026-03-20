@@ -51,6 +51,10 @@ direct API reads and reusable Python scripts.
    config lookups, health checks. This is the fastest way to read live data.
    Tip: Add `effective=true` to config endpoints for hierarchically merged config,
    and `detailed=true` for source annotations.
+   For bulk effective-config analysis, prefer the graph: the `EFFECTIVE_CONFIG` relationships
+   are pre-computed per device during seed population.  Use the API with `effective=true` and
+   `detailed=true` only when you need authoritative per-device verification or suspect
+   device-level overrides not yet captured in the graph.
 
 4. **Single writes**: Use call_central_api(path, method="POST", body={...}) for simple
    write operations (create a VLAN, delete a profile, update a setting).

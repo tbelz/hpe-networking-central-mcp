@@ -335,6 +335,27 @@ GET network-config/v1alpha1/{category}
 Add `effective=true` for merged inherited config. Add `detailed=true` for
 source annotations showing which scope each setting comes from.
 
+### Effective Config (Graph vs API)
+
+The graph pre-computes **EFFECTIVE_CONFIG** edges per device by walking the
+scope hierarchy after seed population.  For quick analysis:
+
+```cypher
+MATCH (d:Device {serial: 'SERIAL'})-[r:EFFECTIVE_CONFIG]->(cp:ConfigProfile)
+RETURN cp.category, cp.name, cp.mergeStrategy, r.sourceScope, r.sourceScopeId
+```
+
+For **authoritative per-device verification** (e.g., confirming overrides or
+live state), call the API with `effective=true&detailed=true`:
+
+```
+GET network-config/v1alpha1/{category}
+    ?scopeId=<device-serial>&scopeType=device&effective=true&detailed=true
+```
+
+The API response includes `sourceScope`/`sourceScopeId` annotations from
+Central's own resolution.  Use this when the graph result needs validation.
+
 ### Write config
 ```
 POST/PATCH network-config/v1alpha1/{category}
