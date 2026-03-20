@@ -18,7 +18,7 @@ logger = structlog.get_logger("graph.manager")
 # Cypher keywords that mutate the graph — blocked in read-only query tool.
 # LOAD FROM is included because LadybugDB can read arbitrary filesystem paths.
 _WRITE_KEYWORDS = re.compile(
-    r"\b(CREATE|DELETE|DETACH|SET|REMOVE|MERGE|DROP|ALTER|COPY|INSERT|LOAD)\b",
+    r"\b(CREATE|DELETE|DETACH|SET|REMOVE|MERGE|DROP|ALTER|COPY|INSERT|LOAD|INSTALL)\b",
     re.IGNORECASE,
 )
 
