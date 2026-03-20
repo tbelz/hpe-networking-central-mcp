@@ -31,11 +31,13 @@ def discover_categories() -> list[str]:
             # The root endpoint may return available categories
             for key in ("categories", "items", "result"):
                 if key in resp and isinstance(resp[key], list):
-                    return [c if isinstance(c, str) else c.get("name", c.get("category", ""))
+                    cats = [c if isinstance(c, str) else c.get("name", c.get("category", ""))
                             for c in resp[key] if c]
+                    return [cat for cat in cats if isinstance(cat, str) and cat.strip()]
         if isinstance(resp, list):
-            return [c if isinstance(c, str) else c.get("name", c.get("category", ""))
+            cats = [c if isinstance(c, str) else c.get("name", c.get("category", ""))
                     for c in resp if c]
+            return [cat for cat in cats if isinstance(cat, str) and cat.strip()]
     except CentralAPIError as exc:
         print(f"Warning: category discovery failed: [{exc.status_code}] {exc.message}",
               file=sys.stderr)
@@ -268,9 +270,9 @@ def compute_effective_config(category: str, merge_strategy: str) -> int:
         ("COLLECTION_ASSIGNS_CONFIG",
          "(d:Device)<-[:HAS_DEVICE]-(s:Site)<-[:CONTAINS_SITE]-(sc:SiteCollection)-[:COLLECTION_ASSIGNS_CONFIG]->",
          "collection", "sc.scopeId"),
-        # Org
+        # Org (direct: Site←HAS_SITE-Org, or via collection: Site←CONTAINS_SITE-SC←HAS_COLLECTION-Org)
         ("ORG_ASSIGNS_CONFIG",
-         "(d:Device)<-[:HAS_DEVICE]-(:Site)<-[:HAS_SITE|CONTAINS_SITE]-(:Org|SiteCollection)-[:ORG_ASSIGNS_CONFIG]->",
+         "(d:Device)<-[:HAS_DEVICE]-(:Site)<-[:HAS_SITE|CONTAINS_SITE*1..2]-(:Org|SiteCollection)<-[:HAS_COLLECTION*0..1]-(o:Org)-[:ORG_ASSIGNS_CONFIG]->",
          "org", "'org-root'"),
     ]
 

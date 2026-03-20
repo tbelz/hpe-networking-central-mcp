@@ -53,7 +53,7 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             category: Optional category name to restrict results.
 
         Returns:
-            JSON with match_count and list of matching endpoints.
+            JSON with returned_count and list of matching endpoints.
         """
         gm = _graph_manager
         if gm is None or not gm.is_available:

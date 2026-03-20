@@ -411,8 +411,8 @@ else:
         if "error" in data and "empty" in data["error"]:
             print(f"    -> Catalog still loading, acceptable")
             return
-        assert data.get("match_count", 0) > 0, f"Zero matches: {data}"
-        print(f"    -> {data['match_count']} matches")
+        assert data.get("returned_count", 0) > 0, f"Zero matches: {data}"
+        print(f"    -> {data['returned_count']} matches")
 
     def test_mcp_detail():
         resp = _tool_call("search_api_catalog", {"query": "devices"})
