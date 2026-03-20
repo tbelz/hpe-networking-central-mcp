@@ -1,0 +1,6 @@
+{
+    "description": "Enrich the graph with monitoring data: switch ports, AP radios, and connected clients. On-demand only — run after populate_base_graph.",
+    "tags": ["monitoring", "graph", "enrichment", "ports", "radios", "clients"],
+    "auto_run": false,
+    "parameters": []
+}
