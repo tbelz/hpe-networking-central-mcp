@@ -28,12 +28,20 @@ from hpe_networking_central_mcp.graph.schema import (  # noqa: E402
     KNOWLEDGE_NODE_TABLES,
     KNOWLEDGE_REL_TABLES,
     NODE_TABLES,
+    POLICY_REL_TABLES,
     REL_TABLES,
     TOPOLOGY_REL_TABLES,
 )
 from hpe_networking_central_mcp.oas_index import OASIndex  # noqa: E402
 from hpe_networking_central_mcp.oas_scraper import ReadMeSpecProvider  # noqa: E402
 from hpe_networking_central_mcp.entity_mapping import run_mapping, build_default_pipeline  # noqa: E402
+from hpe_networking_central_mcp.entity_mapping.entities import build_registry_from_node_tables  # noqa: E402
+from hpe_networking_central_mcp.schema_generator import (  # noqa: E402
+    content_hash,
+    generate_ddl,
+    infer_node_tables,
+    infer_rel_tables,
+)
 
 # GLP provider may fail if dependencies vary; import conditionally
 try:
@@ -47,7 +55,7 @@ except ImportError:
 def _apply_schema(db: lb.Database) -> None:
     """Apply full schema DDL (live + knowledge tables)."""
     conn = lb.Connection(db)
-    all_ddl = NODE_TABLES + KNOWLEDGE_NODE_TABLES + REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES
+    all_ddl = NODE_TABLES + KNOWLEDGE_NODE_TABLES + REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES
     for ddl in all_ddl:
         conn.execute(ddl.strip())
     print(f"  Schema applied: {len(all_ddl)} DDL statements")
@@ -156,13 +164,19 @@ def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
     return count
 
 
-def _populate_entity_mappings(db: lb.Database, index: OASIndex) -> dict:
+def _populate_entity_mappings(db: lb.Database, index: OASIndex, registry=None) -> dict:
     """Run entity mapping pipeline and populate EntityType + OPERATES_ON edges.
+
+    Args:
+        db: LadybugDB database.
+        index: The OAS index with parsed API endpoints.
+        registry: Optional pre-built EntityRegistry (e.g. from DDL).
+            Falls back to the static build_aruba_central_registry().
 
     Returns the mapping report as a JSON-serializable dict.
     """
     conn = lb.Connection(db)
-    pipeline, registry = build_default_pipeline()
+    pipeline, registry = build_default_pipeline(registry=registry)
 
     # Insert EntityType nodes
     for entity in registry.all_entities():
@@ -276,28 +290,47 @@ def main() -> None:
     print("=== Building Knowledge Database ===\n")
 
     # 1. Create DB and apply schema
-    print("[1/5] Creating database and applying schema...")
+    print("[1/6] Creating database and applying schema...")
     db = lb.Database(str(db_path))
     _apply_schema(db)
 
     # 2. Scrape API specs
-    print("\n[2/5] Scraping API documentation...")
+    print("\n[2/6] Scraping API documentation...")
     specs = _scrape_specs(cache_dir)
     if not specs:
         print("⚠ No specs scraped — database will have no API endpoints.", file=sys.stderr)
 
     # 3. Build index and populate
-    print("\n[3/5] Populating API endpoints...")
+    print("\n[3/6] Populating API endpoints...")
     index = OASIndex()
     index.build(specs)
     endpoint_count = _populate_endpoints(db, index)
 
-    # 4. Entity mapping
-    print("\n[4/5] Running entity mapping pipeline...")
-    mapping_report = _populate_entity_mappings(db, index)
+    # 4. Generate DDL from API response schemas
+    print("\n[4/6] Generating DDL from API response schemas...")
+    node_tables = infer_node_tables(index)
+    rel_tables = infer_rel_tables(index, node_tables)
+    generated_ddl = generate_ddl(node_tables, rel_tables)
+    ddl_hash = content_hash(generated_ddl)
+    ddl_path = output_dir / "generated_ddl.json"
+    ddl_path.write_text(json.dumps({
+        "schema_hash": ddl_hash,
+        "node_tables": len(node_tables),
+        "rel_tables": len(rel_tables),
+        "ddl": generated_ddl,
+    }, indent=2), encoding="utf-8")
+    print(f"  Node tables: {len(node_tables)}")
+    print(f"  Rel tables:  {len(rel_tables)}")
+    print(f"  Schema hash: {ddl_hash}")
+    print(f"  DDL file:    {ddl_path}")
 
-    # 5. Populate seed scripts
-    print("\n[5/5] Populating seed scripts...")
+    # 5. Entity mapping (use DDL-derived registry when available)
+    print("\n[5/6] Running entity mapping pipeline...")
+    ddl_registry = build_registry_from_node_tables(node_tables) if node_tables else None
+    mapping_report = _populate_entity_mappings(db, index, registry=ddl_registry)
+
+    # 6. Populate seed scripts
+    print("\n[6/6] Populating seed scripts...")
     seeds_dir = Path(__file__).resolve().parent.parent / "src" / "hpe_networking_central_mcp" / "seeds"
     if seeds_dir.is_dir():
         _populate_seeds(db, seeds_dir)
@@ -311,9 +344,15 @@ def main() -> None:
     import time
     manifest = {
         "version": time.strftime("knowledge-db-%Y%m%d-%H%M%S", time.gmtime()),
+        "schema_hash": ddl_hash,
         "endpoint_count": endpoint_count,
         "category_count": len(index.categories),
         "categories": sorted(index.categories.keys()),
+        "generated_ddl": {
+            "node_tables": len(node_tables),
+            "rel_tables": len(rel_tables),
+            "hash": ddl_hash,
+        },
         "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "entity_mapping": mapping_report,
     }
@@ -332,6 +371,7 @@ def main() -> None:
         with tarfile.open(tar_path, "w:gz") as tf:
             tf.add(db_path, arcname="knowledge_db")
             tf.add(manifest_path, arcname="manifest.json")
+            tf.add(ddl_path, arcname="generated_ddl.json")
         print(f"✓ Archive created ({tar_path.stat().st_size / 1024 / 1024:.1f} MB)")
 
 

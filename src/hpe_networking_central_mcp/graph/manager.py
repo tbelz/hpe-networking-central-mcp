@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import threading
@@ -37,24 +38,47 @@ class GraphManager:
         self._db_path = db_path
         self._db: lb.Database | None = None
         self._lock = threading.Lock()
+        self._schema_hash: str | None = None
 
     @property
     def db_path(self) -> Path:
         return self._db_path
 
+    @property
+    def schema_hash(self) -> str | None:
+        """Return the content hash of the generated DDL, or None if bootstrap-only."""
+        return self._schema_hash
+
     # ── Lifecycle ─────────────────────────────────────────────────
 
-    def initialize(self) -> None:
-        """Create (or open) the file-backed database and apply schema DDL."""
+    def initialize(self, generated_ddl_path: Path | None = None) -> None:
+        """Create (or open) the file-backed database and apply schema DDL.
+
+        Args:
+            generated_ddl_path: Optional path to a generated_ddl.json file
+                produced by the build pipeline.  When provided, its DDL
+                statements are applied alongside the bootstrap schema.
+        """
         logger.info("graph_init_start", db_path=str(self._db_path))
-        # Ensure parent directory exists; LadybugDB creates the DB directory itself.
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = lb.Database(str(self._db_path))
         conn = self._get_conn()
-        all_ddl = NODE_TABLES + KNOWLEDGE_NODE_TABLES + REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES
-        for ddl in all_ddl:
+
+        # Bootstrap: knowledge layer + legacy domain tables
+        bootstrap_ddl = (
+            NODE_TABLES + KNOWLEDGE_NODE_TABLES
+            + REL_TABLES + KNOWLEDGE_REL_TABLES
+            + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES
+        )
+        for ddl in bootstrap_ddl:
             conn.execute(ddl.strip())
-        # Load the algo extension so graph algorithms (WCC, PageRank, etc.) are available in Cypher.
+
+        # Dynamic DDL from generated_ddl.json (produced by build pipeline)
+        dynamic_count = 0
+        if generated_ddl_path is not None:
+            dynamic_count = self._apply_generated_ddl(conn, generated_ddl_path)
+
+        # Load the algo extension
         try:
             conn.execute("INSTALL algo")
             conn.execute("LOAD EXTENSION algo")
@@ -62,10 +86,7 @@ class GraphManager:
             msg = str(exc)
             lower_msg = msg.lower()
             if "already installed" in lower_msg or "already loaded" in lower_msg:
-                logger.debug(
-                    "algo_extension_already_loaded",
-                    error=msg,
-                )
+                logger.debug("algo_extension_already_loaded", error=msg)
             else:
                 logger.warning(
                     "algo_extension_load_failed",
@@ -77,12 +98,46 @@ class GraphManager:
             "graph_schema_created",
             node_tables=len(NODE_TABLES),
             rel_tables=len(REL_TABLES) + len(TOPOLOGY_REL_TABLES) + len(POLICY_REL_TABLES),
+            dynamic_tables=dynamic_count,
+            schema_hash=self._schema_hash,
         )
 
     @property
     def is_available(self) -> bool:
         """Return True if the database is open and ready."""
         return self._db is not None
+
+    def _apply_generated_ddl(self, conn: lb.Connection, ddl_path: Path) -> int:
+        """Load and apply DDL from a generated_ddl.json file.
+
+        Returns the number of DDL statements applied.
+        """
+        if not ddl_path.exists():
+            logger.warning("generated_ddl_not_found", path=str(ddl_path))
+            return 0
+
+        try:
+            data = json.loads(ddl_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("generated_ddl_read_error", path=str(ddl_path), error=str(exc))
+            return 0
+
+        ddl_stmts = data.get("ddl", [])
+        self._schema_hash = data.get("schema_hash")
+
+        count = 0
+        for stmt in ddl_stmts:
+            if isinstance(stmt, str) and stmt.strip():
+                conn.execute(stmt.strip())
+                count += 1
+
+        logger.info(
+            "generated_ddl_applied",
+            path=str(ddl_path),
+            statements=count,
+            schema_hash=self._schema_hash,
+        )
+        return count
 
     def reset(self) -> None:
         """Delete the database and re-initialize with empty schema."""
@@ -119,6 +174,14 @@ class GraphManager:
                 shutil.copy2(new_db_path, self._db_path)
             self._db = lb.Database(str(self._db_path))
         logger.info("graph_replace_done")
+
+    def apply_generated_ddl(self, ddl_path: Path) -> int:
+        """Apply dynamic DDL from a generated_ddl.json file on the live DB.
+
+        Returns the number of DDL statements applied.
+        """
+        conn = self._get_conn()
+        return self._apply_generated_ddl(conn, ddl_path)
 
     # ── Query ─────────────────────────────────────────────────────
 
@@ -176,8 +239,8 @@ class GraphManager:
         lines.append("| Table | Primary Key | Properties | Row Count |")
         lines.append("|-------|-------------|------------|-----------|")
         try:
-            node_rows = list(conn.execute("CALL show_tables() RETURN * WHERE type = 'NODE'"))
-            node_tables = [row[1] for row in node_rows]  # name column
+            all_tables = list(conn.execute("CALL show_tables() RETURN *").rows_as_dict())
+            node_tables = [row["name"] for row in all_tables if row.get("type") == "NODE"]
         except Exception:
             node_tables = []
 
@@ -204,8 +267,8 @@ class GraphManager:
         lines.append("| Relationship | From → To | Properties | Edge Count |")
         lines.append("|-------------|-----------|------------|------------|")
         try:
-            rel_rows = list(conn.execute("CALL show_tables() RETURN * WHERE type = 'REL'"))
-            rel_tables = [row[1] for row in rel_rows]
+            all_tables = list(conn.execute("CALL show_tables() RETURN *").rows_as_dict())
+            rel_tables = [row["name"] for row in all_tables if row.get("type") == "REL"]
         except Exception:
             rel_tables = []
 

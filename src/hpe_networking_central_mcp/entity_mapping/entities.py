@@ -8,6 +8,10 @@ both the canonical field name and the property name used in the graph DB.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hpe_networking_central_mcp.schema_generator import NodeTableDef
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,41 @@ class EntityRegistry:
 
     def __len__(self) -> int:
         return len(self._entities)
+
+
+def entities_from_node_tables(node_tables: list[NodeTableDef]) -> list[Entity]:
+    """Convert schema_generator NodeTableDef objects to Entity objects."""
+    entities = []
+    for table in node_tables:
+        source_desc = ", ".join(table.source_endpoints) if table.source_endpoints else ""
+        description = f"Entity derived from DDL table {table.name}"
+        if source_desc:
+            description += f" (source: {source_desc})"
+
+        fields: dict[str, EntityField] = {}
+        for prop in table.properties:
+            desc = f"primary key ({prop.db_type})" if prop.name == table.primary_key else prop.db_type
+            fields[prop.name] = EntityField(
+                name=prop.name,
+                graph_property=prop.name,
+                description=desc,
+            )
+
+        entities.append(Entity(
+            name=table.name,
+            graph_node=table.name,
+            description=description,
+            fields=fields,
+        ))
+    return entities
+
+
+def build_registry_from_node_tables(node_tables: list[NodeTableDef]) -> EntityRegistry:
+    """Build an EntityRegistry from DDL node table definitions."""
+    registry = EntityRegistry()
+    for entity in entities_from_node_tables(node_tables):
+        registry.register(entity)
+    return registry
 
 
 def build_aruba_central_registry() -> EntityRegistry:
