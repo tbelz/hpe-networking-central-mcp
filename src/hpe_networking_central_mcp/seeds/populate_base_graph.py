@@ -2,15 +2,14 @@
 """Populate the base configuration graph from Aruba Central APIs.
 
 Fetches structural data (sites, site-collections, device-groups, devices)
-and library-level config profiles, then inserts them into the LadybugDB graph
-as nodes and relationships.
+and inserts them into the LadybugDB graph as nodes and relationships.
 
 This is the foundational graph population — run it before any enrichment scripts.
+Config profiles are handled separately by populate_config_policy.
 
 Hierarchy built:
   Org → SiteCollection → Site → Device
   DeviceGroup → Device (cross-cutting membership)
-  Org → ConfigProfile (library-level config metadata)
 """
 
 import json
@@ -19,15 +18,6 @@ import sys
 from central_helpers import api, graph, CentralAPIError
 
 PAGE_LIMIT = 100
-
-# Config categories to index at the library level
-CONFIG_CATEGORIES = [
-    "wlan-ssids",
-    "sw-port-profiles",
-    "gw-port-profiles",
-    "roles",
-    "server-groups",
-]
 
 
 def fetch_all_devices() -> list[dict]:
@@ -53,34 +43,12 @@ def fetch_device_groups() -> list[dict]:
     return api.paginate("network-config/v1/device-groups", page_size=PAGE_LIMIT)
 
 
-def fetch_config_profiles(category: str) -> list[dict]:
-    """Fetch library-level config profiles for a given category."""
-    try:
-        resp = api.get(
-            f"network-config/v1alpha1/{category}",
-            params={"view-type": "LIBRARY"},
-        )
-        if isinstance(resp, list):
-            return resp
-        for key in ("items", "result", category):
-            if key in resp and isinstance(resp[key], list):
-                return resp[key]
-        if "name" in resp:
-            return [resp]
-        return []
-    except CentralAPIError as exc:
-        print(f"Warning: config fetch failed for {category}: [{exc.status_code}] {exc.message}",
-              file=sys.stderr)
-        return []
-
-
 def main():
     summary = {
         "sites": 0,
         "site_collections": 0,
         "device_groups": 0,
         "devices": 0,
-        "config_profiles": 0,
         "errors": [],
     }
 
@@ -284,33 +252,6 @@ def main():
             {"dgid": dg_id, "serial": serial},
         )
         linked += 1
-
-    # ── Config profiles (library level) ──────────────────────────
-    for category in CONFIG_CATEGORIES:
-        profiles = fetch_config_profiles(category)
-        for p in profiles:
-            pid = str(p.get("id", p.get("name", "")))
-            if not pid:
-                continue
-            graph.execute(
-                "MERGE (cp:ConfigProfile {id: $pid}) "
-                "SET cp.name = $name, cp.category = $cat, "
-                "cp.scopeId = $sid, cp.deviceFunction = $df, cp.objectType = $ot",
-                {
-                    "pid": f"{category}:{pid}",
-                    "name": p.get("name", pid),
-                    "cat": category,
-                    "sid": p.get("scopeId", p.get("scope_id", "")),
-                    "df": p.get("deviceFunction", p.get("device_function", "")),
-                    "ot": p.get("objectType", p.get("object_type", "")),
-                },
-            )
-            graph.execute(
-                "MATCH (o:Org {scopeId: 'org-root'}), (cp:ConfigProfile {id: $pid}) "
-                "MERGE (o)-[:HAS_CONFIG]->(cp)",
-                {"pid": f"{category}:{pid}"},
-            )
-            summary["config_profiles"] += 1
 
     print(json.dumps(summary, indent=2))
 

@@ -11,7 +11,7 @@ from typing import Any
 import real_ladybug as lb
 import structlog
 
-from .schema import KNOWLEDGE_NODE_TABLES, KNOWLEDGE_REL_TABLES, NODE_TABLES, REL_TABLES, TOPOLOGY_REL_TABLES
+from .schema import KNOWLEDGE_NODE_TABLES, KNOWLEDGE_REL_TABLES, NODE_TABLES, POLICY_REL_TABLES, REL_TABLES, TOPOLOGY_REL_TABLES
 
 logger = structlog.get_logger("graph.manager")
 
@@ -51,7 +51,7 @@ class GraphManager:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = lb.Database(str(self._db_path))
         conn = self._get_conn()
-        all_ddl = NODE_TABLES + KNOWLEDGE_NODE_TABLES + REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES
+        all_ddl = NODE_TABLES + KNOWLEDGE_NODE_TABLES + REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES
         for ddl in all_ddl:
             conn.execute(ddl.strip())
         # Load the algo extension so graph algorithms (WCC, PageRank, etc.) are available in Cypher.
@@ -76,7 +76,7 @@ class GraphManager:
         logger.info(
             "graph_schema_created",
             node_tables=len(NODE_TABLES),
-            rel_tables=len(REL_TABLES) + len(TOPOLOGY_REL_TABLES),
+            rel_tables=len(REL_TABLES) + len(TOPOLOGY_REL_TABLES) + len(POLICY_REL_TABLES),
         )
 
     @property

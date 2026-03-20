@@ -307,7 +307,18 @@ inherited by all child scopes; lower-scope config takes precedence.
 | Device          | Individual device — overrides all above         | Highest    |
 
 **Device Groups** cut across the hierarchy — they group devices from any site
-for shared configuration. A device can belong to only one group.
+for shared configuration. A device can belong to only one group.  Device Groups
+sit between Site and Device for precedence purposes.
+
+**Precedence order**: Device > Device Group > Site > Site Collection > Global
+
+**Two propagation paths**:
+- Global → Site Collections → Site → Device  (hierarchy-based)
+- Device Groups → Device  (cross-cutting)
+
+**Additive vs atomic profiles**: Some profile types (WLANs, VLANs, auth servers)
+are additive — multiple instances coexist. Most profiles are atomic — only the
+highest-precedence instance wins.
 
 ## Scope IDs
 
@@ -328,17 +339,61 @@ and `scopeType` query parameters.
 ### Read config at a scope
 ```
 GET network-config/v1alpha1/{category}
-    ?scopeId=<id>&scopeType=<site|device|collection|org>
+    ?scope-id=<id>&scope-type=<site|device|collection|org|device-group>
 ```
 
 Add `effective=true` for merged inherited config. Add `detailed=true` for
 source annotations showing which scope each setting comes from.
 
+The `detailed=true` parameter returns `@` annotation blocks containing
+`aruba-annotation:scope_device_function` — a list of scope assignment bindings
+that reveals WHERE each profile is assigned.
+
 ### Write config
 ```
 POST/PATCH network-config/v1alpha1/{category}
-    ?scopeId=<id>&scopeType=<site|device|collection|org>
+    ?scope-id=<id>&scope-type=<site|device|collection|org|device-group>
     body: { ... config payload ... }
+```
+
+## Config Policy Layer (Graph)
+
+The `populate_config_policy` seed populates the graph with config assignment
+and effective config data.  Use these queries to answer config questions.
+
+### What profiles are assigned at a scope?
+```cypher
+// Profiles assigned at a specific site
+MATCH (s:Site {name: 'Curry-Zentrale'})-[a:SITE_ASSIGNS_CONFIG]->(cp:ConfigProfile)
+RETURN cp.name, cp.category, a.deviceFunctions, a.isDefault
+
+// Profiles assigned at global scope
+MATCH (o:Org)-[a:ORG_ASSIGNS_CONFIG]->(cp:ConfigProfile)
+RETURN cp.category, cp.name, a.deviceFunctions
+ORDER BY cp.category, cp.name
+
+// Profiles assigned to a device group
+MATCH (dg:DeviceGroup {name: 'Verkaufstelle'})-[a:GROUP_ASSIGNS_CONFIG]->(cp:ConfigProfile)
+RETURN cp.category, cp.name, a.deviceFunctions
+```
+
+### What is the effective config on a device?
+```cypher
+MATCH (d:Device {name: '6300-Zentrale'})-[e:EFFECTIVE_CONFIG]->(cp:ConfigProfile)
+RETURN cp.name, cp.category, e.sourceScope, e.sourceScopeName
+ORDER BY cp.category, cp.name
+```
+
+### Why does a device have a specific config? (config lineage)
+```cypher
+MATCH (d:Device {name: '6300-Zentrale'})-[e:EFFECTIVE_CONFIG]->(cp:ConfigProfile {name: 'sys_central_nac'})
+RETURN e.sourceScope AS assignedAt, e.sourceScopeId, e.sourceScopeName
+```
+
+### Blast radius: which devices are affected by changing a profile?
+```cypher
+MATCH (cp:ConfigProfile {name: 'Client Access'})<-[:EFFECTIVE_CONFIG]-(d:Device)
+RETURN d.name AS device, d.serial, d.siteName
 ```
 
 ## Blast Radius Check (Before Mutations)

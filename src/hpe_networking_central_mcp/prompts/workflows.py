@@ -56,10 +56,64 @@ Follow this workflow:
 6. **Present Report**: Summarize findings:
    - Hierarchy overview (collections → sites → devices)
    - Overall health (% online)
+   - Config policy summary (profiles per scope level)
    - Action items (offline devices, firmware inconsistencies)
    - Recommendations
 
 Present data in tables where appropriate for readability.
+"""
+
+    @mcp.prompt()
+    def analyze_config(device_or_site: str = "") -> str:
+        """Guide: analyze configuration inheritance and effective config for a device or site."""
+        target_hint = f'"{device_or_site}"' if device_or_site else "the network"
+        return f"""You are analyzing configuration inheritance for {target_hint} in HPE Aruba Networking Central.
+
+Follow this workflow:
+
+1. **Read Graph Schema**: Read the graph://schema resource to understand config policy relationships.
+   Also read docs://config-workflows for the config model reference.
+
+2. **Effective Config**: What config is effective on the target?
+   ```cypher
+   MATCH (d:Device)-[e:EFFECTIVE_CONFIG]->(cp:ConfigProfile)
+   WHERE d.name CONTAINS '{device_or_site}' OR d.serial CONTAINS '{device_or_site}'
+   RETURN cp.name, cp.category, e.sourceScope, e.sourceScopeName
+   ORDER BY cp.category, cp.name
+   ```
+
+3. **Config Lineage**: Where does each profile come from?
+   ```cypher
+   MATCH (d:Device)-[e:EFFECTIVE_CONFIG]->(cp:ConfigProfile)
+   WHERE d.name CONTAINS '{device_or_site}'
+   RETURN cp.name, cp.category, e.sourceScope AS assignedAt, e.sourceScopeName AS scopeName
+   ORDER BY e.sourceScope, cp.category
+   ```
+
+4. **Scope Assignments**: What's assigned at each level?
+   ```cypher
+   MATCH (o:Org)-[a:ORG_ASSIGNS_CONFIG]->(cp:ConfigProfile)
+   RETURN 'Global' AS scope, cp.category, cp.name, a.deviceFunctions
+   UNION ALL
+   MATCH (sc:SiteCollection)-[a:COLLECTION_ASSIGNS_CONFIG]->(cp:ConfigProfile)
+   RETURN sc.name AS scope, cp.category, cp.name, a.deviceFunctions
+   UNION ALL
+   MATCH (s:Site)-[a:SITE_ASSIGNS_CONFIG]->(cp:ConfigProfile)
+   RETURN s.name AS scope, cp.category, cp.name, a.deviceFunctions
+   ```
+
+5. **Blast Radius**: How many devices are affected by a profile?
+   ```cypher
+   MATCH (cp:ConfigProfile)<-[:EFFECTIVE_CONFIG]-(d:Device)
+   RETURN cp.name, cp.category, count(d) AS deviceCount
+   ORDER BY deviceCount DESC
+   ```
+
+6. **Present Report**: Summarize:
+   - Effective config on the target (grouped by category)
+   - Config lineage showing inheritance chain
+   - Potential conflicts or overrides
+   - Blast radius for key profiles
 """
 
     @mcp.prompt()

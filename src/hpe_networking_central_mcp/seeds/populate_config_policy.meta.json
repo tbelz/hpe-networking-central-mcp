@@ -1,0 +1,6 @@
+{
+  "description": "Populate configuration policy layer — scope-to-profile assignments and effective config edges. Fetches config profiles with detailed annotations from all scopes and builds ASSIGNS_CONFIG / EFFECTIVE_CONFIG relationships.",
+  "tags": ["graph", "enrichment", "config", "policy"],
+  "parameters": [],
+  "auto_run": true
+}
