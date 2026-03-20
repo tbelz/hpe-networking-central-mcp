@@ -157,8 +157,7 @@ INFRA_PARAMS = frozenset({
     # Sorting / filtering
     "sort", "filter", "search", "select", "filter-tags",
     # Config view / rendering
-    "view-type", "effective", "detailed", "deployment",
-    "object-type",  # config-routing, not entity
+    "deployment",
     # Time range
     "query-time", "start-query-time", "end-query-time",
     "start-at", "end-at", "start-time", "end-time", "time-at", "timestamp",
