@@ -175,6 +175,14 @@ class GraphManager:
             self._db = lb.Database(str(self._db_path))
         logger.info("graph_replace_done")
 
+    def apply_generated_ddl(self, ddl_path: Path) -> int:
+        """Apply dynamic DDL from a generated_ddl.json file on the live DB.
+
+        Returns the number of DDL statements applied.
+        """
+        conn = self._get_conn()
+        return self._apply_generated_ddl(conn, ddl_path)
+
     # ── Query ─────────────────────────────────────────────────────
 
     def query(self, cypher: str, params: dict | None = None, *, read_only: bool = True) -> list[dict[str, Any]]:

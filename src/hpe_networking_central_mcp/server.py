@@ -203,6 +203,11 @@ def _download_knowledge_db(repo: str, db_path: Path) -> bool:
             if extracted_manifest.exists():
                 shutil.copy2(extracted_manifest, db_path.parent / "manifest.json")
 
+            # Copy generated_ddl.json if present in archive
+            extracted_ddl = Path(tmp) / "generated_ddl.json"
+            if extracted_ddl.exists():
+                shutil.copy2(extracted_ddl, db_path.parent / "generated_ddl.json")
+
             logger.info("knowledge_db_installed", tag=release.get("tag_name"))
             return True
     except Exception as exc:
@@ -217,7 +222,10 @@ knowledge_downloaded = _download_knowledge_db(
 
 # Initialize file-backed graph database
 graph_manager = GraphManager(settings.graph_db_path)
-graph_manager.initialize()
+_generated_ddl_path = settings.graph_db_path.parent / "generated_ddl.json"
+graph_manager.initialize(
+    generated_ddl_path=_generated_ddl_path if _generated_ddl_path.exists() else None
+)
 
 # Start IPC server for script subprocesses
 ipc_server = GraphIPCServer(settings.graph_ipc_socket, graph_manager)
