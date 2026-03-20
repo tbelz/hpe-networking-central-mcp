@@ -428,7 +428,19 @@ else:
         assert "method" in detail and "path" in detail
         print(f"    -> {detail['method']} {detail['path']}")
         if "parameters" in detail:
-            print(f"      {len(detail['parameters'])} parameters")
+            params = detail["parameters"]
+            print(f"      {len(params)} parameters")
+            # Verify full schema structure (not just names)
+            if params:
+                p = params[0]
+                assert "name" in p, f"Parameter missing 'name': {p}"
+                assert "in" in p, f"Parameter missing 'in': {p}"
+                assert "required" in p, f"Parameter missing 'required': {p}"
+                print(f"      First param: {p['name']} (in={p['in']}, required={p['required']})")
+        if "responses" in detail:
+            print(f"      {len(detail['responses'])} responses")
+        if "request_body" in detail:
+            print(f"      Has request body schema")
 
     def test_mcp_refresh():
         resp = _tool_call("refresh_api_catalog", {}, timeout=180)

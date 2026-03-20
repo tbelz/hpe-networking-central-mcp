@@ -88,12 +88,38 @@ def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
 
     for entry in index._entries:  # noqa: SLF001 — accessing internal for bulk insert
         endpoint_id = f"{entry.method}:{entry.path}"
+
+        # Serialize full parameter objects as JSON
+        params_json = json.dumps([
+            {
+                "name": p.name,
+                "in": p.location,
+                "required": p.required,
+                "schema": p.schema,
+                "description": p.description,
+            }
+            for p in entry.parameters
+        ]) if entry.parameters else ""
+
+        # Serialize request body schema as JSON
+        body_json = json.dumps(entry.request_body) if entry.request_body else ""
+
+        # Serialize response objects as JSON
+        responses_json = json.dumps([
+            {
+                "status": r.status,
+                "description": r.description,
+                "schema": r.schema,
+            }
+            for r in entry.responses
+        ]) if entry.responses else ""
+
         conn.execute(
             "CREATE (e:ApiEndpoint {"
             "  endpoint_id: $eid, method: $method, path: $path,"
             "  summary: $summary, description: $descr, operationId: $opid,"
             "  category: $cat, deprecated: $dep, tags: $tags,"
-            "  parameterNames: $params, hasRequestBody: $hasBody"
+            "  parameters: $params, requestBody: $body, responses: $resps"
             "})",
             parameters={
                 "eid": endpoint_id,
@@ -105,8 +131,9 @@ def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
                 "cat": entry.category,
                 "dep": entry.deprecated,
                 "tags": entry.tags,
-                "params": [p.name for p in entry.parameters],
-                "hasBody": entry.request_body is not None,
+                "params": params_json,
+                "body": body_json,
+                "resps": responses_json,
             },
         )
         count += 1

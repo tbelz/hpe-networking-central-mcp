@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # ── Node table DDL ───────────────────────────────────────────────────
 
@@ -120,8 +120,9 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         category       STRING,
         deprecated     BOOLEAN,
         tags           STRING[],
-        parameterNames STRING[],
-        hasRequestBody BOOLEAN,
+        parameters     STRING,
+        requestBody    STRING,
+        responses      STRING,
         PRIMARY KEY (endpoint_id)
     )
     """,
@@ -248,7 +249,7 @@ Schema version: {version}
 
 | Table          | Primary Key   | Properties |
 |----------------|---------------|------------|
-| ApiEndpoint    | endpoint_id   | method, path, summary, description, operationId, category, deprecated, tags, parameterNames, hasRequestBody |
+| ApiEndpoint    | endpoint_id   | method, path, summary, description, operationId, category, deprecated, tags, parameters, requestBody, responses |
 | ApiCategory    | name          | endpointCount, sourceProvider |
 | EntityType     | name          | graphNode, description, fields |
 | DocSection     | section_id    | title, content, source, url |
