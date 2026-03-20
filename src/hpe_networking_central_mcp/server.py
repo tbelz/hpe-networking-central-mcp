@@ -43,14 +43,18 @@ direct API reads and reusable Python scripts.
    Devices. The graph is your structural map — use it for navigation, blast-radius analysis,
    cross-site comparison, config provenance, and dependency tracking.
 
-2. **Discover APIs**: Read the api://central/catalog resource for the complete endpoint
-   catalog (method, path, summary for every endpoint, grouped by category). Then use
+2. **Discover APIs**: Use search_api_catalog(query) to find endpoints by keyword (e.g.,
+   "vlan", "switch", "dhcp"). Use list_api_categories() to see all API areas. Then use
    get_api_endpoint_detail(method, path) for full parameter and schema details.
 
 3. **Quick reads**: Use call_central_api(path, query_params) for GET requests - monitoring queries,
    config lookups, health checks. This is the fastest way to read live data.
    Tip: Add `effective=true` to config endpoints for hierarchically merged config,
    and `detailed=true` for source annotations.
+   For bulk effective-config analysis, prefer the graph: the `EFFECTIVE_CONFIG` relationships
+   are pre-computed per device during seed population.  Use the API with `effective=true` and
+   `detailed=true` only when you need authoritative per-device verification or suspect
+   device-level overrides not yet captured in the graph.
 
 4. **Single writes**: Use call_central_api(path, method="POST", body={...}) for simple
    write operations (create a VLAN, delete a profile, update a setting).
@@ -90,7 +94,7 @@ Scripts use `from central_helpers import api, glp, graph` — no OAuth2 boilerpl
 Before writing ANY script you MUST complete these steps IN ORDER:
 
 1. `list_scripts()` — check if a seed or saved script already solves the task.
-2. Read the `api://central/catalog` resource — find relevant endpoints. NEVER guess API paths.
+2. `search_api_catalog(query)` — find relevant endpoints. NEVER guess API paths.
 3. `get_api_endpoint_detail(method, path)` — get exact parameter schemas and response shapes.
 4. Only THEN write the script using the discovered endpoints and schemas.
 

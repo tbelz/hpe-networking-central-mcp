@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # ── Node table DDL ───────────────────────────────────────────────────
 
@@ -82,12 +82,18 @@ NODE_TABLES: list[str] = [
     """,
     """
     CREATE NODE TABLE IF NOT EXISTS ConfigProfile (
-        id             STRING,
-        name           STRING,
-        category       STRING,
-        scopeId        STRING,
-        deviceFunction STRING,
-        objectType     STRING,
+        id               STRING,
+        name             STRING,
+        category         STRING,
+        scopeId          STRING,
+        deviceFunction   STRING,
+        objectType       STRING,
+        isDefault        BOOLEAN,
+        isEditable       BOOLEAN,
+        deviceScopeOnly  BOOLEAN,
+        mergeStrategy    STRING,
+        assignedScopeIds STRING,
+        assignedDeviceFunctions STRING,
         PRIMARY KEY (id)
     )
     """,
@@ -226,6 +232,23 @@ TOPOLOGY_REL_TABLES: list[str] = [
     """,
 ]
 
+# ── Config policy relationship tables ────────────────────────────────
+
+POLICY_REL_TABLES: list[str] = [
+    "CREATE REL TABLE IF NOT EXISTS ORG_ASSIGNS_CONFIG         (FROM Org            TO ConfigProfile)",
+    "CREATE REL TABLE IF NOT EXISTS COLLECTION_ASSIGNS_CONFIG  (FROM SiteCollection TO ConfigProfile)",
+    "CREATE REL TABLE IF NOT EXISTS SITE_ASSIGNS_CONFIG        (FROM Site           TO ConfigProfile)",
+    "CREATE REL TABLE IF NOT EXISTS GROUP_ASSIGNS_CONFIG       (FROM DeviceGroup    TO ConfigProfile)",
+    "CREATE REL TABLE IF NOT EXISTS DEVICE_ASSIGNS_CONFIG      (FROM Device         TO ConfigProfile)",
+    """
+    CREATE REL TABLE IF NOT EXISTS EFFECTIVE_CONFIG (
+        FROM Device TO ConfigProfile,
+        sourceScope  STRING,
+        sourceScopeId STRING
+    )
+    """,
+]
+
 # ── Human-readable schema description (exposed via graph://schema) ───
 
 SCHEMA_DESCRIPTION = """\
@@ -242,7 +265,7 @@ Schema version: {version}
 | Site             | scopeId     | name, address, city, country, state, zipcode, lat, lon, deviceCount, collectionId, collectionName, timezoneId |
 | DeviceGroup      | scopeId     | name, deviceCount |
 | Device           | serial      | name, mac, model, deviceType, status, ipv4, firmware, persona, deviceFunction, siteId, siteName, partNumber, deployment, configStatus, deviceGroupId, deviceGroupName |
-| ConfigProfile    | id          | name, category, scopeId, deviceFunction, objectType |
+| ConfigProfile    | id          | name, category, scopeId, deviceFunction, objectType, isDefault, isEditable, deviceScopeOnly, mergeStrategy, assignedScopeIds, assignedDeviceFunctions |
 | UnmanagedDevice  | mac         | name, model, deviceType, health, status, ipv4, siteId |
 
 ### Knowledge Layer (populated by GH runner)
@@ -269,6 +292,17 @@ Schema version: {version}
 | HAS_CONFIG      | Org → ConfigProfile      | — (library-level configs) |
 | HAS_UNMANAGED   | Site → UnmanagedDevice   | — |
 
+### Config Policy Assignments (populated by populate_config_policy seed)
+
+| Relationship              | From → To                         | Properties |
+|---------------------------|-----------------------------------|------------|
+| ORG_ASSIGNS_CONFIG        | Org → ConfigProfile               | — |
+| COLLECTION_ASSIGNS_CONFIG | SiteCollection → ConfigProfile    | — |
+| SITE_ASSIGNS_CONFIG       | Site → ConfigProfile              | — |
+| GROUP_ASSIGNS_CONFIG      | DeviceGroup → ConfigProfile       | — |
+| DEVICE_ASSIGNS_CONFIG     | Device → ConfigProfile            | — |
+| EFFECTIVE_CONFIG          | Device → ConfigProfile            | sourceScope, sourceScopeId |
+
 ### Physical L2 Topology (populated lazily via load_topology / refresh_graph)
 
 | Relationship  | From → To                    | Properties |
@@ -287,16 +321,20 @@ Schema version: {version}
 
 ```
 Org (root)
-├── SiteCollection
-│   └── Site
+├── SiteCollection ──COLLECTION_ASSIGNS_CONFIG──► ConfigProfile
+│   └── Site ──SITE_ASSIGNS_CONFIG──► ConfigProfile
 │       ├── Device ──CONNECTED_TO──► Device
-│       │           └──LINKED_TO──► UnmanagedDevice
+│       │           ├──LINKED_TO──► UnmanagedDevice
+│       │           ├──DEVICE_ASSIGNS_CONFIG──► ConfigProfile
+│       │           └──EFFECTIVE_CONFIG──► ConfigProfile
 │       └── UnmanagedDevice
 ├── Site (standalone, not in a collection)
 │   └── Device / UnmanagedDevice
 ├── DeviceGroup (cross-cutting, devices from any site)
-│   └── Device
-└── ConfigProfile (library-level, inherited by all scopes)
+│   ├── Device
+│   └── GROUP_ASSIGNS_CONFIG──► ConfigProfile
+├── ConfigProfile (library-level, inherited by all scopes)
+└── ORG_ASSIGNS_CONFIG──► ConfigProfile
 ```
 
 ## Example Cypher Queries
@@ -363,6 +401,21 @@ ORDER BY cp.category, cp.name
 // Config profiles for a specific category
 MATCH (o:Org)-[:HAS_CONFIG]->(cp:ConfigProfile {{category: 'wlan-ssids'}})
 RETURN cp.name, cp.deviceFunction
+```
+
+### Config Policy Assignments
+```cypher
+// Which config profiles are assigned at a site?
+MATCH (s:Site {{name: 'Curry-Zentrale'}})-[:SITE_ASSIGNS_CONFIG]->(cp:ConfigProfile)
+RETURN cp.category, cp.name, cp.mergeStrategy
+
+// What is the effective config for a device?
+MATCH (d:Device {{serial: 'SERIAL123'}})-[r:EFFECTIVE_CONFIG]->(cp:ConfigProfile)
+RETURN cp.category, cp.name, r.sourceScope, r.sourceScopeId
+
+// Blast radius: which devices get a config profile?
+MATCH (d:Device)-[:EFFECTIVE_CONFIG]->(cp:ConfigProfile {{name: 'my-ssid'}})
+RETURN d.serial, d.name, d.siteName
 ```
 
 ### Tips

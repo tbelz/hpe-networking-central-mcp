@@ -114,11 +114,12 @@ Base URL: `https://global.api.greenlake.hpe.com`
 
 All endpoints from both platforms are indexed in a single unified catalog.
 
-1. Read the `api://central/catalog` resource — complete list of every endpoint (method, path,
-   summary) grouped by category. GreenLake categories appear as "HPE GreenLake APIs for ...".
-2. `get_api_endpoint_detail(method, path)` — full parameter schemas, request/response bodies.
+1. `search_api_catalog(query)` — search for endpoints by keyword. Returns compact results
+   (method, path, summary). GreenLake categories appear as "HPE GreenLake APIs for ...".
+2. `list_api_categories()` — browse all API categories with endpoint counts.
+3. `get_api_endpoint_detail(method, path)` — full parameter schemas, request/response bodies.
 
-Always discover endpoints from the catalog before writing scripts or making API calls.
+Always discover endpoints via search before writing scripts or making API calls.
 
 ## Authentication
 
@@ -152,10 +153,10 @@ pre-authenticated API clients. No OAuth2 boilerplate needed.
 ## IMPORTANT: Discover endpoints first
 
 Before writing any script, you MUST:
-1. Read the `api://central/catalog` resource to find relevant endpoints
+1. `search_api_catalog(query)` to find relevant endpoints
 2. `get_api_endpoint_detail(method, path)` to get exact parameter schemas
 
-Never guess or hardcode API paths — always discover them from the catalog.
+Never guess or hardcode API paths — always discover them via search.
 
 ## Template
 
@@ -333,6 +334,27 @@ GET network-config/v1alpha1/{category}
 
 Add `effective=true` for merged inherited config. Add `detailed=true` for
 source annotations showing which scope each setting comes from.
+
+### Effective Config (Graph vs API)
+
+The graph pre-computes **EFFECTIVE_CONFIG** edges per device by walking the
+scope hierarchy after seed population.  For quick analysis:
+
+```cypher
+MATCH (d:Device {serial: 'SERIAL'})-[r:EFFECTIVE_CONFIG]->(cp:ConfigProfile)
+RETURN cp.category, cp.name, cp.mergeStrategy, r.sourceScope, r.sourceScopeId
+```
+
+For **authoritative per-device verification** (e.g., confirming overrides or
+live state), call the API with `effective=true&detailed=true`:
+
+```
+GET network-config/v1alpha1/{category}
+    ?scopeId=<device-serial>&scopeType=device&effective=true&detailed=true
+```
+
+The API response includes `sourceScope`/`sourceScopeId` annotations from
+Central's own resolution.  Use this when the graph result needs validation.
 
 ### Write config
 ```
