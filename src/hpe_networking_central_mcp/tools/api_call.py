@@ -31,7 +31,7 @@ def _api_error_hint(exc: CentralAPIError, path: str, method: str) -> str:
 
     # 404 — wrong path
     if exc.status_code == 404:
-        return "\n\nHint: Endpoint not found. Use search_api_catalog() to find the correct path."
+        return "\n\nHint: Endpoint not found. Use get_api_reference() to find the correct path."
 
     # 400 — bad request
     if exc.status_code == 400:
@@ -140,7 +140,7 @@ def register_greenlake_api_call_tools(mcp, settings: Settings, glp_client: Green
         subscription/license management, service catalog, locations, etc.
         The base URL is https://global.api.greenlake.hpe.com.
 
-        Use search_api_catalog() to discover available GreenLake endpoints — they
+        Use get_api_reference() to discover available GreenLake endpoints — they
         appear in the catalog under categories starting with "HPE GreenLake APIs for ...".
 
         Args:

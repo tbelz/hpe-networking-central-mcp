@@ -1,6 +1,6 @@
 """Unix domain socket IPC server for graph database access.
 
-Allows script subprocesses to query/execute Cypher against the Kùzu database
+Allows script subprocesses to query/execute Cypher against the LadybugDB database
 held open by the main MCP server process, avoiding file-lock conflicts.
 
 Protocol: newline-delimited JSON over a Unix domain socket.

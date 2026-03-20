@@ -73,7 +73,7 @@ configuration graph for structural navigation.
 
 ## Configuration Graph (via `query_graph`)
 
-A file-backed Kùzu graph models the Central configuration hierarchy:
+A file-backed LadybugDB graph models the Central configuration hierarchy:
 Org → SiteCollection → Site → Device, DeviceGroup → Device, Org → ConfigProfile.
 
 Read the **graph://schema** resource for the full schema, relationships, and example
@@ -205,7 +205,7 @@ Same methods as `api` above, but targeting `https://global.api.greenlake.hpe.com
 
 ### Graph Database: `from central_helpers import graph`
 
-Scripts can read from and write to the shared Kùzu graph database.
+Scripts can read from and write to the shared LadybugDB graph database.
 
 - `graph.query(cypher, params=None)` → list[dict] — Read-only Cypher query.
 - `graph.execute(cypher, params=None)` → list[dict] — Read-write Cypher query (CREATE, MERGE, SET, DELETE).
@@ -253,7 +253,7 @@ Rate-limited requests (429) are retried once after the server-specified wait.
 - `CENTRAL_CLIENT_ID` / `CENTRAL_CLIENT_SECRET` — Central OAuth2 credentials
 - `GREENLAKE_CLIENT_ID` / `GREENLAKE_CLIENT_SECRET` — GreenLake OAuth2 credentials
 - `GLP_BASE_URL` — GreenLake API base URL (default: https://global.api.greenlake.hpe.com)
-- `GRAPH_DB_PATH` — Path to the shared file-backed Kùzu graph database
+- `GRAPH_DB_PATH` — Path to the shared file-backed LadybugDB graph database
 
 **Scripts should NEVER:**
 - Manage OAuth2 tokens directly
@@ -269,7 +269,7 @@ Import it directly — it is pre-installed in the MCP server environment.
 import networkx as nx
 from central_helpers import api
 
-# Build a NetworkX graph from Kùzu topology data or from the topology API
+# Build a NetworkX graph from LadybugDB topology data or from the topology API
 G = nx.Graph()
 
 # Example: fetch topology for a site and build a graph

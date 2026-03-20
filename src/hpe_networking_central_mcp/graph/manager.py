@@ -1,4 +1,4 @@
-"""GraphManager — owns the Kùzu file-backed database and exposes query/populate/refresh."""
+"""GraphManager — owns the LadybugDB file-backed database and exposes query/populate/refresh."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import kuzu
+import real_ladybug as lb
 import structlog
 
 from .schema import KNOWLEDGE_NODE_TABLES, KNOWLEDGE_REL_TABLES, NODE_TABLES, REL_TABLES, TOPOLOGY_REL_TABLES
@@ -16,15 +16,15 @@ from .schema import KNOWLEDGE_NODE_TABLES, KNOWLEDGE_REL_TABLES, NODE_TABLES, RE
 logger = structlog.get_logger("graph.manager")
 
 # Cypher keywords that mutate the graph — blocked in read-only query tool.
-# LOAD FROM is included because Kùzu can read arbitrary filesystem paths.
+# LOAD FROM is included because LadybugDB can read arbitrary filesystem paths.
 _WRITE_KEYWORDS = re.compile(
-    r"\b(CREATE|DELETE|DETACH|SET|REMOVE|MERGE|DROP|ALTER|COPY|INSERT|LOAD)\b",
+    r"\b(CREATE|DELETE|DETACH|SET|REMOVE|MERGE|DROP|ALTER|COPY|INSERT|LOAD|INSTALL)\b",
     re.IGNORECASE,
 )
 
 
 class GraphManager:
-    """Manages the Kùzu file-backed graph database lifecycle.
+    """Manages the LadybugDB file-backed graph database lifecycle.
 
     The database is stored on disk so that script subprocesses can open it
     for direct reads and writes via ``central_helpers.graph``.
@@ -35,7 +35,7 @@ class GraphManager:
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
-        self._db: kuzu.Database | None = None
+        self._db: lb.Database | None = None
         self._lock = threading.Lock()
 
     @property
@@ -47,19 +47,39 @@ class GraphManager:
     def initialize(self) -> None:
         """Create (or open) the file-backed database and apply schema DDL."""
         logger.info("graph_init_start", db_path=str(self._db_path))
-        # Ensure parent directory exists; Kùzu creates the DB directory itself.
+        # Ensure parent directory exists; LadybugDB creates the DB directory itself.
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = kuzu.Database(str(self._db_path))
+        self._db = lb.Database(str(self._db_path))
         conn = self._get_conn()
         all_ddl = NODE_TABLES + KNOWLEDGE_NODE_TABLES + REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES
         for ddl in all_ddl:
             conn.execute(ddl.strip())
+        # Load the algo extension so graph algorithms (WCC, PageRank, etc.) are available in Cypher.
+        try:
+            conn.execute("INSTALL algo")
+            conn.execute("LOAD EXTENSION algo")
+        except Exception as exc:
+            msg = str(exc)
+            lower_msg = msg.lower()
+            if "already installed" in lower_msg or "already loaded" in lower_msg:
+                logger.debug(
+                    "algo_extension_already_loaded",
+                    error=msg,
+                )
+            else:
+                logger.warning(
+                    "algo_extension_load_failed",
+                    reason="failed to install or load algo extension",
+                    error=msg,
+                    exc_info=True,
+                )
         logger.info(
             "graph_schema_created",
             node_tables=len(NODE_TABLES),
             rel_tables=len(REL_TABLES) + len(TOPOLOGY_REL_TABLES),
         )
 
+    @property
     def is_available(self) -> bool:
         """Return True if the database is open and ready."""
         return self._db is not None
@@ -88,16 +108,16 @@ class GraphManager:
             if self._db is not None:
                 self._db.close()
                 self._db = None
-        if self._db_path.exists():
-            if self._db_path.is_dir():
-                shutil.rmtree(self._db_path)
+            if self._db_path.exists():
+                if self._db_path.is_dir():
+                    shutil.rmtree(self._db_path)
+                else:
+                    self._db_path.unlink()
+            if new_db_path.is_dir():
+                shutil.copytree(new_db_path, self._db_path)
             else:
-                self._db_path.unlink()
-        if new_db_path.is_dir():
-            shutil.copytree(new_db_path, self._db_path)
-        else:
-            shutil.copy2(new_db_path, self._db_path)
-        self._db = kuzu.Database(str(self._db_path))
+                shutil.copy2(new_db_path, self._db_path)
+            self._db = lb.Database(str(self._db_path))
         logger.info("graph_replace_done")
 
     # ── Query ─────────────────────────────────────────────────────
@@ -123,17 +143,9 @@ class GraphManager:
                 "Only read queries (MATCH, RETURN, WITH, WHERE, ORDER BY, LIMIT, UNION, UNWIND, CALL) are permitted."
             )
 
-        if self._db is None:
-            raise RuntimeError("Graph database is not initialized.")
-
         conn = self._get_conn()
-        result = conn.execute(cypher, params or {})
-        rows: list[dict[str, Any]] = []
-        while result.has_next():
-            row = result.get_next()
-            columns = result.get_column_names()
-            rows.append(dict(zip(columns, row)))
-        return rows
+        result = conn.execute(cypher, parameters=params or {})
+        return list(result.rows_as_dict())
 
     def execute(self, cypher: str, params: dict | None = None) -> list[dict[str, Any]]:
         """Execute a Cypher statement (including writes) and return results.
@@ -147,20 +159,12 @@ class GraphManager:
         Returns:
             List of result rows as dicts (empty for write statements).
         """
-        if self._db is None:
-            raise RuntimeError("Graph database is not initialized.")
-
         conn = self._get_conn()
-        result = conn.execute(cypher, params or {})
-        rows: list[dict[str, Any]] = []
-        while result.has_next():
-            row = result.get_next()
-            columns = result.get_column_names()
-            rows.append(dict(zip(columns, row)))
-        return rows
+        result = conn.execute(cypher, parameters=params or {})
+        return list(result.rows_as_dict())
 
     def get_schema_description(self) -> str:
-        """Return a dynamic schema description by introspecting the Kùzu catalog."""
+        """Return a dynamic schema description by introspecting the LadybugDB catalog."""
         if self._db is None:
             return "Graph not initialized."
 
@@ -172,31 +176,25 @@ class GraphManager:
         lines.append("| Table | Primary Key | Properties | Row Count |")
         lines.append("|-------|-------------|------------|-----------|")
         try:
-            node_result = conn.execute("CALL show_tables() RETURN * WHERE type = 'NODE'")
-            node_tables = []
-            while node_result.has_next():
-                row = node_result.get_next()
-                node_tables.append(row[1])  # name column
+            node_rows = list(conn.execute("CALL show_tables() RETURN * WHERE type = 'NODE'"))
+            node_tables = [row[1] for row in node_rows]  # name column
         except Exception:
             node_tables = []
 
         for table in sorted(node_tables):
             try:
-                prop_result = conn.execute(f"CALL table_info('{table}') RETURN *")
+                prop_rows = list(conn.execute(f"CALL table_info('{table}') RETURN *"))
                 props = []
                 pk = ""
-                while prop_result.has_next():
-                    prow = prop_result.get_next()
+                for prow in prop_rows:
                     prop_name = prow[1]  # name
                     if prow[3]:  # isPrimaryKey
                         pk = prop_name
                     else:
                         props.append(prop_name)
                 # Count rows
-                count_result = conn.execute(f"MATCH (n:{table}) RETURN count(n) AS cnt")
-                cnt = 0
-                if count_result.has_next():
-                    cnt = count_result.get_next()[0]
+                count_rows = list(conn.execute(f"MATCH (n:{table}) RETURN count(n) AS cnt"))
+                cnt = count_rows[0][0] if count_rows else 0
                 lines.append(f"| {table} | {pk} | {', '.join(props)} | {cnt} |")
             except Exception:
                 lines.append(f"| {table} | — | — | — |")
@@ -206,35 +204,24 @@ class GraphManager:
         lines.append("| Relationship | From → To | Properties | Edge Count |")
         lines.append("|-------------|-----------|------------|------------|")
         try:
-            rel_result = conn.execute("CALL show_tables() RETURN * WHERE type = 'REL'")
-            rel_tables = []
-            while rel_result.has_next():
-                row = rel_result.get_next()
-                rel_tables.append(row[1])
+            rel_rows = list(conn.execute("CALL show_tables() RETURN * WHERE type = 'REL'"))
+            rel_tables = [row[1] for row in rel_rows]
         except Exception:
             rel_tables = []
 
         for rel in sorted(rel_tables):
             try:
                 # Get connection info
-                conn_result = conn.execute(f"CALL show_connection('{rel}') RETURN *")
-                from_to = ""
-                if conn_result.has_next():
-                    crow = conn_result.get_next()
-                    from_to = f"{crow[0]} → {crow[1]}"
+                conn_rows = list(conn.execute(f"CALL show_connection('{rel}') RETURN *"))
+                from_to = f"{conn_rows[0][0]} → {conn_rows[0][1]}" if conn_rows else ""
                 # Get properties
-                prop_result = conn.execute(f"CALL table_info('{rel}') RETURN *")
-                props = []
-                while prop_result.has_next():
-                    prow = prop_result.get_next()
-                    props.append(prow[1])
+                prop_rows = list(conn.execute(f"CALL table_info('{rel}') RETURN *"))
+                props = [prow[1] for prow in prop_rows]
                 # Count edges
-                count_result = conn.execute(
+                count_rows = list(conn.execute(
                     f"MATCH ()-[r:{rel}]->() RETURN count(r) AS cnt"
-                )
-                cnt = 0
-                if count_result.has_next():
-                    cnt = count_result.get_next()[0]
+                ))
+                cnt = count_rows[0][0] if count_rows else 0
                 prop_str = ", ".join(props) if props else "—"
                 lines.append(f"| {rel} | {from_to} | {prop_str} | {cnt} |")
             except Exception:
@@ -269,7 +256,13 @@ Org (root)
 
     # ── Internal ──────────────────────────────────────────────────
 
-    def _get_conn(self) -> kuzu.Connection:
-        """Get a connection, serialised via lock."""
+    def _get_conn(self) -> lb.Connection:
+        """Get a connection, serialised via lock.
+
+        Raises:
+            RuntimeError: If the database is not initialized.
+        """
         with self._lock:
-            return kuzu.Connection(self._db)
+            if self._db is None:
+                raise RuntimeError("Graph database is not initialized.")
+            return lb.Connection(self._db)

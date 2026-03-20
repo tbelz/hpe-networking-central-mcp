@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end test for the Kùzu graph database integration.
+"""End-to-end test for the LadybugDB graph database integration.
 
 Tests the full pipeline:
   1. Schema creation (in-memory)
@@ -11,9 +11,11 @@ Tests the full pipeline:
 Requires Central credentials in .env (same as the MCP server).
 """
 
+import atexit
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -54,7 +56,7 @@ if env_path.exists():
 # ======================================================================
 
 print("\n" + "=" * 70)
-print("Phase 1: Graph Schema — in-memory Kùzu database")
+print("Phase 1: Graph Schema — LadybugDB database")
 print("=" * 70)
 
 from hpe_networking_central_mcp.graph.manager import GraphManager
@@ -75,13 +77,15 @@ def test_schema_constants():
     print(f"    -> {len(NODE_TABLES)} node tables, {len(REL_TABLES)} rel tables, version {SCHEMA_VERSION}")
 
 
-_gm = GraphManager()
+_temp_dir = tempfile.TemporaryDirectory()
+atexit.register(_temp_dir.cleanup)
+_gm = GraphManager(Path(_temp_dir.name) / "test_graph_db")
 
 
 def test_initialize():
     _gm.initialize()
     assert _gm._db is not None, "Database not created"
-    assert not _gm.ready, "Should not be ready before populate"
+    assert _gm.is_available, "Should be available after initialize"
     print("    -> Database initialized, schema applied")
 
 

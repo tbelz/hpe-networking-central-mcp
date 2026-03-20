@@ -183,7 +183,7 @@ def _download_knowledge_db(repo: str, db_path: Path) -> bool:
                 logger.warning("knowledge_db_extract_failed", reason="knowledge_db not found in archive")
                 return False
 
-            # Replace current DB (may be file or directory depending on Kùzu version)
+            # Replace current DB (may be file or directory depending on LadybugDB version)
             if db_path.exists():
                 if db_path.is_dir():
                     shutil.rmtree(db_path)

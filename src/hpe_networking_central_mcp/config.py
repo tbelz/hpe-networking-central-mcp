@@ -27,7 +27,7 @@ class Settings:
     script_library_path: Path = field(default_factory=lambda: Path("/scripts/library"))
     docs_path: Path = field(default_factory=lambda: Path("/docs"))
     graph_db_path: Path = field(default_factory=lambda: Path("/data/graph_db"))
-    graph_ipc_socket: Path = field(default_factory=lambda: Path("/tmp/kuzu_graph.sock"))
+    graph_ipc_socket: Path = field(default_factory=lambda: Path("/tmp/ladybug_graph.sock"))
 
     # Inventory cache TTL in seconds
     inventory_cache_ttl: int = 300
@@ -69,6 +69,6 @@ def load_settings() -> Settings:
         inventory_cache_ttl=int(os.environ.get("INVENTORY_CACHE_TTL", "300")),
         glp_included_slugs=os.environ.get("GLP_INCLUDED_SLUGS", "").strip(),
         graph_db_path=Path(os.environ.get("GRAPH_DB_PATH", "/data/graph_db")),
-        graph_ipc_socket=Path(os.environ.get("GRAPH_IPC_SOCKET", "/tmp/kuzu_graph.sock")),
+        graph_ipc_socket=Path(os.environ.get("GRAPH_IPC_SOCKET", "/tmp/ladybug_graph.sock")),
         knowledge_release_repo=os.environ.get("KNOWLEDGE_RELEASE_REPO", "").strip(),
     )

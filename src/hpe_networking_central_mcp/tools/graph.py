@@ -1,4 +1,4 @@
-"""MCP tools for querying and refreshing the Kùzu graph database."""
+"""MCP tools for querying and refreshing the LadybugDB graph database."""
 
 from __future__ import annotations
 
