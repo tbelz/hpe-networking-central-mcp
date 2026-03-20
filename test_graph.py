@@ -11,6 +11,7 @@ Tests the full pipeline:
 Requires Central credentials in .env (same as the MCP server).
 """
 
+import atexit
 import json
 import os
 import sys
@@ -77,13 +78,14 @@ def test_schema_constants():
 
 
 _temp_dir = tempfile.TemporaryDirectory()
+atexit.register(_temp_dir.cleanup)
 _gm = GraphManager(Path(_temp_dir.name) / "test_graph_db")
 
 
 def test_initialize():
     _gm.initialize()
     assert _gm._db is not None, "Database not created"
-    assert _gm.is_available(), "Should be available after initialize"
+    assert _gm.is_available, "Should be available after initialize"
     print("    -> Database initialized, schema applied")
 
 

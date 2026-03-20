@@ -79,6 +79,7 @@ class GraphManager:
             rel_tables=len(REL_TABLES) + len(TOPOLOGY_REL_TABLES),
         )
 
+    @property
     def is_available(self) -> bool:
         """Return True if the database is open and ready."""
         return self._db is not None

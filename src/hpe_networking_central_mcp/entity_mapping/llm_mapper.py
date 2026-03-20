@@ -21,7 +21,7 @@ Usage:
 
     # Implement the provider protocol for your LLM
     class MyLLMProvider:
-        async def complete(self, prompt: str) -> str:
+        def complete(self, prompt: str) -> str:
             ...  # call your model
 
     config = LLMMapperConfig(provider=MyLLMProvider())

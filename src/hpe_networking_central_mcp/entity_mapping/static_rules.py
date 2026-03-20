@@ -132,7 +132,7 @@ _STATIC_RULES: dict[str, tuple[str, str, Confidence, str]] = {
     # ── GreenLake platform identifiers ───────────────────────────
     "cluster-id": ("Cluster", "id", Confidence.EXACT,
                    "Gateway cluster / swarm identifier"),
-    "interface-id": ("Port", "id", Confidence.HIGH,
+    "interface-id": ("Port", "number", Confidence.HIGH,
                      "Network interface identifier"),
     "report-run-id": ("Report", "id", Confidence.EXACT,
                       "Report run identifier"),

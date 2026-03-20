@@ -104,7 +104,7 @@ def _generate_detailed_report(report: MappingReport) -> str:
             continue
         endpoint_category[endpoint_id] = detail.get("category", "Unknown")
     for r in report.results:
-        cat = getattr(r, "category", None) or endpoint_category.get(r.endpoint_id, "Unknown")
+        cat = endpoint_category.get(r.endpoint_id, "Unknown")
         cat_total[cat] += 1
         if r.is_mapped:
             cat_mapped[cat] += 1
