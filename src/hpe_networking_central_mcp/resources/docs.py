@@ -112,11 +112,11 @@ Base URL: `https://global.api.greenlake.hpe.com`
 
 ## API Discovery
 
-All endpoints from both platforms are indexed in a single unified catalog.
+All endpoints from both platforms are indexed in the knowledge graph.
 
-1. Read the `api://central/catalog` resource — complete list of every endpoint (method, path,
-   summary) grouped by category. GreenLake categories appear as "HPE GreenLake APIs for ...".
-2. `get_api_endpoint_detail(method, path)` — full parameter schemas, request/response bodies.
+1. `list_api_categories()` — see all available API areas and endpoint counts.
+2. `search_api_catalog(query)` — find endpoints by keyword. Optionally filter by category.
+3. `get_api_endpoint_detail(method, path)` — full parameter schemas, request/response bodies.
 
 Always discover endpoints from the catalog before writing scripts or making API calls.
 
@@ -152,8 +152,8 @@ pre-authenticated API clients. No OAuth2 boilerplate needed.
 ## IMPORTANT: Discover endpoints first
 
 Before writing any script, you MUST:
-1. Read the `api://central/catalog` resource to find relevant endpoints
-2. `get_api_endpoint_detail(method, path)` to get exact parameter schemas
+1. Call `search_api_catalog(query)` to find relevant endpoints by keyword
+2. Call `get_api_endpoint_detail(method, path)` to get exact parameter schemas
 
 Never guess or hardcode API paths — always discover them from the catalog.
 

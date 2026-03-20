@@ -430,26 +430,6 @@ else:
         if "parameters" in detail:
             print(f"      {len(detail['parameters'])} parameters")
 
-    def test_mcp_refresh():
-        resp = _tool_call("refresh_api_catalog", {}, timeout=180)
-        assert resp, "No response"
-        data = json.loads(_get_text(resp))
-        assert data.get("status") == "success", f"Failed: {data}"
-        print(f"    -> Refreshed: {data['total_endpoints']} endpoints")
-
-    def test_mcp_catalog_resource():
-        resp = _resource_read("api://central/catalog")
-        assert resp, "No response"
-        contents = resp.get("result", {}).get("contents", [])
-        assert contents, f"Empty: {json.dumps(resp)[:200]}"
-        text = contents[0].get("text", "")
-        # May still be loading
-        if "empty" in text.lower():
-            print(f"    -> Catalog still loading, acceptable")
-            return
-        assert "Central API Catalog" in text
-        print(f"    -> {len(text)} chars")
-
     def test_mcp_api_call():
         resp = _tool_call("call_central_api", {
             "path": "network-monitoring/v1/switches",
@@ -482,8 +462,6 @@ else:
     run_test("MCP: list_api_categories", test_mcp_categories)
     run_test("MCP: search_api_catalog('vlan')", test_mcp_search)
     run_test("MCP: get_api_endpoint_detail", test_mcp_detail)
-    run_test("MCP: refresh_api_catalog", test_mcp_refresh)
-    run_test("MCP: api://central/catalog resource", test_mcp_catalog_resource)
     run_test("MCP: call_central_api (real API)", test_mcp_api_call)
     run_test("MCP: refresh_inventory", test_mcp_inventory)
 

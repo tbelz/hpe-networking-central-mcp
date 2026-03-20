@@ -33,79 +33,105 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
     global _graph_manager
     _graph_manager = graph_manager
 
-    @mcp.resource("api://central/catalog")
-    def api_catalog_resource() -> str:
-        """Complete API catalog — every endpoint stub grouped by category.
-
-        Contains method, path, and summary for all endpoints.
-        Agents should prefer calling get_api_reference() instead.
-        """
-        gm = _graph_manager
-        if gm is None or not gm.is_available:
-            return "API catalog not available — graph database not initialized."
-
-        rows = gm.query(
-            "MATCH (e:ApiEndpoint) "
-            "RETURN e.category, e.method, e.path, e.summary "
-            "ORDER BY e.category, e.path",
-            read_only=True,
-        )
-        if not rows:
-            return "API catalog is empty. Run refresh_knowledge_db() to download it."
-
-        # Group by category
-        categories: dict[str, list[str]] = {}
-        for r in rows:
-            cat = r.get("e.category", "Uncategorized")
-            line = f"  {r.get('e.method', '?'):6s} {r.get('e.path', '?')}  — {r.get('e.summary', '')}"
-            categories.setdefault(cat, []).append(line)
-
-        lines = [f"# Central API Catalog ({len(rows)} endpoints)\n"]
-        for cat in sorted(categories):
-            lines.append(f"## {cat} ({len(categories[cat])} endpoints)")
-            lines.extend(categories[cat])
-            lines.append("")
-        lines.append("Use get_api_endpoint_detail(method, path) for full parameter schemas.")
-        return "\n".join(lines)
-
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
-    def get_api_reference() -> str:
-        """Get the complete API catalog — every endpoint stub grouped by category.
+    def search_api_catalog(
+        query: str,
+        limit: int = 25,
+        category: str = "",
+    ) -> str:
+        """Search the API catalog for endpoints matching a keyword query.
 
-        Returns method, path, and summary for ALL Central and GreenLake endpoints.
-        Call this BEFORE writing scripts or making API calls to discover available
-        endpoints. Then use get_api_endpoint_detail(method, path) for full
-        parameter schemas of a specific endpoint.
+        Searches across endpoint paths, summaries, operation IDs, and categories.
+        Use this to discover relevant endpoints before making API calls or writing
+        scripts. Then call get_api_endpoint_detail(method, path) for full schemas.
+
+        Args:
+            query: Search keywords (e.g. "vlan", "wireless client", "firmware").
+            limit: Max results to return (default 25).
+            category: Optional category filter (e.g. "Monitoring", "Security").
 
         Returns:
-            Markdown-formatted catalog of all endpoints grouped by category.
+            JSON with matching endpoints and total count.
         """
         gm = _graph_manager
         if gm is None or not gm.is_available:
-            return "API catalog not available — graph database not initialized."
+            return json.dumps({"error": "Graph database not available."})
+
+        q = query.strip()
+        if not q:
+            return json.dumps({"error": "Query must not be empty."})
+
+        # Build Cypher with CONTAINS filters on multiple fields
+        cat_filter = "AND e.category CONTAINS $cat " if category.strip() else ""
+        cypher = (
+            "MATCH (e:ApiEndpoint) "
+            "WHERE (e.path CONTAINS $q OR e.summary CONTAINS $q "
+            "OR e.operationId CONTAINS $q OR e.category CONTAINS $q) "
+            f"{cat_filter}"
+            "RETURN e.method, e.path, e.summary, e.category, e.operationId "
+            "ORDER BY e.category, e.path "
+            f"LIMIT {min(max(limit, 1), 100)}"
+        )
+        params: dict[str, str] = {"q": q}
+        if category.strip():
+            params["cat"] = category.strip()
+
+        rows = gm.query(cypher, params, read_only=True)
+        if not rows:
+            return json.dumps({
+                "match_count": 0,
+                "endpoints": [],
+                "hint": "Try broader keywords or call list_api_categories() to see available categories.",
+            })
+
+        endpoints = [
+            {
+                "method": r.get("e.method", ""),
+                "path": r.get("e.path", ""),
+                "summary": r.get("e.summary", ""),
+                "category": r.get("e.category", ""),
+            }
+            for r in rows
+        ]
+        return json.dumps({
+            "match_count": len(endpoints),
+            "endpoints": endpoints,
+        })
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+    def list_api_categories() -> str:
+        """List all API categories with endpoint counts.
+
+        Use this to understand what API areas are available, then
+        search_api_catalog(query, category=...) to drill down.
+
+        Returns:
+            JSON with category names, counts, and total endpoints.
+        """
+        gm = _graph_manager
+        if gm is None or not gm.is_available:
+            return json.dumps({"error": "Graph database not available."})
 
         rows = gm.query(
             "MATCH (e:ApiEndpoint) "
-            "RETURN e.category, e.method, e.path, e.summary "
-            "ORDER BY e.category, e.path",
+            "RETURN e.category AS category, count(e) AS cnt "
+            "ORDER BY category",
             read_only=True,
         )
         if not rows:
-            return "API catalog is empty. Run refresh_knowledge_db() to download it."
+            return json.dumps({
+                "error": "API catalog is empty. Run refresh_knowledge_db() to download it.",
+            })
 
-        categories: dict[str, list[str]] = {}
-        for r in rows:
-            cat = r.get("e.category", "Uncategorized")
-            line = f"  {r.get('e.method', '?'):6s} {r.get('e.path', '?')}  — {r.get('e.summary', '')}"
-            categories.setdefault(cat, []).append(line)
-
-        lines = [f"# Central API Catalog ({len(rows)} endpoints)\n"]
-        for cat in sorted(categories):
-            lines.append(f"## {cat} ({len(categories[cat])} endpoints)")
-            lines.extend(categories[cat])
-            lines.append("")
-        lines.append("Use get_api_endpoint_detail(method, path) for full parameter schemas.")
-        return "\n".join(lines)
+        categories = [
+            {"name": r["category"], "endpoint_count": r["cnt"]}
+            for r in rows
+        ]
+        total = sum(c["endpoint_count"] for c in categories)
+        return json.dumps({
+            "total_endpoints": total,
+            "categories": categories,
+        })
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
     def get_api_endpoint_detail(
@@ -137,7 +163,7 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         if not rows:
             return json.dumps({
                 "error": f"No endpoint found for {method.upper()} {path}.",
-                "hint": "Use get_api_reference() to find the correct path.",
+                "hint": "Use search_api_catalog(query) to find the correct path.",
             })
 
         r = rows[0]

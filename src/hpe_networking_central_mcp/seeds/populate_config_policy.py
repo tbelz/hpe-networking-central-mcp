@@ -28,10 +28,10 @@ import sys
 from central_helpers import CentralAPIError, api, graph
 
 # ── Configuration ────────────────────────────────────────────────────
-# Categories to probe. Tried in order; categories that return errors are
-# skipped and reported in the summary.  Expand this list as Central adds
-# new config profile types.
-CONFIG_CATEGORIES = [
+# Categories are discovered dynamically from the graph's ApiEndpoint nodes
+# (paths matching network-config/v1alpha1/{category}).  This list is only
+# used as a last-resort fallback when the knowledge DB has not been loaded.
+_FALLBACK_CATEGORIES = [
     "wlan-ssids",
     "sw-port-profiles",
     "gw-port-profiles",
@@ -43,6 +43,71 @@ CONFIG_CATEGORIES = [
     "auth-servers",
     "auth-profiles",
 ]
+
+
+def _discover_config_categories() -> list[str]:
+    """Discover config categories from ApiEndpoint nodes in the graph.
+
+    Queries for all paths matching ``network-config/v1alpha1/{category}`` and
+    extracts the unique category slugs.  Falls back to the static list above
+    when the knowledge DB hasn't been loaded.
+    """
+    try:
+        rows = graph.query(
+            "MATCH (e:ApiEndpoint) "
+            "WHERE e.path CONTAINS 'network-config/v1alpha1/' "
+            "RETURN DISTINCT e.path AS path"
+        )
+    except Exception:
+        rows = []
+
+    categories: set[str] = set()
+    for r in rows:
+        path = r.get("path", "")
+        # Extract the segment after network-config/v1alpha1/
+        parts = path.split("network-config/v1alpha1/")
+        if len(parts) < 2:
+            continue
+        slug = parts[1].split("/")[0].split("?")[0].strip()
+        # Skip path parameters like {name}
+        if slug and not slug.startswith("{"):
+            categories.add(slug)
+
+    if categories:
+        return sorted(categories)
+
+    print("No config categories found in graph, using fallback list", file=sys.stderr)
+    return list(_FALLBACK_CATEGORIES)
+
+
+# Heuristic to infer merge strategy from a category slug.  Categories whose
+# API allows multiple named instances at the same scope are "additive" (e.g.
+# wlan-ssids — you can stack SSIDs).  Categories that have a single unnamed
+# or singleton config blob per scope are "atomic" (only one value, overwritten
+# by the winning scope).  The API's response shape (list of profiles vs single
+# object) and common naming patterns drive this heuristic.  Unknown categories
+# default to "unknown" so the graph consumer can handle them safely.
+_ADDITIVE_PATTERNS = {"wlan", "ssid", "profile", "acl", "role", "server-group", "auth"}
+_ATOMIC_PATTERNS = {"dns", "ntp", "snmp", "syslog", "radius", "tacacs", "nap"}
+
+
+def _infer_merge_strategy(category: str, profiles: list) -> str:
+    """Infer whether a config category is additive or atomic.
+
+    Returns "additive", "atomic", or "unknown".
+    """
+    slug = category.lower()
+    # Check known patterns
+    for pat in _ADDITIVE_PATTERNS:
+        if pat in slug:
+            return "additive"
+    for pat in _ATOMIC_PATTERNS:
+        if pat in slug:
+            return "atomic"
+    # Heuristic: if we got multiple distinct named profiles, likely additive
+    if len(profiles) > 1:
+        return "additive"
+    return "unknown"
 
 # Maps scope_type values from API annotations to graph relationship names.
 # If Central introduces new scope types, they will appear in the
@@ -197,7 +262,8 @@ def resolve_effective_source(sdf_entries):
 # ── Main ─────────────────────────────────────────────────────────────
 
 
-def main():
+def main():    # ── Discover config categories dynamically ───────────────
+    config_categories = _discover_config_categories()
     # ── Load scope nodes from graph ──────────────────────────────
     sites = graph.query("MATCH (s:Site) RETURN s.scopeId AS id, s.name AS name")
     groups = graph.query(
@@ -214,7 +280,7 @@ def main():
 
     print(
         f"Config policy: {len(sites)} sites, {len(groups)} device groups, "
-        f"{len(CONFIG_CATEGORIES)} categories to probe",
+        f"{len(config_categories)} categories to probe",
         file=sys.stderr,
     )
 
@@ -231,6 +297,7 @@ def main():
     summary: dict = {
         "sites_processed": 0,
         "groups_processed": 0,
+        "categories_discovered": len(config_categories),
         "categories_supported": [],
         "categories_failed": [],
         "config_profiles_created": 0,
@@ -250,7 +317,7 @@ def main():
     # Fetching effective=true at each site returns all profiles active
     # there (global + collection + site assignments, resolved by
     # precedence).  Annotations reveal the assignment source.
-    for category in CONFIG_CATEGORIES:
+    for category in config_categories:
         cat_ok = False
 
         for site in sites:
@@ -281,12 +348,13 @@ def main():
                 # ── MERGE ConfigProfile node ─────────────────────
                 if profile_key not in profiles_merged:
                     profiles_merged.add(profile_key)
+                    merge_strat = _infer_merge_strategy(category, profiles)
                     graph.execute(
                         "MERGE (cp:ConfigProfile {id: $pid}) "
                         "SET cp.name = $name, cp.category = $cat, "
                         "cp.objectType = $ot, "
                         "cp.isDefault = $isDef, cp.isEditable = $isEdit, "
-                        "cp.deviceScopeOnly = $dso",
+                        "cp.deviceScopeOnly = $dso, cp.mergeStrategy = $ms",
                         {
                             "pid": profile_key,
                             "name": profile.get("name", pid),
@@ -295,6 +363,7 @@ def main():
                             "isDef": ann["is_default"],
                             "isEdit": ann["is_editable"],
                             "dso": ann["device_scope_only"],
+                            "ms": merge_strat,
                         },
                     )
                     summary["config_profiles_created"] += 1
@@ -433,12 +502,13 @@ def main():
                 # MERGE ConfigProfile node (may already exist from site phase)
                 if profile_key not in profiles_merged:
                     profiles_merged.add(profile_key)
+                    merge_strat = _infer_merge_strategy(category, profiles)
                     graph.execute(
                         "MERGE (cp:ConfigProfile {id: $pid}) "
                         "SET cp.name = $name, cp.category = $cat, "
                         "cp.objectType = $ot, "
                         "cp.isDefault = $isDef, cp.isEditable = $isEdit, "
-                        "cp.deviceScopeOnly = $dso",
+                        "cp.deviceScopeOnly = $dso, cp.mergeStrategy = $ms",
                         {
                             "pid": profile_key,
                             "name": profile.get("name", pid),
@@ -447,6 +517,7 @@ def main():
                             "isDef": ann["is_default"],
                             "isEdit": ann["is_editable"],
                             "dso": ann["device_scope_only"],
+                            "ms": merge_strat,
                         },
                     )
                     summary["config_profiles_created"] += 1

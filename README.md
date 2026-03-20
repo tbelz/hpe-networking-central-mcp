@@ -18,23 +18,31 @@ The agent manages network devices through a combination of direct API calls and 
 │  Tools:                 │
 │  ├─ call_central_api    │──► Central REST API (monitoring, config, etc.)
 │  ├─ call_greenlake_api  │──► GreenLake Platform API (devices, subscriptions)
-│  ├─ search_api_catalog  │──► Unified catalog of Central + GreenLake endpoints
+│  ├─ search_api_catalog  │──► Search endpoints by keyword in the knowledge graph
 │  ├─ get_api_endpoint_detail ──► Full parameter/schema detail for any endpoint
-│  ├─ list_api_categories │──► Browse all API categories
-│  ├─ refresh_api_catalog │──► Re-scrape and rebuild the API catalog
+│  ├─ list_api_categories │──► Browse all API categories with counts
+│  ├─ refresh_knowledge_db│──► Download latest knowledge DB from GitHub releases
 │  ├─ refresh_inventory   │──► Network device inventory via Central API
 │  ├─ get_device_details  │──► Device lookup by serial/name/IP/MAC
+│  ├─ query_graph         │──► Run Cypher queries on the configuration graph
+│  ├─ refresh_graph       │──► Reset and re-populate the graph from live APIs
 │  ├─ list_scripts        │──► Browse automation script library
 │  ├─ save_script         │──► Save Python scripts for reuse
-│  └─ execute_script      │──► Run scripts (pycentral v2 SDK + central_helpers)
+│  ├─ get_script_content  │──► Read script source code
+│  └─ execute_script      │──► Run scripts with credentials injected
 │                         │
 │  Resources:             │
-│  ├─ docs://central/overview  │
-│  └─ docs://script-writing-guide │
+│  ├─ graph://schema      │──► Graph data model and example queries
+│  ├─ docs://central/overview  │──► API surface overview
+│  ├─ docs://script-writing-guide │──► Script template and patterns
+│  ├─ docs://config-workflows │──► Config hierarchy and workflow patterns
+│  └─ script://seeds      │──► Pre-built seed script catalog
 │                         │
 │  Prompts:               │
-│  ├─ analyze_inventory   │
-│  └─ troubleshoot_device │
+│  ├─ analyze_inventory   │──► Network hierarchy and device analysis
+│  ├─ analyze_config      │──► Config inheritance and effective config analysis
+│  ├─ troubleshoot_device │──► Device troubleshooting workflow
+│  └─ write_script        │──► Script writing with API discovery
 └─────────────────────────┘
 ```
 
@@ -93,14 +101,17 @@ GREENLAKE_CLIENT_SECRET=your_glp_client_secret
 |------|-------------|
 | `call_central_api` | Make authenticated requests to any Central API endpoint |
 | `call_greenlake_api` | Make authenticated requests to any GreenLake Platform API endpoint |
-| `search_api_catalog` | Search the unified API catalog for endpoints by keyword |
+| `search_api_catalog` | Search the API catalog for endpoints by keyword, with optional category filter |
 | `get_api_endpoint_detail` | Get full parameter and schema details for a specific endpoint |
 | `list_api_categories` | List all API categories with endpoint counts |
-| `refresh_api_catalog` | Re-scrape OpenAPI specs and rebuild the catalog |
+| `refresh_knowledge_db` | Download the latest knowledge database from GitHub releases |
 | `refresh_inventory` | Discover all devices, sites, and status from Central |
 | `get_device_details` | Look up a device by serial, name, IP, or MAC (partial match) |
+| `query_graph` | Run Cypher queries against the configuration graph |
+| `refresh_graph` | Reset and re-populate the graph from live APIs |
 | `list_scripts` | List all scripts in the automation library |
 | `save_script` | Save a Python script to the library for reuse |
+| `get_script_content` | Read the source code of a script |
 | `execute_script` | Execute a script with Central/GreenLake credentials injected |
 
 ## Development

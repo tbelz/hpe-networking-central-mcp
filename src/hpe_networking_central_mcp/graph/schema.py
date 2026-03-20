@@ -91,6 +91,7 @@ NODE_TABLES: list[str] = [
         isDefault              BOOLEAN,
         isEditable             BOOLEAN,
         deviceScopeOnly        BOOLEAN,
+        mergeStrategy          STRING,
         assignedScopeIds       STRING,
         assignedDeviceFunctions STRING,
         PRIMARY KEY (id)
@@ -295,7 +296,7 @@ Schema version: {version}
 | Site             | scopeId     | name, address, city, country, state, zipcode, lat, lon, deviceCount, collectionId, collectionName, timezoneId |
 | DeviceGroup      | scopeId     | name, deviceCount |
 | Device           | serial      | name, mac, model, deviceType, status, ipv4, firmware, persona, deviceFunction, siteId, siteName, partNumber, deployment, configStatus, deviceGroupId, deviceGroupName |
-| ConfigProfile    | id          | name, category, scopeId, deviceFunction, objectType, isDefault, isEditable, deviceScopeOnly, assignedScopeIds, assignedDeviceFunctions |
+| ConfigProfile    | id          | name, category, scopeId, deviceFunction, objectType, isDefault, isEditable, deviceScopeOnly, mergeStrategy, assignedScopeIds, assignedDeviceFunctions |
 | UnmanagedDevice  | mac         | name, model, deviceType, health, status, ipv4, siteId |
 
 ### Knowledge Layer (populated by GH runner)

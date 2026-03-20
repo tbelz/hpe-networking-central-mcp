@@ -43,9 +43,9 @@ direct API reads and reusable Python scripts.
    Devices. The graph is your structural map — use it for navigation, blast-radius analysis,
    cross-site comparison, config provenance, and dependency tracking.
 
-2. **Discover APIs**: Read the api://central/catalog resource for the complete endpoint
-   catalog (method, path, summary for every endpoint, grouped by category). Then use
-   get_api_endpoint_detail(method, path) for full parameter and schema details.
+2. **Discover APIs**: Call search_api_catalog(query) with keywords to find relevant endpoints.
+   Call list_api_categories() to see all available API areas and their endpoint counts.
+   Then use get_api_endpoint_detail(method, path) for full parameter and schema details.
 
 3. **Quick reads**: Use call_central_api(path, query_params) for GET requests - monitoring queries,
    config lookups, health checks. This is the fastest way to read live data.
@@ -90,7 +90,7 @@ Scripts use `from central_helpers import api, glp, graph` — no OAuth2 boilerpl
 Before writing ANY script you MUST complete these steps IN ORDER:
 
 1. `list_scripts()` — check if a seed or saved script already solves the task.
-2. Read the `api://central/catalog` resource — find relevant endpoints. NEVER guess API paths.
+2. `search_api_catalog(query)` — find relevant endpoints. NEVER guess API paths.
 3. `get_api_endpoint_detail(method, path)` — get exact parameter schemas and response shapes.
 4. Only THEN write the script using the discovered endpoints and schemas.
 
