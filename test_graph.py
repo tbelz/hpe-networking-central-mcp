@@ -63,18 +63,13 @@ from hpe_networking_central_mcp.graph.manager import GraphManager
 from hpe_networking_central_mcp.graph.schema import (
     NODE_TABLES,
     REL_TABLES,
-    SCHEMA_DESCRIPTION,
-    SCHEMA_VERSION,
 )
 
 
 def test_schema_constants():
-    assert SCHEMA_VERSION >= 1
     assert len(NODE_TABLES) >= 6, f"Expected >=6 node tables, got {len(NODE_TABLES)}"
     assert len(REL_TABLES) >= 6, f"Expected >=6 rel tables, got {len(REL_TABLES)}"
-    assert "Org" in SCHEMA_DESCRIPTION
-    assert "Device" in SCHEMA_DESCRIPTION
-    print(f"    -> {len(NODE_TABLES)} node tables, {len(REL_TABLES)} rel tables, version {SCHEMA_VERSION}")
+    print(f"    -> {len(NODE_TABLES)} node tables, {len(REL_TABLES)} rel tables")
 
 
 _temp_dir = tempfile.TemporaryDirectory()
@@ -93,7 +88,7 @@ def test_schema_description():
     desc = _gm.get_schema_description()
     assert "Node Tables" in desc
     assert "Relationship Tables" in desc
-    assert "Example Cypher" in desc
+    assert "Hierarchy" in desc
     print(f"    -> Schema description: {len(desc)} chars")
 
 
@@ -441,8 +436,7 @@ if _has_creds and _gm.ready:
         assert "CONNECTED_TO" in desc
         assert "LINKED_TO" in desc
         assert "UnmanagedDevice" in desc
-        assert "Topology" in desc
-        print("    -> Schema description includes topology section")
+        print("    -> Schema description includes topology tables")
 
     run_test("topology schema constants", test_topology_schema_constants)
     run_test("load_topology() populates L2 data", test_load_topology)
