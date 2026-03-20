@@ -35,6 +35,7 @@ from hpe_networking_central_mcp.graph.schema import (  # noqa: E402
 from hpe_networking_central_mcp.oas_index import OASIndex  # noqa: E402
 from hpe_networking_central_mcp.oas_scraper import ReadMeSpecProvider  # noqa: E402
 from hpe_networking_central_mcp.entity_mapping import run_mapping, build_default_pipeline  # noqa: E402
+from hpe_networking_central_mcp.entity_mapping.entities import build_registry_from_node_tables  # noqa: E402
 from hpe_networking_central_mcp.schema_generator import (  # noqa: E402
     content_hash,
     generate_ddl,
@@ -163,13 +164,19 @@ def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
     return count
 
 
-def _populate_entity_mappings(db: lb.Database, index: OASIndex) -> dict:
+def _populate_entity_mappings(db: lb.Database, index: OASIndex, registry=None) -> dict:
     """Run entity mapping pipeline and populate EntityType + OPERATES_ON edges.
+
+    Args:
+        db: LadybugDB database.
+        index: The OAS index with parsed API endpoints.
+        registry: Optional pre-built EntityRegistry (e.g. from DDL).
+            Falls back to the static build_aruba_central_registry().
 
     Returns the mapping report as a JSON-serializable dict.
     """
     conn = lb.Connection(db)
-    pipeline, registry = build_default_pipeline()
+    pipeline, registry = build_default_pipeline(registry=registry)
 
     # Insert EntityType nodes
     for entity in registry.all_entities():
@@ -317,9 +324,10 @@ def main() -> None:
     print(f"  Schema hash: {ddl_hash}")
     print(f"  DDL file:    {ddl_path}")
 
-    # 5. Entity mapping
+    # 5. Entity mapping (use DDL-derived registry when available)
     print("\n[5/6] Running entity mapping pipeline...")
-    mapping_report = _populate_entity_mappings(db, index)
+    ddl_registry = build_registry_from_node_tables(node_tables) if node_tables else None
+    mapping_report = _populate_entity_mappings(db, index, registry=ddl_registry)
 
     # 6. Populate seed scripts
     print("\n[6/6] Populating seed scripts...")
