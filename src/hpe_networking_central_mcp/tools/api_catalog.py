@@ -63,14 +63,14 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
 
         cypher = (
             "MATCH (e:ApiEndpoint) "
-            "WHERE CONTAINS(LOWER(e.path), LOWER($q)) "
+            "WHERE (CONTAINS(LOWER(e.path), LOWER($q)) "
             "   OR CONTAINS(LOWER(e.summary), LOWER($q)) "
-            "   OR CONTAINS(LOWER(e.operationId), LOWER($q)) "
+            "   OR CONTAINS(LOWER(e.operationId), LOWER($q))) "
         )
         params: dict[str, Any] = {"q": query, "lim": limit}
 
         if category:
-            cypher += "   AND e.category = $cat "
+            cypher += "AND e.category = $cat "
             params["cat"] = category
 
         cypher += "RETURN e.method, e.path, e.summary, e.category ORDER BY e.category, e.path LIMIT $lim"
@@ -88,7 +88,7 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         ]
         return json.dumps({
             "query": query,
-            "match_count": len(endpoints),
+            "returned_count": len(endpoints),
             "endpoints": endpoints,
         }, indent=2)
 

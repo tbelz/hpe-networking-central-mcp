@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Populate config policy layer — discover categories, profiles, and scope assignments.
 
-Dynamically discovers all configuration categories from the Central API,
-fetches library-level profiles with extended metadata, then resolves
-per-scope assignments to build ASSIGNS_CONFIG and EFFECTIVE_CONFIG
-relationships in the graph.
+Dynamically discovers configuration categories from the Central API,
+fetches library-level profiles with extended metadata, and creates
+scope assignment relationships (ORG/COLLECTION/SITE/GROUP_ASSIGNS_CONFIG
+edges) from scopes to ConfigProfile nodes in the graph.
 
 Merge strategy is detected by inspecting the API response shape:
   - A list of multiple named profiles → additive (e.g., wlan-ssids)
@@ -55,26 +55,14 @@ def discover_categories() -> list[str]:
 
 # ── Merge strategy detection ────────────────────────────────────────
 
-def _infer_merge_strategy(category: str) -> str:
-    """Infer merge strategy from the API response shape at the library level.
+def _infer_merge_strategy_from_items(items: list[dict] | None) -> str:
+    """Infer merge strategy from pre-fetched library-level items.
 
     - list of 2+ items with distinct names → additive
     - single item or singleton list → atomic
-    - error or ambiguous → unknown
+    - empty or ambiguous → unknown
     """
-    try:
-        resp = api.get(
-            f"network-config/v1alpha1/{category}",
-            params={"view-type": "LIBRARY"},
-        )
-    except CentralAPIError:
-        return "unknown"
-
-    items = _extract_items(resp, category)
-
-    if items is None:
-        return "unknown"
-    if len(items) == 0:
+    if items is None or len(items) == 0:
         return "unknown"
 
     # Multiple items with distinct names → additive (e.g., SSID list)
@@ -105,19 +93,24 @@ def _extract_items(resp, category: str) -> list[dict] | None:
 
 # ── Profile fetching ────────────────────────────────────────────────
 
-def fetch_library_profiles(category: str) -> list[dict]:
-    """Fetch library-level config profiles for a category."""
+def fetch_library_profiles(category: str) -> tuple[list[dict], str]:
+    """Fetch library-level config profiles and infer merge strategy in one call.
+
+    Returns (profiles, merge_strategy) to avoid a redundant API round-trip.
+    """
     try:
         resp = api.get(
             f"network-config/v1alpha1/{category}",
             params={"view-type": "LIBRARY"},
         )
         items = _extract_items(resp, category)
-        return items or []
+        profiles = items or []
+        merge_strategy = _infer_merge_strategy_from_items(items)
+        return profiles, merge_strategy
     except CentralAPIError as exc:
         print(f"  Warning: fetch {category} failed: [{exc.status_code}] {exc.message}",
               file=sys.stderr)
-        return []
+        return [], "unknown"
 
 
 def fetch_scope_profiles(category: str, scope_id: str, scope_type: str) -> list[dict]:
@@ -263,10 +256,9 @@ def main():
     for cat in categories:
         print(f"  Processing {cat}...", file=sys.stderr)
 
-        merge_strategy = _infer_merge_strategy(cat)
+        profiles, merge_strategy = fetch_library_profiles(cat)
         summary["merge_strategies"][cat] = merge_strategy
 
-        profiles = fetch_library_profiles(cat)
         if not profiles:
             continue
 
