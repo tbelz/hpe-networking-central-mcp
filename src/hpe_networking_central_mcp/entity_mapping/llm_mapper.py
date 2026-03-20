@@ -228,10 +228,21 @@ class LLMMapper(Mapper):
             )
 
         # Cap confidence at configured maximum
-        conf_map = {"exact": Confidence.EXACT, "high": Confidence.HIGH,
-                     "medium": Confidence.MEDIUM, "low": Confidence.LOW}
+        conf_map = {
+            "exact": Confidence.EXACT,
+            "high": Confidence.HIGH,
+            "medium": Confidence.MEDIUM,
+            "low": Confidence.LOW,
+        }
         confidence = conf_map.get(conf_str, Confidence.LOW)
-        if confidence.value < self._config.max_confidence.value:
+        _CONFIDENCE_RANK = {
+            Confidence.UNMAPPED: 0,
+            Confidence.LOW: 1,
+            Confidence.MEDIUM: 2,
+            Confidence.HIGH: 3,
+            Confidence.EXACT: 4,
+        }
+        if _CONFIDENCE_RANK.get(confidence, 0) > _CONFIDENCE_RANK.get(self._config.max_confidence, 0):
             confidence = self._config.max_confidence
 
         return MappingResult(

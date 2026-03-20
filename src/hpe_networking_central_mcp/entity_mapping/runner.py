@@ -202,8 +202,12 @@ def run_mapping(
     Returns:
         MappingReport with detailed metrics.
     """
-    if pipeline is None or registry is None:
-        pipeline, registry = build_default_pipeline(registry)
+    if pipeline is None and registry is None:
+        pipeline, registry = build_default_pipeline(None)
+    elif pipeline is None:
+        pipeline, _ = build_default_pipeline(registry)
+    elif registry is None:
+        _, registry = build_default_pipeline(None)
 
     report = MappingReport()
     report.total_endpoints = index.total_endpoints

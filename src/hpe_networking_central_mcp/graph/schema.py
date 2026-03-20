@@ -504,7 +504,7 @@ CALL weakly_connected_components('Topo') RETURN node.serial AS serial, group_id;
 ```
 The seed script `analyze_topology.py` demonstrates building a NetworkX graph from the
 topology API and running bridges, articulation points, diameter, etc.
-Find it with `list_scripts()` and run with `execute_script("analyze_topology.py", {{"site-id": "<scopeId>"}})``.
+Find it with `list_scripts()` and run with `execute_script("analyze_topology.py", {{"site-id": "<scopeId>"}})`.
 """.format(version=SCHEMA_VERSION)
 
 

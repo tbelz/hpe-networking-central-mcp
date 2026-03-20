@@ -96,18 +96,15 @@ def _generate_detailed_report(report: MappingReport) -> str:
     lines.append("=" * 70)
     cat_total: dict[str, int] = Counter()
     cat_mapped: dict[str, int] = Counter()
-    for r in report.results:
-        parts = r.endpoint_id.split(":", 1)
-        if len(parts) == 2:
-            # Find the category from unmapped_details or infer
-            pass
-    # Reconstruct from results — need category info
-    # We'll use endpoint_id to look up category from unmapped_details
+    # Build an endpoint -> category map from unmapped_details (fallback source).
     endpoint_category: dict[str, str] = {}
     for detail in report.unmapped_details:
-        endpoint_category[detail["endpoint"]] = detail.get("category", "Unknown")
+        endpoint_id = detail.get("endpoint")
+        if not endpoint_id:
+            continue
+        endpoint_category[endpoint_id] = detail.get("category", "Unknown")
     for r in report.results:
-        cat = endpoint_category.get(r.endpoint_id, "Unknown")
+        cat = getattr(r, "category", None) or endpoint_category.get(r.endpoint_id, "Unknown")
         cat_total[cat] += 1
         if r.is_mapped:
             cat_mapped[cat] += 1

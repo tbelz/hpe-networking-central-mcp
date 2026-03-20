@@ -58,8 +58,21 @@ class GraphManager:
         try:
             conn.execute("INSTALL algo")
             conn.execute("LOAD EXTENSION algo")
-        except Exception:
-            logger.debug("algo_extension_load_skipped", reason="may already be loaded")
+        except Exception as exc:
+            msg = str(exc)
+            lower_msg = msg.lower()
+            if "already installed" in lower_msg or "already loaded" in lower_msg:
+                logger.debug(
+                    "algo_extension_already_loaded",
+                    error=msg,
+                )
+            else:
+                logger.warning(
+                    "algo_extension_load_failed",
+                    reason="failed to install or load algo extension",
+                    error=msg,
+                    exc_info=True,
+                )
         logger.info(
             "graph_schema_created",
             node_tables=len(NODE_TABLES),
@@ -94,16 +107,16 @@ class GraphManager:
             if self._db is not None:
                 self._db.close()
                 self._db = None
-        if self._db_path.exists():
-            if self._db_path.is_dir():
-                shutil.rmtree(self._db_path)
+            if self._db_path.exists():
+                if self._db_path.is_dir():
+                    shutil.rmtree(self._db_path)
+                else:
+                    self._db_path.unlink()
+            if new_db_path.is_dir():
+                shutil.copytree(new_db_path, self._db_path)
             else:
-                self._db_path.unlink()
-        if new_db_path.is_dir():
-            shutil.copytree(new_db_path, self._db_path)
-        else:
-            shutil.copy2(new_db_path, self._db_path)
-        self._db = lb.Database(str(self._db_path))
+                shutil.copy2(new_db_path, self._db_path)
+            self._db = lb.Database(str(self._db_path))
         logger.info("graph_replace_done")
 
     # ── Query ─────────────────────────────────────────────────────
@@ -129,9 +142,6 @@ class GraphManager:
                 "Only read queries (MATCH, RETURN, WITH, WHERE, ORDER BY, LIMIT, UNION, UNWIND, CALL) are permitted."
             )
 
-        if self._db is None:
-            raise RuntimeError("Graph database is not initialized.")
-
         conn = self._get_conn()
         result = conn.execute(cypher, parameters=params or {})
         return list(result.rows_as_dict())
@@ -148,9 +158,6 @@ class GraphManager:
         Returns:
             List of result rows as dicts (empty for write statements).
         """
-        if self._db is None:
-            raise RuntimeError("Graph database is not initialized.")
-
         conn = self._get_conn()
         result = conn.execute(cypher, parameters=params or {})
         return list(result.rows_as_dict())
@@ -249,6 +256,12 @@ Org (root)
     # ── Internal ──────────────────────────────────────────────────
 
     def _get_conn(self) -> lb.Connection:
-        """Get a connection, serialised via lock."""
+        """Get a connection, serialised via lock.
+
+        Raises:
+            RuntimeError: If the database is not initialized.
+        """
         with self._lock:
+            if self._db is None:
+                raise RuntimeError("Graph database is not initialized.")
             return lb.Connection(self._db)
