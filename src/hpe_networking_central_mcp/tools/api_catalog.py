@@ -114,14 +114,16 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
     ) -> str:
         """Get full details for a specific API endpoint.
 
-        Returns parameters, summary, description, and tags.
+        Returns the complete API specification including parameters (with types,
+        location, required flags), request body schema, and response status
+        codes with their schemas.
 
         Args:
             method: HTTP method (GET, POST, PUT, PATCH, DELETE).
             path: Full API path (e.g. "/monitoring/v2/aps").
 
         Returns:
-            JSON with full endpoint detail.
+            JSON with full endpoint specification.
         """
         gm = _graph_manager
         if gm is None or not gm.is_available:
@@ -130,14 +132,15 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         rows = gm.query(
             "MATCH (e:ApiEndpoint {endpoint_id: $eid}) "
             "RETURN e.method, e.path, e.summary, e.description, e.operationId, "
-            "e.category, e.deprecated, e.tags, e.parameterNames, e.hasRequestBody",
+            "e.category, e.deprecated, e.tags, e.parameters, e.requestBody, "
+            "e.responses",
             {"eid": f"{method.upper()}:{path}"},
             read_only=True,
         )
         if not rows:
             return json.dumps({
                 "error": f"No endpoint found for {method.upper()} {path}.",
-                "hint": "Use get_api_reference() to find the correct path.",
+                "hint": "Use search_api_catalog(query) to find the correct path.",
             })
 
         r = rows[0]
@@ -154,10 +157,28 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             d["tags"] = r["e.tags"]
         if r.get("e.deprecated"):
             d["deprecated"] = True
-        if r.get("e.parameterNames"):
-            d["parameter_names"] = r["e.parameterNames"]
-        if r.get("e.hasRequestBody"):
-            d["has_request_body"] = True
+
+        # Deserialize full schema JSON fields
+        params_raw = r.get("e.parameters", "")
+        if params_raw:
+            try:
+                d["parameters"] = json.loads(params_raw)
+            except (json.JSONDecodeError, TypeError):
+                d["parameters"] = []
+
+        body_raw = r.get("e.requestBody", "")
+        if body_raw:
+            try:
+                d["request_body"] = json.loads(body_raw)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        responses_raw = r.get("e.responses", "")
+        if responses_raw:
+            try:
+                d["responses"] = json.loads(responses_raw)
+            except (json.JSONDecodeError, TypeError):
+                d["responses"] = []
 
         return json.dumps(d, indent=2)
 
