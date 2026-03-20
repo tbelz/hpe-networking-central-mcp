@@ -140,7 +140,7 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         if not rows:
             return json.dumps({
                 "error": f"No endpoint found for {method.upper()} {path}.",
-                "hint": "Use search_api_catalog(query) to find the correct path.",
+                "hint": "Use get_api_reference() to search the API catalog for the correct path.",
             })
 
         r = rows[0]

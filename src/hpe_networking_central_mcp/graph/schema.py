@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # ── Node table DDL ───────────────────────────────────────────────────
 
