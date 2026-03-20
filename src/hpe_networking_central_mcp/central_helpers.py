@@ -501,10 +501,10 @@ glp = GreenLakeAPI()
 
 
 class GraphHelper:
-    """Read/write access to the shared Kùzu graph database via IPC.
+    """Read/write access to the shared LadybugDB graph database via IPC.
 
     The MCP server runs a Unix domain socket IPC server that holds the
-    Kùzu database open.  Scripts connect to it via GRAPH_IPC_SOCKET and
+    LadybugDB database open.  Scripts connect to it via GRAPH_IPC_SOCKET and
     send JSON requests instead of opening the database directly.
 
     Usage::

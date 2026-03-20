@@ -37,10 +37,8 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
     def api_catalog_resource() -> str:
         """Complete API catalog — every endpoint stub grouped by category.
 
-        Contains method, path, and summary for all endpoints. Read this to
-        understand what APIs are available before writing scripts or making
-        API calls. Use get_api_endpoint_detail(method, path) for full
-        parameter schemas of a specific endpoint.
+        Contains method, path, and summary for all endpoints.
+        Agents should prefer calling get_api_reference() instead.
         """
         gm = _graph_manager
         if gm is None or not gm.is_available:
@@ -56,6 +54,45 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             return "API catalog is empty. Run refresh_knowledge_db() to download it."
 
         # Group by category
+        categories: dict[str, list[str]] = {}
+        for r in rows:
+            cat = r.get("e.category", "Uncategorized")
+            line = f"  {r.get('e.method', '?'):6s} {r.get('e.path', '?')}  — {r.get('e.summary', '')}"
+            categories.setdefault(cat, []).append(line)
+
+        lines = [f"# Central API Catalog ({len(rows)} endpoints)\n"]
+        for cat in sorted(categories):
+            lines.append(f"## {cat} ({len(categories[cat])} endpoints)")
+            lines.extend(categories[cat])
+            lines.append("")
+        lines.append("Use get_api_endpoint_detail(method, path) for full parameter schemas.")
+        return "\n".join(lines)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+    def get_api_reference() -> str:
+        """Get the complete API catalog — every endpoint stub grouped by category.
+
+        Returns method, path, and summary for ALL Central and GreenLake endpoints.
+        Call this BEFORE writing scripts or making API calls to discover available
+        endpoints. Then use get_api_endpoint_detail(method, path) for full
+        parameter schemas of a specific endpoint.
+
+        Returns:
+            Markdown-formatted catalog of all endpoints grouped by category.
+        """
+        gm = _graph_manager
+        if gm is None or not gm.is_available:
+            return "API catalog not available — graph database not initialized."
+
+        rows = gm.query(
+            "MATCH (e:ApiEndpoint) "
+            "RETURN e.category, e.method, e.path, e.summary "
+            "ORDER BY e.category, e.path",
+            read_only=True,
+        )
+        if not rows:
+            return "API catalog is empty. Run refresh_knowledge_db() to download it."
+
         categories: dict[str, list[str]] = {}
         for r in rows:
             cat = r.get("e.category", "Uncategorized")
@@ -100,7 +137,7 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         if not rows:
             return json.dumps({
                 "error": f"No endpoint found for {method.upper()} {path}.",
-                "hint": "Use search_api_catalog() to find the correct path.",
+                "hint": "Use get_api_reference() to find the correct path.",
             })
 
         r = rows[0]

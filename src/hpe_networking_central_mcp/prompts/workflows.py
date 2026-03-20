@@ -146,7 +146,7 @@ Scripts run as subprocesses with pre-authenticated helpers injected:
 - `api` — CentralAPI instance. Use `api.get(path)`, `api.post(path, body)`, `api.put(path, body)`, `api.delete(path)`, `api.patch(path, body)`.
 - `api.paginate(path)` — Auto-paginating GET that returns a flat list. Use for any list endpoint.
 - `glp` — GreenLakeAPI instance. Same interface, hits `https://global.api.greenlake.hpe.com`.
-- `graph` — GraphHelper for the Kùzu graph DB. Use `graph.execute(cypher, params)` for writes, `graph.query(cypher)` for reads.
+- `graph` — GraphHelper for the LadybugDB graph DB. Use `graph.execute(cypher, params)` for writes, `graph.query(cypher)` for reads.
 - `CentralAPIError`, `NotFoundError` — Exception classes for error handling.
 
 **Do NOT** handle OAuth2, tokens, or base URLs — the helpers do that.

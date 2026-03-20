@@ -1,4 +1,4 @@
-"""Kùzu graph schema DDL for the Aruba Central configuration hierarchy.
+"""LadybugDB graph schema DDL for the Aruba Central configuration hierarchy.
 
 Defines node and relationship tables that model:
   Org → SiteCollection → Site → Device
@@ -156,10 +156,30 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         PRIMARY KEY (filename)
     )
     """,
+    """
+    CREATE NODE TABLE IF NOT EXISTS EntityType (
+        name        STRING,
+        graphNode   STRING,
+        description STRING,
+        fields      STRING,
+        PRIMARY KEY (name)
+    )
+    """,
 ]
 
 KNOWLEDGE_REL_TABLES: list[str] = [
     "CREATE REL TABLE IF NOT EXISTS BELONGS_TO_CATEGORY (FROM ApiEndpoint TO ApiCategory)",
+    # Entity mapping relationships — populated by the entity_mapping pipeline
+    """
+    CREATE REL TABLE IF NOT EXISTS OPERATES_ON (
+        FROM ApiEndpoint TO EntityType,
+        paramName   STRING,
+        fieldName   STRING,
+        confidence  STRING,
+        mapper      STRING,
+        reason      STRING
+    )
+    """,
 ]
 
 # ── Relationship table DDL ───────────────────────────────────────────
@@ -224,6 +244,16 @@ Schema version: {version}
 | ConfigProfile    | id          | name, category, scopeId, deviceFunction, objectType |
 | UnmanagedDevice  | mac         | name, model, deviceType, health, status, ipv4, siteId |
 
+### Knowledge Layer (populated by GH runner)
+
+| Table          | Primary Key   | Properties |
+|----------------|---------------|------------|
+| ApiEndpoint    | endpoint_id   | method, path, summary, description, operationId, category, deprecated, tags, parameterNames, hasRequestBody |
+| ApiCategory    | name          | endpointCount, sourceProvider |
+| EntityType     | name          | graphNode, description, fields |
+| DocSection     | section_id    | title, content, source, url |
+| Script         | filename      | description, tags, content, parameters, created_at, last_run, last_exit_code |
+
 ## Relationship Tables
 
 ### Configuration Hierarchy
@@ -244,6 +274,13 @@ Schema version: {version}
 |---------------|------------------------------|------------|
 | CONNECTED_TO  | Device → Device              | fromPorts, toPorts, speed, edgeType, health, lag, stpState, isSibling |
 | LINKED_TO     | Device → UnmanagedDevice     | fromPorts, toPorts, speed, edgeType, health, lag, stpState, isSibling |
+
+### Entity Mapping (populated by GH runner — links APIs to domain entities)
+
+| Relationship   | From → To                  | Properties |
+|----------------|----------------------------|------------|
+| BELONGS_TO_CATEGORY | ApiEndpoint → ApiCategory | — |
+| OPERATES_ON    | ApiEndpoint → EntityType   | paramName, fieldName, confidence, mapper, reason |
 
 ## Hierarchy
 
@@ -433,32 +470,41 @@ RETURN d.name AS from, d2.name AS to, c.speed AS speedGbps,
        c.edgeType AS linkType, c.health AS health, c.stpState AS stp
 ```
 
-## Kùzu Cypher Engine — Supported & Unsupported Features
+## LadybugDB Cypher Engine — Supported & Unsupported Features
 
 ### Supported
 - MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, DISTINCT
 - CREATE, SET, DELETE, MERGE
 - Variable-length paths: `[*1..5]`
+- Shortest path patterns: `MATCH (a)-[e* SHORTEST 1..N]->(b)`, `ALL SHORTEST`, `WSHORTEST`, `ALL WSHORTEST`
 - Aggregations: count(), sum(), avg(), min(), max(), collect()
 - String functions: starts with, ends with, contains, toLower(), toUpper()
 - nodes(path), length(path), rels(path)
 - CASE WHEN ... THEN ... ELSE ... END
 - UNWIND, WITH, OPTIONAL MATCH
 - IS NULL / IS NOT NULL
+- Algo extension (loaded at startup): weakly_connected_components, PageRank, Louvain, SCC, K-Core via `CALL PROJECT_GRAPH()` then `CALL <algorithm>()`
 
 ### NOT Supported (will cause errors)
 - APOC procedures (apoc.*)
 - List comprehensions: `[x IN list | x.prop]`
 - REDUCE, FOREACH
-- Custom procedures / plugins
 - Full-text search indexes
-- Built-in graph algorithms (betweenness centrality, PageRank, community detection)
-- shortestPath() / allShortestPaths() functions
 
 ### For Graph Algorithms
-Use a NetworkX script instead of Cypher. The seed script `analyze_topology.py` demonstrates
-building a NetworkX graph from the topology API and running bridges, articulation points, etc.
-Find it with `list_scripts()` and run with `execute_script("analyze_topology.py", {{"site-id": "<scopeId>"}})`.
+Shortest-path queries can be expressed directly in Cypher using the SHORTEST keyword:
+```cypher
+MATCH (a:Device)-[e* SHORTEST 1..5]->(b:Device) WHERE a.name = 'src' AND b.name = 'dst'
+RETURN nodes(e), length(e)
+```
+For other graph algorithms (WCC, PageRank, etc.), first project a graph and then call the algorithm:
+```cypher
+CALL PROJECT_GRAPH('Topo', ['Device'], ['CONNECTED_TO']);
+CALL weakly_connected_components('Topo') RETURN node.serial AS serial, group_id;
+```
+The seed script `analyze_topology.py` demonstrates building a NetworkX graph from the
+topology API and running bridges, articulation points, diameter, etc.
+Find it with `list_scripts()` and run with `execute_script("analyze_topology.py", {{"site-id": "<scopeId>"}})``.
 """.format(version=SCHEMA_VERSION)
 
 

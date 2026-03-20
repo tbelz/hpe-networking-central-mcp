@@ -2,7 +2,7 @@
 """Populate the base configuration graph from Aruba Central APIs.
 
 Fetches structural data (sites, site-collections, device-groups, devices)
-and library-level config profiles, then inserts them into the Kùzu graph
+and library-level config profiles, then inserts them into the LadybugDB graph
 as nodes and relationships.
 
 This is the foundational graph population — run it before any enrichment scripts.

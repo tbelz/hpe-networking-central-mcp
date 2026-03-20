@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Build a Kùzu knowledge database from scraped API specs and seed scripts.
+"""Build a LadybugDB knowledge database from scraped API specs and seed scripts.
 
 Run on a GitHub Actions runner (no Central/GLP credentials required).
 Scrapes public developer documentation, parses OpenAPI specs, and populates
-a Kùzu graph database with ApiEndpoint, ApiCategory, DocSection, and Script
+a LadybugDB graph database with ApiEndpoint, ApiCategory, DocSection, and Script
 nodes.  The resulting DB directory is then tar'd for publishing as a GH release.
 
 Usage:
@@ -22,7 +22,7 @@ from pathlib import Path
 # Ensure the package is importable when running from repo root
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import kuzu  # noqa: E402
+import real_ladybug as lb  # noqa: E402
 
 from hpe_networking_central_mcp.graph.schema import (  # noqa: E402
     KNOWLEDGE_NODE_TABLES,
@@ -33,6 +33,7 @@ from hpe_networking_central_mcp.graph.schema import (  # noqa: E402
 )
 from hpe_networking_central_mcp.oas_index import OASIndex  # noqa: E402
 from hpe_networking_central_mcp.oas_scraper import ReadMeSpecProvider  # noqa: E402
+from hpe_networking_central_mcp.entity_mapping import run_mapping, build_default_pipeline  # noqa: E402
 
 # GLP provider may fail if dependencies vary; import conditionally
 try:
@@ -43,9 +44,9 @@ except ImportError:
     _HAS_GLP = False
 
 
-def _apply_schema(db: kuzu.Database) -> None:
+def _apply_schema(db: lb.Database) -> None:
     """Apply full schema DDL (live + knowledge tables)."""
-    conn = kuzu.Connection(db)
+    conn = lb.Connection(db)
     all_ddl = NODE_TABLES + KNOWLEDGE_NODE_TABLES + REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES
     for ddl in all_ddl:
         conn.execute(ddl.strip())
@@ -80,9 +81,9 @@ def _scrape_specs(cache_dir: Path) -> list[dict]:
     return specs
 
 
-def _populate_endpoints(db: kuzu.Database, index: OASIndex) -> int:
+def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
     """Insert ApiEndpoint and ApiCategory nodes from the OASIndex."""
-    conn = kuzu.Connection(db)
+    conn = lb.Connection(db)
     count = 0
 
     for entry in index._entries:  # noqa: SLF001 — accessing internal for bulk insert
@@ -94,7 +95,7 @@ def _populate_endpoints(db: kuzu.Database, index: OASIndex) -> int:
             "  category: $cat, deprecated: $dep, tags: $tags,"
             "  parameterNames: $params, hasRequestBody: $hasBody"
             "})",
-            {
+            parameters={
                 "eid": endpoint_id,
                 "method": entry.method,
                 "path": entry.path,
@@ -114,7 +115,7 @@ def _populate_endpoints(db: kuzu.Database, index: OASIndex) -> int:
     for cat_name, cat_count in index.categories.items():
         conn.execute(
             "CREATE (c:ApiCategory {name: $cname, endpointCount: $cnt, sourceProvider: $src})",
-            {"cname": cat_name, "cnt": cat_count, "src": "scraped"},
+            parameters={"cname": cat_name, "cnt": cat_count, "src": "scraped"},
         )
 
     # Create BELONGS_TO_CATEGORY relationships
@@ -128,9 +129,74 @@ def _populate_endpoints(db: kuzu.Database, index: OASIndex) -> int:
     return count
 
 
-def _populate_seeds(db: kuzu.Database, seeds_dir: Path) -> int:
+def _populate_entity_mappings(db: lb.Database, index: OASIndex) -> dict:
+    """Run entity mapping pipeline and populate EntityType + OPERATES_ON edges.
+
+    Returns the mapping report as a JSON-serializable dict.
+    """
+    conn = lb.Connection(db)
+    pipeline, registry = build_default_pipeline()
+
+    # Insert EntityType nodes
+    for entity in registry.all_entities():
+        fields_json = json.dumps({
+            f.name: {"graph_property": f.graph_property, "description": f.description}
+            for f in entity.fields.values()
+        })
+        conn.execute(
+            "CREATE (e:EntityType {"
+            "  name: $name, graphNode: $gn, description: $descr, fields: $fields"
+            "})",
+            parameters={
+                "name": entity.name,
+                "gn": entity.graph_node,
+                "descr": entity.description,
+                "fields": fields_json,
+            },
+        )
+
+    # Run the mapping pipeline
+    report = run_mapping(index, pipeline, registry)
+
+    # Insert OPERATES_ON edges for mapped results
+    edge_count = 0
+    seen_edges: set[tuple[str, str, str]] = set()
+    for result in report.results:
+        if not result.is_mapped:
+            continue
+        # Deduplicate: same endpoint → same entity with same param
+        edge_key = (result.endpoint_id, result.entity_name, result.param_name)
+        if edge_key in seen_edges:
+            continue
+        seen_edges.add(edge_key)
+
+        conn.execute(
+            "MATCH (e:ApiEndpoint {endpoint_id: $eid}), (et:EntityType {name: $ename}) "
+            "CREATE (e)-[:OPERATES_ON {"
+            "  paramName: $pname, fieldName: $fname,"
+            "  confidence: $conf, mapper: $mapper, reason: $reason"
+            "}]->(et)",
+            parameters={
+                "eid": result.endpoint_id,
+                "ename": result.entity_name,
+                "pname": result.param_name,
+                "fname": result.field_name,
+                "conf": result.confidence.value,
+                "mapper": result.mapper_name,
+                "reason": result.reason,
+            },
+        )
+        edge_count += 1
+
+    print(f"  Entity types: {len(registry)}")
+    print(f"  OPERATES_ON edges: {edge_count}")
+    print(f"  Coverage: {report.coverage_pct():.1f}% of params mapped")
+    return report.to_json()
+
+
+def _populate_seeds(db: lb.Database, seeds_dir: Path) -> int:
     """Insert seed scripts as Script nodes."""
-    conn = kuzu.Connection(db)
+    conn = lb.Connection(db)
     count = 0
 
     for meta_file in sorted(seeds_dir.glob("*.meta.json")):
@@ -147,7 +213,7 @@ def _populate_seeds(db: kuzu.Database, seeds_dir: Path) -> int:
             "  filename: $fn, description: $descr, tags: $tags,"
             "  content: $content, parameters: $params"
             "})",
-            {
+            parameters={
                 "fn": filename,
                 "descr": meta.get("description", ""),
                 "tags": meta.get("tags", []),
@@ -163,7 +229,7 @@ def _populate_seeds(db: kuzu.Database, seeds_dir: Path) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build Kùzu knowledge database")
+    parser = argparse.ArgumentParser(description="Build LadybugDB knowledge database")
     parser.add_argument("--output-dir", type=Path, default=Path("build"),
                         help="Output directory for the DB and tar (default: ./build)")
     parser.add_argument("--tar", action="store_true",
@@ -183,24 +249,28 @@ def main() -> None:
     print("=== Building Knowledge Database ===\n")
 
     # 1. Create DB and apply schema
-    print("[1/4] Creating database and applying schema...")
-    db = kuzu.Database(str(db_path))
+    print("[1/5] Creating database and applying schema...")
+    db = lb.Database(str(db_path))
     _apply_schema(db)
 
     # 2. Scrape API specs
-    print("\n[2/4] Scraping API documentation...")
+    print("\n[2/5] Scraping API documentation...")
     specs = _scrape_specs(cache_dir)
     if not specs:
         print("⚠ No specs scraped — database will have no API endpoints.", file=sys.stderr)
 
     # 3. Build index and populate
-    print("\n[3/4] Populating API endpoints...")
+    print("\n[3/5] Populating API endpoints...")
     index = OASIndex()
     index.build(specs)
     endpoint_count = _populate_endpoints(db, index)
 
-    # 4. Populate seed scripts
-    print("\n[4/4] Populating seed scripts...")
+    # 4. Entity mapping
+    print("\n[4/5] Running entity mapping pipeline...")
+    mapping_report = _populate_entity_mappings(db, index)
+
+    # 5. Populate seed scripts
+    print("\n[5/5] Populating seed scripts...")
     seeds_dir = Path(__file__).resolve().parent.parent / "src" / "hpe_networking_central_mcp" / "seeds"
     if seeds_dir.is_dir():
         _populate_seeds(db, seeds_dir)
@@ -218,6 +288,7 @@ def main() -> None:
         "category_count": len(index.categories),
         "categories": sorted(index.categories.keys()),
         "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "entity_mapping": mapping_report,
     }
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
