@@ -15,10 +15,14 @@ Hierarchy built:
 
 import json
 import sys
+import uuid
 
 from central_helpers import api, graph, CentralAPIError
+from _provenance import set_source_fields, record_provenance
 
 PAGE_LIMIT = 100
+SEED_NAME = "populate_base_graph"
+RUN_ID = str(uuid.uuid4())
 
 
 def fetch_all_devices() -> list[dict]:
@@ -111,8 +115,11 @@ def main():
             },
         )
         summary["site_collections"] += 1
-
-    # Sites
+        # Provenance
+        cypher, params = set_source_fields("SiteCollection", "scopeId", sid, "GET", "network-config/v1/site-collections")
+        graph.execute(cypher, params)
+        for stmt, prm in record_provenance(node_label="SiteCollection", pk_field="scopeId", pk_value=sid, method="GET", api_path="network-config/v1/site-collections", seed_name=SEED_NAME, run_id=RUN_ID):
+            graph.execute(stmt, prm)
     site_ids = set()
     site_collection_map: dict[str, str] = {}
     for s in sites:
@@ -149,6 +156,11 @@ def main():
             },
         )
         summary["sites"] += 1
+        # Provenance
+        cypher, params = set_source_fields("Site", "scopeId", sid, "GET", "network-config/v1/sites")
+        graph.execute(cypher, params)
+        for stmt, prm in record_provenance(node_label="Site", pk_field="scopeId", pk_value=sid, method="GET", api_path="network-config/v1/sites", seed_name=SEED_NAME, run_id=RUN_ID):
+            graph.execute(stmt, prm)
 
     # Device-groups
     for dg in groups:
@@ -165,6 +177,11 @@ def main():
             },
         )
         summary["device_groups"] += 1
+        # Provenance
+        cypher, params = set_source_fields("DeviceGroup", "scopeId", sid, "GET", "network-config/v1/device-groups")
+        graph.execute(cypher, params)
+        for stmt, prm in record_provenance(node_label="DeviceGroup", pk_field="scopeId", pk_value=sid, method="GET", api_path="network-config/v1/device-groups", seed_name=SEED_NAME, run_id=RUN_ID):
+            graph.execute(stmt, prm)
 
     # Devices
     device_site_map: dict[str, str] = {}
@@ -204,6 +221,11 @@ def main():
             },
         )
         summary["devices"] += 1
+        # Provenance
+        cypher, params = set_source_fields("Device", "serial", serial, "GET", "network-monitoring/v1/device-inventory")
+        graph.execute(cypher, params)
+        for stmt, prm in record_provenance(node_label="Device", pk_field="serial", pk_value=serial, method="GET", api_path="network-monitoring/v1/device-inventory", seed_name=SEED_NAME, run_id=RUN_ID):
+            graph.execute(stmt, prm)
 
     # ── Insert relationships ──────────────────────────────────────
 

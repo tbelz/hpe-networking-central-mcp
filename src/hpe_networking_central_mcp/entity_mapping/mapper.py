@@ -46,6 +46,7 @@ class MappingResult:
     mapper_name: str = ""
     reason: str = ""
     endpoint_id: str = ""
+    operation: str = ""
 
     @property
     def is_mapped(self) -> bool:

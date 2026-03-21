@@ -12,7 +12,7 @@ from typing import Any
 import real_ladybug as lb
 import structlog
 
-from .schema import KNOWLEDGE_NODE_TABLES, KNOWLEDGE_REL_TABLES, NODE_TABLES, POLICY_REL_TABLES, REL_TABLES, TOPOLOGY_REL_TABLES
+from .schema import KNOWLEDGE_NODE_TABLES, KNOWLEDGE_REL_TABLES, NODE_TABLES, POLICY_REL_TABLES, PROVENANCE_REL_TABLES, REL_TABLES, TOPOLOGY_REL_TABLES
 
 logger = structlog.get_logger("graph.manager")
 
@@ -39,6 +39,7 @@ class GraphManager:
         self._db: lb.Database | None = None
         self._lock = threading.Lock()
         self._schema_hash: str | None = None
+        self._fts_available: bool = False
 
     @property
     def db_path(self) -> Path:
@@ -48,6 +49,11 @@ class GraphManager:
     def schema_hash(self) -> str | None:
         """Return the content hash of the generated DDL, or None if bootstrap-only."""
         return self._schema_hash
+
+    @property
+    def fts_available(self) -> bool:
+        """Return True if the FTS extension was successfully loaded."""
+        return self._fts_available
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
@@ -69,6 +75,7 @@ class GraphManager:
             NODE_TABLES + KNOWLEDGE_NODE_TABLES
             + REL_TABLES + KNOWLEDGE_REL_TABLES
             + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES
+            + PROVENANCE_REL_TABLES
         )
         for ddl in bootstrap_ddl:
             conn.execute(ddl.strip())
@@ -93,6 +100,26 @@ class GraphManager:
                     reason="failed to install or load algo extension",
                     error=msg,
                     exc_info=True,
+                )
+
+        # Load the FTS extension (graceful degradation if unavailable)
+        try:
+            conn.execute("INSTALL fts")
+            conn.execute("LOAD EXTENSION fts")
+            self._fts_available = True
+            logger.info("fts_extension_loaded")
+        except Exception as exc:
+            msg = str(exc)
+            lower_msg = msg.lower()
+            if "already installed" in lower_msg or "already loaded" in lower_msg:
+                self._fts_available = True
+                logger.debug("fts_extension_already_loaded", error=msg)
+            else:
+                self._fts_available = False
+                logger.warning(
+                    "fts_extension_load_failed",
+                    reason="FTS unavailable — search will fall back to CONTAINS",
+                    error=msg,
                 )
         logger.info(
             "graph_schema_created",
@@ -182,6 +209,53 @@ class GraphManager:
         """
         conn = self._get_conn()
         return self._apply_generated_ddl(conn, ddl_path)
+
+    def create_fts_indexes(self) -> int:
+        """Create FTS indexes on searchable node tables.
+
+        Indexes are created for:
+          - ApiEndpoint: summary, description, path, operationId
+          - DocSection: title, content
+          - Device: name, serial, model, deviceType
+          - Site: name, address, city, country
+          - ConfigProfile: name, category
+          - Script: filename, description
+
+        Returns the number of indexes created, or 0 if FTS is unavailable.
+        """
+        if not self._fts_available:
+            logger.info("fts_indexes_skipped", reason="FTS extension not available")
+            return 0
+
+        conn = self._get_conn()
+        fts_defs: list[tuple[str, str, list[str]]] = [
+            ("api_fts", "ApiEndpoint", ["summary", "description", "path", "operationId"]),
+            ("doc_fts", "DocSection", ["title", "content"]),
+            ("device_fts", "Device", ["name", "serial", "model", "deviceType"]),
+            ("site_fts", "Site", ["name", "address", "city", "country"]),
+            ("config_fts", "ConfigProfile", ["name", "category"]),
+            ("script_fts", "Script", ["filename", "description"]),
+        ]
+
+        created = 0
+        for idx_name, table, fields in fts_defs:
+            try:
+                field_list = ", ".join(fields)
+                conn.execute(f"CALL fts.drop_fts_index('{idx_name}')")
+            except Exception:
+                pass  # Index may not exist yet
+            try:
+                field_list = ", ".join(fields)
+                conn.execute(
+                    f"CALL fts.create_fts_index('{idx_name}', '{table}', [{field_list}])"
+                )
+                created += 1
+                logger.debug("fts_index_created", index=idx_name, table=table)
+            except Exception as exc:
+                logger.warning("fts_index_create_failed", index=idx_name, error=str(exc))
+
+        logger.info("fts_indexes_created", count=created)
+        return created
 
     # ── Query ─────────────────────────────────────────────────────
 

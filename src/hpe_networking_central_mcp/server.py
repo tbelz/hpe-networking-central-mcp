@@ -27,6 +27,7 @@ from .tools.api_catalog import register_catalog_tools
 from .tools.execution import register_execution_tools, _run_script
 from .tools.graph import register_graph_tools
 from .tools.scripts import register_script_tools, sync_seeds_to_graph
+from .tools.search import register_search_tools
 
 logger = setup_logging()
 
@@ -226,6 +227,7 @@ _generated_ddl_path = settings.graph_db_path.parent / "generated_ddl.json"
 graph_manager.initialize(
     generated_ddl_path=_generated_ddl_path if _generated_ddl_path.exists() else None
 )
+graph_manager.create_fts_indexes()
 
 # Start IPC server for script subprocesses
 ipc_server = GraphIPCServer(settings.graph_ipc_socket, graph_manager)
@@ -313,6 +315,7 @@ register_script_tools(mcp, settings, graph_manager)
 register_catalog_tools(mcp, settings, graph_manager)
 register_api_call_tools(mcp, settings, client)
 register_greenlake_api_call_tools(mcp, settings, glp_client)
+    register_search_tools(mcp, settings, graph_manager)
 register_resources(mcp, settings)
 register_graph_resources(mcp, graph_manager)
 register_prompts(mcp, graph_manager)

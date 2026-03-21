@@ -12,10 +12,14 @@ Requires: populate_base_graph must have been run first (needs Site + Device node
 
 import json
 import sys
+import uuid
 
 from central_helpers import api, graph, CentralAPIError
+from _provenance import set_source_fields, record_provenance
 
 TOPOLOGY_PATH = "network-monitoring/v1/topology"
+SEED_NAME = "enrich_topology"
+RUN_ID = str(uuid.uuid4())
 
 
 def fetch_site_topology(site_id: str) -> dict:
@@ -152,6 +156,12 @@ def main():
                         "MERGE (s)-[:HAS_UNMANAGED]->(u)",
                         {"sid": site_id, "mac": mac},
                     )
+                    # Provenance
+                    api_path = f"{TOPOLOGY_PATH}/{site_id}"
+                    cypher_prov, params_prov = set_source_fields("UnmanagedDevice", "mac", mac, "GET", api_path)
+                    graph.execute(cypher_prov, params_prov)
+                    for stmt, prm in record_provenance(node_label="UnmanagedDevice", pk_field="mac", pk_value=mac, method="GET", api_path=api_path, seed_name=SEED_NAME, run_id=RUN_ID):
+                        graph.execute(stmt, prm)
                     unmanaged_created.add(unmanaged)
                     summary["unmanaged_devices"] += 1
 

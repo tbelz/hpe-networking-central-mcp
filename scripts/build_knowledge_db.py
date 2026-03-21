@@ -29,6 +29,7 @@ from hpe_networking_central_mcp.graph.schema import (  # noqa: E402
     KNOWLEDGE_REL_TABLES,
     NODE_TABLES,
     POLICY_REL_TABLES,
+    PROVENANCE_REL_TABLES,
     REL_TABLES,
     TOPOLOGY_REL_TABLES,
 )
@@ -55,7 +56,7 @@ except ImportError:
 def _apply_schema(db: lb.Database) -> None:
     """Apply full schema DDL (live + knowledge tables)."""
     conn = lb.Connection(db)
-    all_ddl = NODE_TABLES + KNOWLEDGE_NODE_TABLES + REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES
+    all_ddl = NODE_TABLES + KNOWLEDGE_NODE_TABLES + REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES + PROVENANCE_REL_TABLES
     for ddl in all_ddl:
         conn.execute(ddl.strip())
     print(f"  Schema applied: {len(all_ddl)} DDL statements")
@@ -215,7 +216,8 @@ def _populate_entity_mappings(db: lb.Database, index: OASIndex, registry=None) -
             "MATCH (e:ApiEndpoint {endpoint_id: $eid}), (et:EntityType {name: $ename}) "
             "CREATE (e)-[:OPERATES_ON {"
             "  paramName: $pname, fieldName: $fname,"
-            "  confidence: $conf, mapper: $mapper, reason: $reason"
+            "  confidence: $conf, mapper: $mapper, reason: $reason,"
+            "  operation: $op"
             "}]->(et)",
             parameters={
                 "eid": result.endpoint_id,
@@ -225,6 +227,7 @@ def _populate_entity_mappings(db: lb.Database, index: OASIndex, registry=None) -
                 "conf": result.confidence.value,
                 "mapper": result.mapper_name,
                 "reason": result.reason,
+                "op": result.operation,
             },
         )
         edge_count += 1
@@ -267,6 +270,42 @@ def _populate_seeds(db: lb.Database, seeds_dir: Path) -> int:
 
     print(f"  Inserted {count} seed scripts")
     return count
+
+
+def _create_fts_indexes(db: lb.Database) -> int:
+    """Create FTS indexes for BM25-ranked search."""
+    conn = lb.Connection(db)
+
+    try:
+        conn.execute("INSTALL fts")
+        conn.execute("LOAD EXTENSION fts")
+    except Exception as exc:
+        if "already" not in str(exc).lower():
+            print(f"  ⚠ FTS extension unavailable: {exc}", file=sys.stderr)
+            return 0
+
+    fts_defs = [
+        ("api_fts", "ApiEndpoint", ["summary", "description", "path", "operationId"]),
+        ("doc_fts", "DocSection", ["title", "content"]),
+        ("script_fts", "Script", ["filename", "description"]),
+    ]
+
+    created = 0
+    for idx_name, table, fields in fts_defs:
+        try:
+            conn.execute(f"CALL fts.drop_fts_index('{idx_name}')")
+        except Exception:
+            pass
+        try:
+            field_list = ", ".join(fields)
+            conn.execute(
+                f"CALL fts.create_fts_index('{idx_name}', '{table}', [{field_list}])"
+            )
+            created += 1
+            print(f"    Created {idx_name} on {table}")
+        except Exception as exc:
+            print(f"    ⚠ {idx_name} failed: {exc}", file=sys.stderr)
+    return created
 
 
 def main() -> None:
@@ -336,6 +375,11 @@ def main() -> None:
         _populate_seeds(db, seeds_dir)
     else:
         print(f"  ⚠ Seeds dir not found: {seeds_dir}")
+
+    # Create FTS indexes for BM25-ranked search
+    print("\n[7/7] Creating FTS indexes...")
+    fts_count = _create_fts_indexes(db)
+    print(f"  FTS indexes: {fts_count}")
 
     # Close DB before tar
     db.close()
