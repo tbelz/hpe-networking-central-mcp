@@ -182,6 +182,29 @@ INFRA_PARAMS = frozenset({
 })
 
 
+def derive_operation(method: str, path: str) -> str:
+    """Derive a CRUD operation string from an HTTP method and path.
+
+    Returns one of: "list", "read", "create", "update", "delete", or "".
+    For GET requests, distinguishes list (collection) vs read (single resource)
+    by checking whether the last path segment is a path parameter.
+    """
+    m = method.upper()
+    if m == "GET":
+        # If the last segment is a {param}, it's a single-resource read
+        segments = [s for s in path.rstrip("/").split("/") if s]
+        if segments and segments[-1].startswith("{"):
+            return "read"
+        return "list"
+    if m == "POST":
+        return "create"
+    if m in ("PUT", "PATCH"):
+        return "update"
+    if m == "DELETE":
+        return "delete"
+    return ""
+
+
 def run_mapping(
     index: OASIndex,
     pipeline: MappingPipeline | None = None,
@@ -236,6 +259,7 @@ def run_mapping(
             )
 
             result = pipeline.map_param(ctx, registry)
+            op = derive_operation(entry.method, entry.path)
             result = MappingResult(
                 param_name=result.param_name,
                 param_location=result.param_location,
@@ -245,6 +269,7 @@ def run_mapping(
                 mapper_name=result.mapper_name,
                 reason=result.reason,
                 endpoint_id=endpoint_id,
+                operation=op,
             )
 
             report.results.append(result)

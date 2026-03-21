@@ -29,6 +29,7 @@ from hpe_networking_central_mcp.graph.schema import (  # noqa: E402
     KNOWLEDGE_REL_TABLES,
     NODE_TABLES,
     POLICY_REL_TABLES,
+    PROVENANCE_REL_TABLES,
     REL_TABLES,
     TOPOLOGY_REL_TABLES,
 )
@@ -55,7 +56,7 @@ except ImportError:
 def _apply_schema(db: lb.Database) -> None:
     """Apply full schema DDL (live + knowledge tables)."""
     conn = lb.Connection(db)
-    all_ddl = NODE_TABLES + KNOWLEDGE_NODE_TABLES + REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES
+    all_ddl = NODE_TABLES + KNOWLEDGE_NODE_TABLES + REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES + PROVENANCE_REL_TABLES
     for ddl in all_ddl:
         conn.execute(ddl.strip())
     print(f"  Schema applied: {len(all_ddl)} DDL statements")
@@ -215,7 +216,8 @@ def _populate_entity_mappings(db: lb.Database, index: OASIndex, registry=None) -
             "MATCH (e:ApiEndpoint {endpoint_id: $eid}), (et:EntityType {name: $ename}) "
             "CREATE (e)-[:OPERATES_ON {"
             "  paramName: $pname, fieldName: $fname,"
-            "  confidence: $conf, mapper: $mapper, reason: $reason"
+            "  confidence: $conf, mapper: $mapper, reason: $reason,"
+            "  operation: $op"
             "}]->(et)",
             parameters={
                 "eid": result.endpoint_id,
@@ -225,6 +227,7 @@ def _populate_entity_mappings(db: lb.Database, index: OASIndex, registry=None) -
                 "conf": result.confidence.value,
                 "mapper": result.mapper_name,
                 "reason": result.reason,
+                "op": result.operation,
             },
         )
         edge_count += 1
@@ -269,6 +272,47 @@ def _populate_seeds(db: lb.Database, seeds_dir: Path) -> int:
     return count
 
 
+def _create_fts_indexes(db: lb.Database) -> int:
+    """Create FTS indexes for BM25-ranked search."""
+    conn = lb.Connection(db)
+
+    try:
+        conn.execute("INSTALL fts")
+        conn.execute("LOAD EXTENSION fts")
+    except Exception as exc:
+        if "already" not in str(exc).lower():
+            print(f"  ⚠ FTS extension unavailable: {exc}", file=sys.stderr)
+            return 0
+
+    fts_defs = [
+        ("api_fts", "ApiEndpoint", ["summary", "description", "path", "operationId"]),
+        ("doc_fts", "DocSection", ["title", "content"]),
+        ("script_fts", "Script", ["filename", "description"]),
+        # Data-node indexes are only useful at runtime (nodes populated by seeds),
+        # but we create them at build time so the schema is ready.
+        ("device_fts", "Device", ["name", "serial", "model", "deviceType"]),
+        ("site_fts", "Site", ["name", "address", "city", "country"]),
+        ("config_fts", "ConfigProfile", ["name", "category"]),
+    ]
+
+    created = 0
+    for idx_name, table, fields in fts_defs:
+        try:
+            conn.execute(f"CALL fts.drop_fts_index('{idx_name}')")
+        except Exception:
+            pass
+        try:
+            cypher_field_list = ", ".join(f"'{f}'" for f in fields)
+            conn.execute(
+                f"CALL fts.create_fts_index('{idx_name}', '{table}', [{cypher_field_list}])"
+            )
+            created += 1
+            print(f"    Created {idx_name} on {table}")
+        except Exception as exc:
+            print(f"    ⚠ {idx_name} failed: {exc}", file=sys.stderr)
+    return created
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build LadybugDB knowledge database")
     parser.add_argument("--output-dir", type=Path, default=Path("build"),
@@ -290,24 +334,24 @@ def main() -> None:
     print("=== Building Knowledge Database ===\n")
 
     # 1. Create DB and apply schema
-    print("[1/6] Creating database and applying schema...")
+    print("[1/7] Creating database and applying schema...")
     db = lb.Database(str(db_path))
     _apply_schema(db)
 
     # 2. Scrape API specs
-    print("\n[2/6] Scraping API documentation...")
+    print("\n[2/7] Scraping API documentation...")
     specs = _scrape_specs(cache_dir)
     if not specs:
         print("⚠ No specs scraped — database will have no API endpoints.", file=sys.stderr)
 
     # 3. Build index and populate
-    print("\n[3/6] Populating API endpoints...")
+    print("\n[3/7] Populating API endpoints...")
     index = OASIndex()
     index.build(specs)
     endpoint_count = _populate_endpoints(db, index)
 
     # 4. Generate DDL from API response schemas
-    print("\n[4/6] Generating DDL from API response schemas...")
+    print("\n[4/7] Generating DDL from API response schemas...")
     node_tables = infer_node_tables(index)
     rel_tables = infer_rel_tables(index, node_tables)
     generated_ddl = generate_ddl(node_tables, rel_tables)
@@ -325,17 +369,22 @@ def main() -> None:
     print(f"  DDL file:    {ddl_path}")
 
     # 5. Entity mapping (use DDL-derived registry when available)
-    print("\n[5/6] Running entity mapping pipeline...")
+    print("\n[5/7] Running entity mapping pipeline...")
     ddl_registry = build_registry_from_node_tables(node_tables) if node_tables else None
     mapping_report = _populate_entity_mappings(db, index, registry=ddl_registry)
 
     # 6. Populate seed scripts
-    print("\n[6/6] Populating seed scripts...")
+    print("\n[6/7] Populating seed scripts...")
     seeds_dir = Path(__file__).resolve().parent.parent / "src" / "hpe_networking_central_mcp" / "seeds"
     if seeds_dir.is_dir():
         _populate_seeds(db, seeds_dir)
     else:
         print(f"  ⚠ Seeds dir not found: {seeds_dir}")
+
+    # Create FTS indexes for BM25-ranked search
+    print("\n[7/7] Creating FTS indexes...")
+    fts_count = _create_fts_indexes(db)
+    print(f"  FTS indexes: {fts_count}")
 
     # Close DB before tar
     db.close()

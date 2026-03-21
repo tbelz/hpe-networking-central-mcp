@@ -37,6 +37,7 @@ class MappingResult:
         mapper_name: Which mapper produced this result (for audit trail).
         reason: Human-readable explanation of why this mapping was chosen.
         endpoint_id: The endpoint this mapping applies to (method:path).
+        operation: CRUD operation type (list, read, create, update, delete).
     """
     param_name: str
     param_location: str
@@ -46,6 +47,7 @@ class MappingResult:
     mapper_name: str = ""
     reason: str = ""
     endpoint_id: str = ""
+    operation: str = ""
 
     @property
     def is_mapped(self) -> bool:
