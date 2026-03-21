@@ -156,17 +156,18 @@ def run_seed(seed_name: str, seeds_dir: Path, socket_path: Path) -> dict:
     env["CENTRAL_CLIENT_SECRET"] = client_secret
     env["GRAPH_IPC_SOCKET"] = str(socket_path)
 
-    result = subprocess.run(
-        [sys.executable, str(work_dir / f"{seed_name}.py")],
-        capture_output=True,
-        text=True,
-        timeout=300,
-        cwd=str(work_dir),
-        env=env,
-    )
-
-    # Cleanup temp work directory
-    shutil.rmtree(work_dir, ignore_errors=True)
+    try:
+        result = subprocess.run(
+            [sys.executable, str(work_dir / f"{seed_name}.py")],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            cwd=str(work_dir),
+            env=env,
+        )
+    finally:
+        # Always cleanup temp work directory, even on timeout/exception
+        shutil.rmtree(work_dir, ignore_errors=True)
 
     if result.stderr:
         for line in result.stderr.strip().splitlines():
@@ -271,11 +272,15 @@ def cleanup_fixtures(client: CentralClient, fixtures: Fixtures) -> None:
 def sample_devices(gm: GraphManager, target: int = 3) -> list[dict]:
     """Pick devices from different hierarchy positions for coverage.
 
+    Ensures diversity by taking at most one device from each hierarchy
+    tier first, then filling from any tier with remaining candidates.
+
     Returns list of dicts: {serial, name, site, group, collection}.
     """
-    candidates: list[dict] = []
+    # Collect candidates per hierarchy tier
+    tiers: list[list[dict]] = []
 
-    # Devices in a group
+    # Tier 0: Devices in a group
     rows = gm.query(
         "MATCH (dg:DeviceGroup)-[:HAS_MEMBER]->(d:Device)"
         "<-[:HAS_DEVICE]-(s:Site) "
@@ -283,14 +288,13 @@ def sample_devices(gm: GraphManager, target: int = 3) -> list[dict]:
         "dg.name AS grp LIMIT 5",
         read_only=True,
     )
-    for r in rows:
-        candidates.append({
-            "serial": r["serial"], "name": r["name"],
-            "site": r.get("site", ""), "group": r.get("grp", ""),
-            "collection": "",
-        })
+    tiers.append([
+        {"serial": r["serial"], "name": r["name"],
+         "site": r.get("site", ""), "group": r.get("grp", ""), "collection": ""}
+        for r in rows
+    ])
 
-    # Devices in a site-collection but NOT in a group
+    # Tier 1: Devices in a site-collection but NOT in a group
     rows = gm.query(
         "MATCH (sc:SiteCollection)-[:CONTAINS_SITE]->(s:Site)-[:HAS_DEVICE]->(d:Device) "
         "WHERE NOT EXISTS { MATCH (dg:DeviceGroup)-[:HAS_MEMBER]->(d) } "
@@ -298,14 +302,13 @@ def sample_devices(gm: GraphManager, target: int = 3) -> list[dict]:
         "sc.name AS coll LIMIT 3",
         read_only=True,
     )
-    for r in rows:
-        candidates.append({
-            "serial": r["serial"], "name": r["name"],
-            "site": r.get("site", ""), "group": "",
-            "collection": r.get("coll", ""),
-        })
+    tiers.append([
+        {"serial": r["serial"], "name": r["name"],
+         "site": r.get("site", ""), "group": "", "collection": r.get("coll", "")}
+        for r in rows
+    ])
 
-    # Devices in a standalone site (no collection, no group)
+    # Tier 2: Devices in a standalone site (no collection, no group)
     rows = gm.query(
         "MATCH (o:Org)-[:HAS_SITE]->(s:Site)-[:HAS_DEVICE]->(d:Device) "
         "WHERE NOT EXISTS { MATCH (:DeviceGroup)-[:HAS_MEMBER]->(d) } "
@@ -313,19 +316,35 @@ def sample_devices(gm: GraphManager, target: int = 3) -> list[dict]:
         "RETURN d.serial AS serial, d.name AS name, s.name AS site LIMIT 3",
         read_only=True,
     )
-    for r in rows:
-        candidates.append({
-            "serial": r["serial"], "name": r["name"],
-            "site": r.get("site", ""), "group": "", "collection": "",
-        })
+    tiers.append([
+        {"serial": r["serial"], "name": r["name"],
+         "site": r.get("site", ""), "group": "", "collection": ""}
+        for r in rows
+    ])
 
-    # Deduplicate by serial, take up to `target`
+    # Round-robin: take 1 from each tier first, then fill from remaining
     seen: set[str] = set()
     result: list[dict] = []
-    for c in candidates:
-        if c["serial"] not in seen:
-            seen.add(c["serial"])
-            result.append(c)
+
+    # First pass: one from each populated tier (diversity)
+    for tier in tiers:
+        for c in tier:
+            if c["serial"] not in seen:
+                seen.add(c["serial"])
+                result.append(c)
+                break
+        if len(result) >= target:
+            break
+
+    # Second pass: fill from any tier
+    if len(result) < target:
+        for tier in tiers:
+            for c in tier:
+                if c["serial"] not in seen:
+                    seen.add(c["serial"])
+                    result.append(c)
+                    if len(result) >= target:
+                        break
             if len(result) >= target:
                 break
 
@@ -345,6 +364,9 @@ def sample_devices(gm: GraphManager, target: int = 3) -> list[dict]:
                 })
                 if len(result) >= target:
                     break
+
+    if len(result) < target:
+        print(f"  [{WARN}] Only found {len(result)} device(s), wanted {target}")
 
     return result
 
@@ -499,7 +521,7 @@ def compare(
     only_in_api = api_names - graph_names
     common = graph_names & api_names
 
-    # Compare sourceScope for common profiles
+    # Compare sourceScope and sourceScopeId for common profiles
     scope_mismatches: list[str] = []
     for name in common:
         gp = next(p for p in graph_profiles if p.name == name)
@@ -507,7 +529,12 @@ def compare(
         # Normalize scope labels for comparison
         g_scope = _normalize_scope(gp.source_scope)
         a_scope = _normalize_scope(ap.source_scope)
-        if g_scope and a_scope and g_scope != a_scope:
+        scope_differs = g_scope and a_scope and g_scope != a_scope
+        scope_id_differs = (
+            gp.source_scope_id and ap.source_scope_id
+            and gp.source_scope_id != ap.source_scope_id
+        )
+        if scope_differs or scope_id_differs:
             scope_mismatches.append(
                 f"  '{name}': graph={gp.source_scope}({gp.source_scope_id}) "
                 f"vs api={ap.source_scope}({ap.source_scope_id})"
@@ -675,6 +702,7 @@ def main() -> int:
     gm, ipc, temp_dir, socket_path = setup_graph_and_ipc()
 
     seeds_dir = Path(__file__).parent / "src" / "hpe_networking_central_mcp" / "seeds"
+    fixtures = Fixtures()  # initialise early for the finally block
 
     try:
         print("  Running populate_base_graph seed...")
@@ -711,15 +739,9 @@ def main() -> int:
             print(f"  [{FAIL}] No devices in graph — cannot validate")
             return 2
 
-    except Exception as exc:
-        print(f"  [{FAIL}] Seed execution failed: {exc}")
-        return 2
-
-    # Phase 2: Create test fixtures
-    print(f"\nPhase 2: Create test fixtures")
-    fixtures = create_fixtures(client)
-
-    try:
+        # Phase 2: Create test fixtures
+        print(f"\nPhase 2: Create test fixtures")
+        fixtures = create_fixtures(client)
         # Phase 3: Re-run config seed to pick up fixtures
         if fixtures.group_name:
             print(f"\nPhase 3: Re-run config seed with fixtures")
@@ -783,7 +805,7 @@ def main() -> int:
         print(f"\nCleanup:")
         cleanup_fixtures(client, fixtures)
 
-        # Shutdown IPC and remove temp dir
+        # Shutdown IPC and remove temp dir (always, even if Phase 1 fails)
         ipc.stop()
         try:
             shutil.rmtree(temp_dir)

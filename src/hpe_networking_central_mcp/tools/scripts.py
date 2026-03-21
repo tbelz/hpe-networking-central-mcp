@@ -22,6 +22,16 @@ logger = structlog.get_logger("tools.scripts")
 _graph_manager: GraphManager | None = None
 
 
+def _cypher_escape(value: str) -> str:
+    """Escape a string for safe inclusion as a Cypher string literal.
+
+    LadybugDB 0.15.x has a parameter-binding bug that segfaults when a
+    STRING parameter looks like a JSON array of objects.  This helper
+    lets us inline the value directly in the Cypher query instead.
+    """
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def _validate_filename(filename: str) -> str | None:
     """Validate script filename. Returns error message or None if valid."""
     if not filename:
@@ -179,19 +189,28 @@ def register_script_tools(mcp, settings: Settings, graph_manager: GraphManager):
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         params_json = json.dumps(parameters or [])
 
-        # Store script in graph database
+        # ── LadybugDB workaround ────────────────────────────────
+        # Passing a STRING parameter that resembles a JSON array of
+        # objects triggers a segfault in real_ladybug 0.15.x.
+        # We inline params_json as a Cypher string literal instead.
+        escaped_params = _cypher_escape(params_json)
+
+        # Store script in graph database (DELETE + CREATE instead of
+        # MERGE to sidestep a second LadybugDB planner crash).
         gm.execute(
-            "MERGE (s:Script {filename: $fn}) "
-            "ON CREATE SET s.content = $content, s.description = $descr, "
-            "s.tags = $tags, s.parameters = $params, s.created_at = $created "
-            "ON MATCH SET s.content = $content, s.description = $descr, "
-            "s.tags = $tags, s.parameters = $params, s.created_at = $created",
+            "MATCH (s:Script {filename: $fn}) DELETE s",
+            {"fn": filename},
+        )
+        gm.execute(
+            "CREATE (s:Script {"
+            "filename: $fn, content: $content, description: $descr, "
+            f"tags: $tags, parameters: '{escaped_params}', "
+            "created_at: $created})",
             {
                 "fn": filename,
                 "content": content,
                 "descr": description,
                 "tags": tags,
-                "params": params_json,
                 "created": created_at,
             },
         )
@@ -258,19 +277,27 @@ def sync_seeds_to_graph(graph_manager: GraphManager, seeds_dir: Path, lib_dir: P
 
             content = seed_file.read_text(encoding="utf-8")
             params_json = json.dumps(meta.get("parameters", []))
+            escaped_params = _cypher_escape(params_json)
 
+            # ── LadybugDB workaround ────────────────────────────────
+            # Passing JSON-array strings as Cypher parameters triggers
+            # segfaults or type-confusion in real_ladybug 0.15.x.
+            # We inline params_json as a Cypher string literal and
+            # use DELETE + CREATE instead of MERGE.
             graph_manager.execute(
-                "MERGE (s:Script {filename: $fn}) "
-                "ON CREATE SET s.content = $content, s.description = $descr, "
-                "s.tags = $tags, s.parameters = $params, s.created_at = $created "
-                "ON MATCH SET s.content = $content, s.description = $descr, "
-                "s.tags = $tags, s.parameters = $params, s.created_at = $created",
+                "MATCH (s:Script {filename: $fn}) DELETE s",
+                {"fn": seed_file.name},
+            )
+            graph_manager.execute(
+                "CREATE (s:Script {"
+                "filename: $fn, description: $d, tags: $tags, "
+                f"content: $content, parameters: '{escaped_params}', "
+                "created_at: $created})",
                 {
                     "fn": seed_file.name,
-                    "content": content,
-                    "descr": meta.get("description", "Seed script"),
+                    "d": meta.get("description", "Seed script"),
                     "tags": meta.get("tags", []),
-                    "params": params_json,
+                    "content": content,
                     "created": meta.get("created_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
                 },
             )
