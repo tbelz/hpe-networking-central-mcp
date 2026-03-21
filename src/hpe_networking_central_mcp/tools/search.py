@@ -254,8 +254,8 @@ def _get_data_provenance_impl(
         if rows:
             result["source_api"] = rows[0].get("n.source_api")
             result["fetched_at"] = rows[0].get("n.fetched_at")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("provenance_node_query_failed", node_label=node_label, error=str(exc))
 
     # POPULATED_BY edges
     try:
@@ -272,8 +272,8 @@ def _get_data_provenance_impl(
                 "seed": row.get("r.seed", ""),
                 "run_id": row.get("r.run_id", ""),
             })
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("provenance_populated_by_failed", node_label=node_label, error=str(exc))
 
     # Type-level provenance via EntityType → OPERATES_ON
     entity_name = node_label  # Same naming convention
@@ -293,8 +293,8 @@ def _get_data_provenance_impl(
                 "summary": row.get("e.summary", ""),
                 "operation": row.get("r.operation", ""),
             })
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("provenance_related_apis_failed", node_label=node_label, error=str(exc))
 
     return json.dumps(result, indent=2)
 

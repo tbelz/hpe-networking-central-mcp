@@ -302,9 +302,9 @@ def _create_fts_indexes(db: lb.Database) -> int:
         except Exception:
             pass
         try:
-            field_list = ", ".join(fields)
+            cypher_field_list = ", ".join(f"'{f}'" for f in fields)
             conn.execute(
-                f"CALL fts.create_fts_index('{idx_name}', '{table}', [{field_list}])"
+                f"CALL fts.create_fts_index('{idx_name}', '{table}', [{cypher_field_list}])"
             )
             created += 1
             print(f"    Created {idx_name} on {table}")
@@ -334,24 +334,24 @@ def main() -> None:
     print("=== Building Knowledge Database ===\n")
 
     # 1. Create DB and apply schema
-    print("[1/6] Creating database and applying schema...")
+    print("[1/7] Creating database and applying schema...")
     db = lb.Database(str(db_path))
     _apply_schema(db)
 
     # 2. Scrape API specs
-    print("\n[2/6] Scraping API documentation...")
+    print("\n[2/7] Scraping API documentation...")
     specs = _scrape_specs(cache_dir)
     if not specs:
         print("⚠ No specs scraped — database will have no API endpoints.", file=sys.stderr)
 
     # 3. Build index and populate
-    print("\n[3/6] Populating API endpoints...")
+    print("\n[3/7] Populating API endpoints...")
     index = OASIndex()
     index.build(specs)
     endpoint_count = _populate_endpoints(db, index)
 
     # 4. Generate DDL from API response schemas
-    print("\n[4/6] Generating DDL from API response schemas...")
+    print("\n[4/7] Generating DDL from API response schemas...")
     node_tables = infer_node_tables(index)
     rel_tables = infer_rel_tables(index, node_tables)
     generated_ddl = generate_ddl(node_tables, rel_tables)
@@ -369,12 +369,12 @@ def main() -> None:
     print(f"  DDL file:    {ddl_path}")
 
     # 5. Entity mapping (use DDL-derived registry when available)
-    print("\n[5/6] Running entity mapping pipeline...")
+    print("\n[5/7] Running entity mapping pipeline...")
     ddl_registry = build_registry_from_node_tables(node_tables) if node_tables else None
     mapping_report = _populate_entity_mappings(db, index, registry=ddl_registry)
 
     # 6. Populate seed scripts
-    print("\n[6/6] Populating seed scripts...")
+    print("\n[6/7] Populating seed scripts...")
     seeds_dir = Path(__file__).resolve().parent.parent / "src" / "hpe_networking_central_mcp" / "seeds"
     if seeds_dir.is_dir():
         _populate_seeds(db, seeds_dir)
