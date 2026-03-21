@@ -21,8 +21,8 @@ Add an `operation` property (`read | list | create | update | delete`) to
 POST → create, PUT/PATCH → update, DELETE → delete).
 
 ### Instance-level provenance (runtime, seeds)
-1. Add `fetched_at` (STRING, ISO-8601) and `source_api` (STRING, endpoint path)
-   columns to every domain node table.
+1. Add `fetched_at` (STRING, ISO-8601) and `source_api` (STRING, endpoint_id in
+   the form `METHOD:/path`) columns to every domain node table.
 2. Create a new `POPULATED_BY` relationship table
    `(FROM <DomainNode> TO ApiEndpoint)` with `fetched_at`, `seed`, and `run_id`
    properties.

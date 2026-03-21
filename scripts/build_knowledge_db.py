@@ -288,6 +288,11 @@ def _create_fts_indexes(db: lb.Database) -> int:
         ("api_fts", "ApiEndpoint", ["summary", "description", "path", "operationId"]),
         ("doc_fts", "DocSection", ["title", "content"]),
         ("script_fts", "Script", ["filename", "description"]),
+        # Data-node indexes are only useful at runtime (nodes populated by seeds),
+        # but we create them at build time so the schema is ready.
+        ("device_fts", "Device", ["name", "serial", "model", "deviceType"]),
+        ("site_fts", "Site", ["name", "address", "city", "country"]),
+        ("config_fts", "ConfigProfile", ["name", "category"]),
     ]
 
     created = 0

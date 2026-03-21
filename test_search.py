@@ -10,7 +10,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import real_ladybug as lb
 
 # Ensure the src directory is importable
 sys.path.insert(0, str(Path(__file__).parent / "src"))

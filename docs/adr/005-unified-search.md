@@ -17,6 +17,10 @@ runtime:  `INSTALL fts; LOAD EXTENSION fts;`
 Create FTS indexes on:
 - `ApiEndpoint` (path, summary, description, operationId)
 - `DocSection`  (title, content)
+- `Device`      (name, serial, model, deviceType)
+- `Site`        (name, address, city, country)
+- `ConfigProfile` (name, category)
+- `Script`      (filename, description)
 
 At query time:  `CALL fts.query_fts('idx_name', $q, $k)`.
 

@@ -86,6 +86,12 @@ class TestMakeEndpointId:
     def test_preserves_method_case(self):
         assert _make_endpoint_id("POST", "/config/v1/sites") == "POST:/config/v1/sites"
 
+    def test_normalizes_missing_leading_slash(self):
+        assert _make_endpoint_id("GET", "monitoring/v1/devices") == "GET:/monitoring/v1/devices"
+
+    def test_normalizes_lowercase_method(self):
+        assert _make_endpoint_id("get", "/monitoring/v1/devices") == "GET:/monitoring/v1/devices"
+
 
 class TestSetSourceFields:
     """Test set_source_fields() generates correct Cypher fragment."""

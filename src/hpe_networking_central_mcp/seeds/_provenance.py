@@ -12,7 +12,9 @@ from datetime import datetime, timezone
 
 def _make_endpoint_id(method: str, api_path: str) -> str:
     """Build the endpoint_id matching ApiEndpoint nodes in the graph."""
-    return f"{method}:{api_path}"
+    normalized_method = method.upper()
+    normalized_path = api_path if api_path.startswith("/") else f"/{api_path}"
+    return f"{normalized_method}:{normalized_path}"
 
 
 def _now_iso() -> str:

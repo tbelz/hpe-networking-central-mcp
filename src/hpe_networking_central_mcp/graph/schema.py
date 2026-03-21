@@ -192,47 +192,12 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
 # Provenance tables — track which API populated domain nodes
 PROVENANCE_REL_TABLES: list[str] = [
     """
-    CREATE REL TABLE IF NOT EXISTS POPULATED_BY (
+    CREATE REL TABLE GROUP IF NOT EXISTS POPULATED_BY (
         FROM Device TO ApiEndpoint,
-        fetched_at STRING,
-        seed       STRING,
-        run_id     STRING
-    )
-    """,
-    """
-    CREATE REL TABLE IF NOT EXISTS POPULATED_BY (
         FROM Site TO ApiEndpoint,
-        fetched_at STRING,
-        seed       STRING,
-        run_id     STRING
-    )
-    """,
-    """
-    CREATE REL TABLE IF NOT EXISTS POPULATED_BY (
         FROM SiteCollection TO ApiEndpoint,
-        fetched_at STRING,
-        seed       STRING,
-        run_id     STRING
-    )
-    """,
-    """
-    CREATE REL TABLE IF NOT EXISTS POPULATED_BY (
         FROM DeviceGroup TO ApiEndpoint,
-        fetched_at STRING,
-        seed       STRING,
-        run_id     STRING
-    )
-    """,
-    """
-    CREATE REL TABLE IF NOT EXISTS POPULATED_BY (
         FROM ConfigProfile TO ApiEndpoint,
-        fetched_at STRING,
-        seed       STRING,
-        run_id     STRING
-    )
-    """,
-    """
-    CREATE REL TABLE IF NOT EXISTS POPULATED_BY (
         FROM UnmanagedDevice TO ApiEndpoint,
         fetched_at STRING,
         seed       STRING,
@@ -344,9 +309,9 @@ def get_node_tables() -> list[str]:
 
 
 def get_rel_tables() -> list[str]:
-    """Return all relationship table names (including topology and policy)."""
-    _rel_re = re.compile(r"CREATE REL TABLE IF NOT EXISTS (\w+)")
-    all_ddl = REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES
+    """Return all relationship table names (including topology, policy, provenance)."""
+    _rel_re = re.compile(r"CREATE REL TABLE (?:GROUP )?IF NOT EXISTS (\w+)")
+    all_ddl = REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES + PROVENANCE_REL_TABLES
     return [m.group(1) for ddl in all_ddl if (m := _rel_re.search(ddl))]
 
 
