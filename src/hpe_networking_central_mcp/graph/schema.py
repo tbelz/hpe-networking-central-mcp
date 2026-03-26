@@ -2,12 +2,9 @@
 
 Defines bootstrap node and relationship tables for:
   - Domain: Org, SiteCollection, Site, Device, DeviceGroup, ConfigProfile, UnmanagedDevice
-  - Knowledge: ApiEndpoint, ApiCategory, EntityType, DocSection, Script
+  - Knowledge: ApiEndpoint, ApiCategory, DocSection, Script
   - Topology: CONNECTED_TO, LINKED_TO
   - Policy: *_ASSIGNS_CONFIG, EFFECTIVE_CONFIG
-
-Additional tables may be created dynamically from generated_ddl.json
-(produced by the build pipeline's schema_generator).
 """
 
 from __future__ import annotations
@@ -178,15 +175,6 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         PRIMARY KEY (filename)
     )
     """,
-    """
-    CREATE NODE TABLE IF NOT EXISTS EntityType (
-        name        STRING,
-        graphNode   STRING,
-        description STRING,
-        fields      STRING,
-        PRIMARY KEY (name)
-    )
-    """,
 ]
 
 # Provenance tables — track which API populated domain nodes
@@ -208,18 +196,6 @@ PROVENANCE_REL_TABLES: list[str] = [
 
 KNOWLEDGE_REL_TABLES: list[str] = [
     "CREATE REL TABLE IF NOT EXISTS BELONGS_TO_CATEGORY (FROM ApiEndpoint TO ApiCategory)",
-    # Entity mapping relationships — populated by the entity_mapping pipeline
-    """
-    CREATE REL TABLE IF NOT EXISTS OPERATES_ON (
-        FROM ApiEndpoint TO EntityType,
-        paramName   STRING,
-        fieldName   STRING,
-        confidence  STRING,
-        mapper      STRING,
-        reason      STRING,
-        operation   STRING
-    )
-    """,
 ]
 
 # ── Relationship table DDL ───────────────────────────────────────────

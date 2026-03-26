@@ -51,7 +51,7 @@ class _GraphRequestHandler(socketserver.StreamRequestHandler):
 
             try:
                 if method == "query":
-                    rows = manager.query(cypher, read_only=False)
+                    rows = manager.query(cypher, params=params, read_only=False)
                 else:
                     rows = manager.execute(cypher, params)
                 self._send({"id": req_id, "result": rows})

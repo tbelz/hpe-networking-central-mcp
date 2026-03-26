@@ -35,7 +35,22 @@ Thumbs.db
 .coverage
 htmlcov/
 *.sh
+config_validation_report.json
 
 # Script library (runtime artifact, populated at startup)
 scripts/library/
 scripts/__pycache__/
+scripts/tests/
+
+# Debug / investigation scripts (root-level)
+test_merge_*.py
+test_delete_create.py
+
+# Leftover seed copies from run_seed() (real seeds live in seeds/)
+src/hpe_networking_central_mcp/_provenance.py
+src/hpe_networking_central_mcp/analyze_topology.*
+src/hpe_networking_central_mcp/enrich_topology.*
+src/hpe_networking_central_mcp/onboard_device.*
+src/hpe_networking_central_mcp/populate_base_graph.*
+src/hpe_networking_central_mcp/populate_config_policy.*
+src/hpe_networking_central_mcp/populate_monitoring.*

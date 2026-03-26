@@ -23,13 +23,13 @@ The agent manages network devices through a combination of direct API calls and 
 │  ├─ get_api_endpoint_detail ──► Full parameter/schema detail for any endpoint
 │  ├─ refresh_knowledge_db│──► Download latest knowledge DB from GitHub releases
 │  ├─ query_graph         │──► Cypher queries against the configuration graph
+│  ├─ write_graph         │──► Write Cypher to enrich the graph (CREATE, MERGE, SET)
 │  ├─ refresh_graph       │──► Reset and re-run all seed scripts
 │  ├─ list_scripts        │──► Browse automation script library
 │  ├─ save_script         │──► Save Python scripts for reuse
 │  ├─ get_script_content  │──► Read script source code
 │  ├─ execute_script      │──► Run scripts (central_helpers SDK injected)
 │  ├─ unified_search      │──► BM25 full-text search across APIs, docs, and data
-│  ├─ search_related_apis │──► Find APIs by entity type and CRUD operation
 │  └─ get_data_provenance │──► Trace any node back to its source API and seed
 │                         │
 │  Resources:             │
@@ -51,7 +51,7 @@ The agent manages network devices through a combination of direct API calls and 
 
 The server maintains a LadybugDB (Kùzu) graph database with two layers:
 
-1. **Knowledge layer** — API endpoints, categories, entity types, documentation, and scripts (populated at build time from OpenAPI specs)
+1. **Knowledge layer** — API endpoints, categories, documentation, and scripts (populated at build time from OpenAPI specs)
 2. **Domain layer** — live network state (devices, sites, config profiles) populated at runtime by seed scripts calling Central APIs
 
 ### Graph Schema
@@ -61,7 +61,6 @@ graph LR
     subgraph Knowledge Layer
         ApiEndpoint
         ApiCategory
-        EntityType
         DocSection
         Script
     end
@@ -77,7 +76,6 @@ graph LR
     end
 
     ApiEndpoint -->|BELONGS_TO_CATEGORY| ApiCategory
-    ApiEndpoint -->|OPERATES_ON| EntityType
 
     Org -->|HAS_COLLECTION| SiteCollection
     Org -->|HAS_SITE| Site
@@ -99,23 +97,15 @@ graph LR
 ### Data Provenance
 
 Every domain node tracks where its data came from. This lets an LLM answer
-"which API populated this device?" or "what APIs can create a VLAN?"
+"which API populated this device?" or "when was this site data last refreshed?"
 
 ```mermaid
 graph LR
-    subgraph "Type-level (build time)"
-        EP[ApiEndpoint] -->|"OPERATES_ON<br/>(operation: list/read/create/update/delete)"| ET[EntityType]
-    end
-
     subgraph "Instance-level (runtime)"
         D[Device<br/>fetched_at, source_api] -->|"POPULATED_BY<br/>(seed, run_id, fetched_at)"| EP2[ApiEndpoint]
         S[Site<br/>fetched_at, source_api] -->|POPULATED_BY| EP3[ApiEndpoint]
     end
 ```
-
-**Type-level provenance** (OPERATES_ON edges) links each API endpoint to the entity
-types it can read, create, update, or delete. The `operation` field is derived
-from the HTTP method at build time.
 
 **Instance-level provenance** records which specific API and seed script populated
 each node at runtime, with timestamps and run IDs using `POPULATED_BY` edges and
@@ -213,13 +203,13 @@ GREENLAKE_CLIENT_SECRET=your_glp_client_secret
 | `get_api_endpoint_detail` | Get full parameter and schema details for a specific endpoint |
 | `refresh_knowledge_db` | Download the latest knowledge database from GitHub releases |
 | `query_graph` | Execute read-only Cypher queries against the configuration graph |
+| `write_graph` | Execute write Cypher to enrich the graph (CREATE, MERGE, SET, DELETE) |
 | `refresh_graph` | Reset graph and re-run all auto-run seed scripts |
 | `list_scripts` | List all scripts in the automation library |
 | `get_script_content` | Read the source code of a script |
 | `save_script` | Save a Python script to the library for reuse |
 | `execute_script` | Execute a script with Central/GreenLake credentials injected |
 | `unified_search` | BM25 full-text search across APIs, docs, and data nodes |
-| `search_related_apis` | Find API endpoints by entity type and CRUD operation |
 | `get_data_provenance` | Trace any data node back to its source API and seed script |
 
 ## Development
