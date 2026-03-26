@@ -133,12 +133,35 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
 
         # Block schema-altering DDL
         _DDL_PATTERN = re.compile(
-            r"\b(DROP|ALTER|CREATE\s+(NODE|REL)\s+TABLE)\b", re.IGNORECASE
+            r"\b(DROP|ALTER|CREATE\s+(NODE|REL)\s+TABLE|CREATE\s+INDEX|CREATE\s+CONSTRAINT)\b",
+            re.IGNORECASE,
         )
         if _DDL_PATTERN.search(cypher):
             raise ToolError(
                 "Schema-altering statements (DROP, ALTER, CREATE NODE/REL TABLE) are not allowed. "
                 "Only data manipulation (CREATE, MERGE, SET, DELETE, REMOVE) is permitted."
+            )
+
+        # Block other side-effecting or privileged operations
+        _DENY_PATTERN = re.compile(
+            r"\b(LOAD|COPY|INSTALL|CALL|CREATE\s+DATABASE|DROP\s+DATABASE)\b",
+            re.IGNORECASE,
+        )
+        if _DENY_PATTERN.search(cypher):
+            raise ToolError(
+                "Only data manipulation statements using CREATE, MERGE, SET, DELETE, or REMOVE are "
+                "allowed. Statements using LOAD, COPY, INSTALL, CALL, or database-level DDL are "
+                "not permitted in this tool."
+            )
+
+        # Require at least one allowed write keyword
+        cypher_lower = cypher.lower()
+        _ALLOWED_WRITE_KEYWORDS = ("create", "merge", "set", "delete", "remove")
+        if not any(re.search(rf"\b{kw}\b", cypher_lower) for kw in _ALLOWED_WRITE_KEYWORDS):
+            raise ToolError(
+                "write_graph only permits data-manipulation statements that use CREATE, MERGE, SET, "
+                "DELETE, or REMOVE (optionally after MATCH/WITH/WHERE). Other operations are not "
+                "allowed."
             )
 
         try:
@@ -153,8 +176,11 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
             hint = _build_error_hint(msg)
             raise ToolError(f"Cypher write failed: {msg}{hint}")
 
-        logger.info("write_graph_done", rows=len(rows))
-        return json.dumps({"status": "ok", "rows_affected": len(rows)}, indent=2)
+        logger.info("write_graph_done", rows_returned=len(rows))
+        result: dict = {"status": "ok"}
+        if rows:
+            result["rows"] = rows
+        return json.dumps(result, indent=2)
 
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True, openWorldHint=True),

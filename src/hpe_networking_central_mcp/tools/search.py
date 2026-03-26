@@ -14,6 +14,10 @@ from ..config import Settings
 if TYPE_CHECKING:
     from ..graph.manager import GraphManager
 
+logger = structlog.get_logger("tools.search")
+
+_graph_manager: "GraphManager | None" = None
+
 # Primary key fields for domain node types
 _PK_MAP: dict[str, str] = {
     "Device": "serial",

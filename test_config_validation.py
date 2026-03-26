@@ -23,7 +23,6 @@ Safety:
 
 from __future__ import annotations
 
-import atexit
 import json
 import os
 import shutil
@@ -103,7 +102,7 @@ class ApiProfile:
 class ComparisonResult:
     serial: str
     category: str
-    status: str  # "match", "mismatch", "graph_only", "api_only", "api_empty", "error"
+    status: str  # "match", "mismatch", "graph_only", "api_only", "api_unsupported", "error"
     graph_profiles: list[GraphProfile] = field(default_factory=list)
     api_profiles: list[ApiProfile] = field(default_factory=list)
     details: str = ""
@@ -165,6 +164,20 @@ def run_seed(seed_name: str, seeds_dir: Path, socket_path: Path) -> dict:
             cwd=str(work_dir),
             env=env,
         )
+    except subprocess.TimeoutExpired as e:
+        stderr = (e.stderr or "").strip()
+        if stderr:
+            for line in stderr.splitlines():
+                print(f"    [seed] {line}", file=sys.stderr)
+        return {
+            "error": "Seed execution timed out after 300 seconds",
+            "stderr": stderr[-2000:],
+        }
+    except OSError as e:
+        return {
+            "error": f"Failed to execute seed script: {e}",
+            "stderr": "",
+        }
     finally:
         # Always cleanup temp work directory, even on timeout/exception
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -179,7 +192,7 @@ def run_seed(seed_name: str, seeds_dir: Path, socket_path: Path) -> dict:
     try:
         return json.loads(result.stdout)
     except (json.JSONDecodeError, ValueError):
-        return {"stdout": result.stdout[-2000:]}
+        return {"error": "Seed did not emit valid JSON", "stdout": result.stdout[-2000:]}
 
 
 # ── Category discovery ───────────────────────────────────────────────
