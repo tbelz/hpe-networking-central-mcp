@@ -14,10 +14,6 @@ from ..config import Settings
 if TYPE_CHECKING:
     from ..graph.manager import GraphManager
 
-logger = structlog.get_logger("tools.search")
-
-_graph_manager: GraphManager | None = None
-
 # Primary key fields for domain node types
 _PK_MAP: dict[str, str] = {
     "Device": "serial",
@@ -176,52 +172,6 @@ def _unified_search_impl(
     }, indent=2)
 
 
-def _search_related_apis_impl(
-    gm: GraphManager,
-    entity_type: str,
-    operation: str | None = None,
-) -> str:
-    """Find APIs that operate on a given entity type, with optional CRUD filter."""
-    cypher = (
-        "MATCH (e:ApiEndpoint)-[r:OPERATES_ON]->(et:EntityType {name: $ename}) "
-    )
-    params: dict[str, Any] = {"ename": entity_type}
-
-    if operation:
-        cypher += "WHERE r.operation = $op "
-        params["op"] = operation
-
-    cypher += (
-        "RETURN DISTINCT e.endpoint_id, e.method, e.path, e.summary, "
-        "e.category, r.operation, r.confidence "
-        "ORDER BY r.operation, e.path"
-    )
-
-    try:
-        rows = gm.query(cypher, params, read_only=True)
-    except Exception as exc:
-        return json.dumps({"error": str(exc)})
-
-    apis = []
-    for row in rows:
-        apis.append({
-            "endpoint_id": row.get("e.endpoint_id", ""),
-            "method": row.get("e.method", ""),
-            "path": row.get("e.path", ""),
-            "summary": row.get("e.summary", ""),
-            "category": row.get("e.category", ""),
-            "operation": row.get("r.operation", ""),
-            "confidence": row.get("r.confidence", ""),
-        })
-
-    return json.dumps({
-        "entity_type": entity_type,
-        "operation_filter": operation,
-        "count": len(apis),
-        "apis": apis,
-    }, indent=2)
-
-
 def _get_data_provenance_impl(
     gm: GraphManager,
     node_label: str,
@@ -240,7 +190,6 @@ def _get_data_provenance_impl(
         "source_api": None,
         "fetched_at": None,
         "populated_by": [],
-        "related_apis": [],
     }
 
     # Instance-level provenance from node properties
@@ -274,27 +223,6 @@ def _get_data_provenance_impl(
             })
     except Exception as exc:
         logger.debug("provenance_populated_by_failed", node_label=node_label, error=str(exc))
-
-    # Type-level provenance via EntityType → OPERATES_ON
-    entity_name = node_label  # Same naming convention
-    try:
-        rows = gm.query(
-            "MATCH (e:ApiEndpoint)-[r:OPERATES_ON]->(et:EntityType {name: $ename}) "
-            "RETURN DISTINCT e.endpoint_id, e.method, e.path, e.summary, r.operation "
-            "ORDER BY r.operation, e.path",
-            {"ename": entity_name},
-            read_only=True,
-        )
-        for row in rows:
-            result["related_apis"].append({
-                "endpoint_id": row.get("e.endpoint_id", ""),
-                "method": row.get("e.method", ""),
-                "path": row.get("e.path", ""),
-                "summary": row.get("e.summary", ""),
-                "operation": row.get("r.operation", ""),
-            })
-    except Exception as exc:
-        logger.debug("provenance_related_apis_failed", node_label=node_label, error=str(exc))
 
     return json.dumps(result, indent=2)
 
@@ -330,28 +258,6 @@ def register_search_tools(mcp: FastMCP, settings: Settings, graph_manager: Graph
         return _unified_search_impl(gm, query, scope=scope, limit=limit)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
-    def search_related_apis(
-        entity_type: str,
-        operation: str | None = None,
-    ) -> str:
-        """Find API endpoints that operate on a given entity type.
-
-        Uses the OPERATES_ON graph edges to discover which APIs read, create,
-        update, or delete a specific entity type like Device, Site, or ConfigProfile.
-
-        Args:
-            entity_type: Entity name (e.g., "Device", "Site", "ConfigProfile").
-            operation: Optional CRUD filter — "list", "read", "create", "update", "delete".
-
-        Returns:
-            JSON with matching API endpoints and their CRUD operations.
-        """
-        gm = _graph_manager
-        if gm is None or not gm.is_available:
-            return json.dumps({"error": "Search not available — graph database not initialized."})
-        return _search_related_apis_impl(gm, entity_type, operation=operation)
-
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
     def get_data_provenance(
         node_type: str,
         identifier: str,
@@ -359,15 +265,14 @@ def register_search_tools(mcp: FastMCP, settings: Settings, graph_manager: Graph
         """Get the data provenance for a specific node in the graph.
 
         Shows where the data came from: which API endpoint populated it,
-        when it was fetched, which seed script ran, and what related APIs
-        can operate on this type of entity.
+        when it was fetched, and which seed script ran.
 
         Args:
             node_type: Node type (e.g., "Device", "Site", "ConfigProfile").
             identifier: Primary key value (e.g., serial number "SN001", site ID "site-123").
 
         Returns:
-            JSON with source API, fetch timestamp, POPULATED_BY edges, and related APIs.
+            JSON with source API, fetch timestamp, and POPULATED_BY edges.
         """
         gm = _graph_manager
         if gm is None or not gm.is_available:

@@ -77,12 +77,13 @@ direct API reads and reusable Python scripts.
    (device onboarding, subscriptions, licenses, locations, service catalog). These hit
    https://global.api.greenlake.hpe.com. In scripts, use `from central_helpers import glp`.
 
-9. **Graph enrichment**: The graph is populated and enriched by scripts.
+9. **Graph enrichment**: The graph is populated by seed scripts at startup and can be
+   enriched at any time using `write_graph(cypher, parameters)` to add nodes,
+   relationships, or properties you discover during investigation.
    Use `list_scripts(tag="graph")` to find enrichment scripts.
-   Use `get_script_content(filename)` to understand how an existing enrichment script works.
-   To refresh the graph, execute `refresh_graph()` — this resets and re-runs all auto-run
-   seed scripts.  To add custom enrichments, write new scripts that use
-   `from central_helpers import graph` and call `graph.execute(cypher, params)`.
+   To refresh the graph from scratch, execute `refresh_graph()` — this resets and re-runs
+   all auto-run seed scripts.  For custom enrichments, either use `write_graph()` directly
+   or write scripts that use `from central_helpers import graph`.
 
 10. **Reuse**: Always check list_scripts() before writing a new script.
     Use get_script_content() to inspect existing scripts and learn patterns.
@@ -204,11 +205,6 @@ def _download_knowledge_db(repo: str, db_path: Path) -> bool:
             if extracted_manifest.exists():
                 shutil.copy2(extracted_manifest, db_path.parent / "manifest.json")
 
-            # Copy generated_ddl.json if present in archive
-            extracted_ddl = Path(tmp) / "generated_ddl.json"
-            if extracted_ddl.exists():
-                shutil.copy2(extracted_ddl, db_path.parent / "generated_ddl.json")
-
             logger.info("knowledge_db_installed", tag=release.get("tag_name"))
             return True
     except Exception as exc:
@@ -223,10 +219,7 @@ knowledge_downloaded = _download_knowledge_db(
 
 # Initialize file-backed graph database
 graph_manager = GraphManager(settings.graph_db_path)
-_generated_ddl_path = settings.graph_db_path.parent / "generated_ddl.json"
-graph_manager.initialize(
-    generated_ddl_path=_generated_ddl_path if _generated_ddl_path.exists() else None
-)
+graph_manager.initialize()
 graph_manager.create_fts_indexes()
 
 # Start IPC server for script subprocesses

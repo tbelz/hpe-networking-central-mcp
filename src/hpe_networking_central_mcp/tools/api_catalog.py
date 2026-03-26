@@ -284,13 +284,6 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                 extracted_manifest = Path(tmp) / "manifest.json"
                 if extracted_manifest.exists():
                     shutil.copy2(extracted_manifest, settings.graph_db_path.parent / "manifest.json")
-
-                # Copy and apply generated_ddl.json if present
-                extracted_ddl = Path(tmp) / "generated_ddl.json"
-                if extracted_ddl.exists():
-                    ddl_dest = settings.graph_db_path.parent / "generated_ddl.json"
-                    shutil.copy2(extracted_ddl, ddl_dest)
-                    gm.apply_generated_ddl(ddl_dest)
         except Exception as exc:
             logger.error("knowledge_db_refresh_failed", error=str(exc))
             return json.dumps({"error": f"Download/extract failed: {exc}"})

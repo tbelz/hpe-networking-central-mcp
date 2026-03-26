@@ -1,4 +1,4 @@
-"""TDD tests for search tools — unified_search, search_related_apis, get_data_provenance.
+"""TDD tests for search tools — unified_search, get_data_provenance.
 
 Uses an in-memory LadybugDB database with a small fixture graph.
 """
@@ -19,7 +19,6 @@ from hpe_networking_central_mcp.tools.search import (
     _fts_search,
     _contains_search,
     _unified_search_impl,
-    _search_related_apis_impl,
     _get_data_provenance_impl,
 )
 
@@ -77,46 +76,6 @@ def gm(tmp_path_factory):
         "  deprecated: false, tags: ['sites'],"
         "  parameters: '[]', requestBody: '', responses: ''"
         "})"
-    )
-
-    # EntityType nodes
-    gm.execute(
-        "CREATE (et:EntityType {"
-        "  name: 'Device', graphNode: 'Device',"
-        "  description: 'Network device', fields: '{}'"
-        "})"
-    )
-    gm.execute(
-        "CREATE (et:EntityType {"
-        "  name: 'Site', graphNode: 'Site',"
-        "  description: 'Physical site', fields: '{}'"
-        "})"
-    )
-
-    # OPERATES_ON edges with operation
-    gm.execute(
-        "MATCH (e:ApiEndpoint {endpoint_id: 'GET:/monitoring/v1/devices'}), "
-        "(et:EntityType {name: 'Device'}) "
-        "CREATE (e)-[:OPERATES_ON {paramName: 'serial', fieldName: 'serial', "
-        "confidence: 'exact', mapper: 'static', reason: 'test', operation: 'list'}]->(et)"
-    )
-    gm.execute(
-        "MATCH (e:ApiEndpoint {endpoint_id: 'GET:/monitoring/v1/devices/{serial}'}), "
-        "(et:EntityType {name: 'Device'}) "
-        "CREATE (e)-[:OPERATES_ON {paramName: 'serial', fieldName: 'serial', "
-        "confidence: 'exact', mapper: 'static', reason: 'test', operation: 'read'}]->(et)"
-    )
-    gm.execute(
-        "MATCH (e:ApiEndpoint {endpoint_id: 'POST:/config/v1/sites'}), "
-        "(et:EntityType {name: 'Site'}) "
-        "CREATE (e)-[:OPERATES_ON {paramName: 'id', fieldName: 'scopeId', "
-        "confidence: 'high', mapper: 'static', reason: 'test', operation: 'create'}]->(et)"
-    )
-    gm.execute(
-        "MATCH (e:ApiEndpoint {endpoint_id: 'DELETE:/config/v1/sites/{id}'}), "
-        "(et:EntityType {name: 'Site'}) "
-        "CREATE (e)-[:OPERATES_ON {paramName: 'id', fieldName: 'scopeId', "
-        "confidence: 'high', mapper: 'static', reason: 'test', operation: 'delete'}]->(et)"
     )
 
     # Domain nodes with provenance
@@ -246,39 +205,7 @@ class TestUnifiedSearchImpl:
         assert "error" in result
 
 
-# ── C3: search_related_apis ────────────────────────────────────────
-
-class TestSearchRelatedApis:
-    """Test search_related_apis_impl."""
-
-    def test_find_apis_for_device(self, gm):
-        result = json.loads(_search_related_apis_impl(gm, "Device"))
-        assert "apis" in result
-        assert len(result["apis"]) >= 1
-        assert any("devices" in a["path"] for a in result["apis"])
-
-    def test_filter_by_operation(self, gm):
-        result = json.loads(_search_related_apis_impl(gm, "Device", operation="read"))
-        apis = result["apis"]
-        assert len(apis) >= 1
-        assert all(a["operation"] == "read" for a in apis)
-
-    def test_filter_by_list_operation(self, gm):
-        result = json.loads(_search_related_apis_impl(gm, "Device", operation="list"))
-        apis = result["apis"]
-        assert len(apis) >= 1
-
-    def test_site_create_delete(self, gm):
-        result = json.loads(_search_related_apis_impl(gm, "Site", operation="create"))
-        assert len(result["apis"]) >= 1
-        assert result["apis"][0]["method"] == "POST"
-
-    def test_unknown_entity(self, gm):
-        result = json.loads(_search_related_apis_impl(gm, "FooBar"))
-        assert result["apis"] == []
-
-
-# ── C4: get_data_provenance ─────────────────────────────────────────
+# ── C3: get_data_provenance ──────────────────────────────────────────
 
 class TestGetDataProvenance:
     """Test get_data_provenance_impl."""
@@ -297,10 +224,10 @@ class TestGetDataProvenance:
         edge = result["populated_by"][0]
         assert edge["seed"] == "populate_base_graph"
 
-    def test_type_level_provenance(self, gm):
+    def test_populated_by_has_seed(self, gm):
         result = json.loads(_get_data_provenance_impl(gm, "Device", "SN001"))
-        assert "related_apis" in result
-        assert len(result["related_apis"]) >= 1
+        assert len(result["populated_by"]) >= 1
+        assert result["populated_by"][0]["seed"] == "populate_base_graph"
 
     def test_unknown_node(self, gm):
         result = json.loads(_get_data_provenance_impl(gm, "Device", "NONEXISTENT"))

@@ -1,6 +1,6 @@
 {
     "description": "Discover config categories, fetch profiles with extended metadata, resolve scope assignments, and infer merge strategy from API response shapes.",
     "tags": ["config", "graph", "policy", "seed"],
-    "auto_run": true,
+    "auto_run": false,
     "parameters": []
 }

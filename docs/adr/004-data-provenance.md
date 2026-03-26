@@ -1,7 +1,7 @@
 # ADR-004: Data Provenance in the Graph
 
 ## Status
-Accepted
+Partially superseded by [ADR-006](006-remove-prebuilt-ontology.md)
 
 ## Context
 Domain nodes in the graph (Device, Site, Port, etc.) are populated by seed
