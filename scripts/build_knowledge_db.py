@@ -90,6 +90,11 @@ def _cypher_string_list(values: list[str]) -> str:
     return "[" + ", ".join(f"'{e}'" for e in escaped) + "]"
 
 
+def _cypher_escape(value: str) -> str:
+    """Escape a string for safe Cypher string literal embedding."""
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
     """Insert ApiEndpoint and ApiCategory nodes from the OASIndex."""
     conn = lb.Connection(db)
@@ -128,38 +133,31 @@ def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
         tags_literal = _cypher_string_list(entry.tags)
         tags_clause = f"tags: {tags_literal}, " if entry.tags else ""
 
-        cypher = (
+        # Inline JSON-heavy STRING fields as Cypher literals to work around
+        # real_ladybug bug that crashes when STRING params resemble JSON arrays.
+        escaped_params = _cypher_escape(params_json)
+        escaped_body = _cypher_escape(body_json)
+        escaped_resps = _cypher_escape(responses_json)
+
+        conn.execute(
             "CREATE (e:ApiEndpoint {"
             "  endpoint_id: $eid, method: $method, path: $path,"
             "  summary: $summary, description: $descr, operationId: $opid,"
             f"  category: $cat, deprecated: $dep, {tags_clause}"
-            "  parameters: $params, requestBody: $body, responses: $resps"
-            "})"
+            f"  parameters: '{escaped_params}', requestBody: '{escaped_body}',"
+            f"  responses: '{escaped_resps}'"
+            "})",
+            parameters={
+                "eid": endpoint_id,
+                "method": entry.method,
+                "path": entry.path,
+                "summary": entry.summary or "",
+                "descr": entry.description or "",
+                "opid": entry.operation_id or "",
+                "cat": entry.category,
+                "dep": entry.deprecated,
+            },
         )
-        params = {
-            "eid": endpoint_id,
-            "method": entry.method,
-            "path": entry.path,
-            "summary": entry.summary or "",
-            "descr": entry.description or "",
-            "opid": entry.operation_id or "",
-            "cat": entry.category,
-            "dep": entry.deprecated,
-            "params": params_json,
-            "body": body_json,
-            "resps": responses_json,
-        }
-        try:
-            conn.execute(cypher, parameters=params)
-        except RuntimeError as exc:
-            print(f"  ✗ Failed on endpoint #{count}: {endpoint_id}", file=sys.stderr)
-            print(f"    Cypher: {cypher}", file=sys.stderr)
-            print(f"    Param types: { {k: type(v).__name__ for k, v in params.items()} }", file=sys.stderr)
-            print(f"    Param lengths: { {k: len(v) if isinstance(v, str) else v for k, v in params.items()} }", file=sys.stderr)
-            print(f"    body[:200]: {params['body'][:200]}", file=sys.stderr)
-            print(f"    resps[:200]: {params['resps'][:200]}", file=sys.stderr)
-            print(f"    params[:200]: {params['params'][:200]}", file=sys.stderr)
-            raise exc
         count += 1
 
     # Insert ApiCategory nodes
