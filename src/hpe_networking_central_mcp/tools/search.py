@@ -163,6 +163,9 @@ def _unified_search_impl(
     if gm.fts_available:
         results = _fts_search(gm, query, scope=scope, limit=limit)
         search_method = "fts"
+        if not results:
+            results = _contains_search(gm, query, scope=scope, limit=limit)
+            search_method = "contains_fallback"
     else:
         results = _contains_search(gm, query, scope=scope, limit=limit)
         search_method = "contains"
