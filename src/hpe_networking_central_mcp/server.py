@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import graphlib
 import json
 import shutil
 import sys
@@ -265,19 +266,38 @@ if _seeds_dir.is_dir():
 
 # Run auto-run seed scripts in background to populate graph on startup
 def _get_auto_run_seeds() -> list[str]:
-    """Return seed script filenames that have auto_run: true in their metadata."""
-    seeds: list[str] = []
+    """Return seed script filenames in dependency order (topological sort)."""
     lib = settings.script_library_path
+    auto_seeds: dict[str, list[str]] = {}  # script_name -> depends_on
     for meta_file in sorted(lib.glob("*.meta.json")):
         try:
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
             if meta.get("auto_run"):
                 script_name = meta_file.name.replace(".meta.json", ".py")
                 if (lib / script_name).exists():
-                    seeds.append(script_name)
+                    deps = meta.get("depends_on", [])
+                    auto_seeds[script_name] = deps
         except Exception:
             continue
-    return seeds
+
+    # Topological sort: only include dependencies that are in the auto_run set
+    graph: dict[str, set[str]] = {}
+    for name, deps in auto_seeds.items():
+        valid_deps = {d for d in deps if d in auto_seeds}
+        if len(valid_deps) < len(deps):
+            missing = set(deps) - valid_deps
+            logger.warning("seed_dep_not_auto_run", seed=name, missing=list(missing))
+        graph[name] = valid_deps
+
+    try:
+        sorter = graphlib.TopologicalSorter(graph)
+        ordered = list(sorter.static_order())
+    except graphlib.CycleError as e:
+        logger.error("seed_dependency_cycle", detail=str(e))
+        ordered = sorted(auto_seeds.keys())  # fallback to alphabetical
+
+    logger.info("auto_run_seed_order", order=ordered)
+    return ordered
 
 
 def _bg_auto_run_seeds():
