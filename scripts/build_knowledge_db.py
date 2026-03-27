@@ -155,6 +155,10 @@ def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
             print(f"  ✗ Failed on endpoint #{count}: {endpoint_id}", file=sys.stderr)
             print(f"    Cypher: {cypher}", file=sys.stderr)
             print(f"    Param types: { {k: type(v).__name__ for k, v in params.items()} }", file=sys.stderr)
+            print(f"    Param lengths: { {k: len(v) if isinstance(v, str) else v for k, v in params.items()} }", file=sys.stderr)
+            print(f"    body[:200]: {params['body'][:200]}", file=sys.stderr)
+            print(f"    resps[:200]: {params['resps'][:200]}", file=sys.stderr)
+            print(f"    params[:200]: {params['params'][:200]}", file=sys.stderr)
             raise exc
         count += 1
 
