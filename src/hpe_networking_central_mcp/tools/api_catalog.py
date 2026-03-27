@@ -65,7 +65,8 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             "MATCH (e:ApiEndpoint) "
             "WHERE (lower(e.path) CONTAINS lower($q) "
             "   OR lower(e.summary) CONTAINS lower($q) "
-            "   OR lower(e.operationId) CONTAINS lower($q)) "
+            "   OR lower(e.operationId) CONTAINS lower($q) "
+            "   OR lower(e.category) CONTAINS lower($q)) "
         )
         params: dict[str, Any] = {"q": query, "lim": limit}
 

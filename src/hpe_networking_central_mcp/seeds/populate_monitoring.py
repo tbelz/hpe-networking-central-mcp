@@ -98,19 +98,19 @@ def ensure_monitoring_tables() -> None:
 
 def fetch_switch_ports(serial: str) -> list[dict]:
     """Fetch port/interface data for a switch."""
-    resp = api.get(f"monitoring/v1/switches/{serial}/ports")
+    resp = api.get(f"network-monitoring/v1/switches/{serial}/ports")
     return resp.get("ports", [])
 
 
 def fetch_ap_radios(serial: str) -> list[dict]:
     """Fetch radio data for an access point."""
-    resp = api.get(f"monitoring/v1/aps/{serial}/radios")
+    resp = api.get(f"network-monitoring/v1/aps/{serial}/radios")
     return resp.get("radios", [])
 
 
 def fetch_clients() -> list[dict]:
     """Fetch all connected clients."""
-    return api.paginate("monitoring/v1/clients", page_size=100)
+    return api.paginate("network-monitoring/v1/clients", page_size=100)
 
 
 # ── Graph upsert ────────────────────────────────────────────────────

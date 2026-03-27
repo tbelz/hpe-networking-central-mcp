@@ -56,9 +56,6 @@ def discover_categories() -> list[str]:
         "server-groups",
         "ntp",
         "dns",
-        "dhcp-pools",
-        "acls",
-        "aaa",
         "snmp",
     ]
 

@@ -181,12 +181,12 @@ class GraphManager:
         for idx_name, table, fields in fts_defs:
             cypher_field_list = ", ".join(f"'{f}'" for f in fields)
             try:
-                conn.execute(f"CALL fts.drop_fts_index('{idx_name}')")
+                conn.execute(f"CALL DROP_FTS_INDEX('{table}', '{idx_name}')")
             except Exception:
                 pass  # Index may not exist yet
             try:
                 conn.execute(
-                    f"CALL fts.create_fts_index('{idx_name}', '{table}', [{cypher_field_list}])"
+                    f"CALL CREATE_FTS_INDEX('{table}', '{idx_name}', [{cypher_field_list}])"
                 )
                 created += 1
                 logger.debug("fts_index_created", index=idx_name, table=table)

@@ -31,7 +31,7 @@ _PK_MAP: dict[str, str] = {
 # Scope → (table, search_fields, display_fields)
 _SCOPE_CONFIG: dict[str, list[tuple[str, list[str], list[str]]]] = {
     "api": [
-        ("ApiEndpoint", ["path", "summary", "operationId", "description"], ["endpoint_id", "method", "path", "summary", "category"]),
+        ("ApiEndpoint", ["path", "summary", "operationId", "description", "category"], ["endpoint_id", "method", "path", "summary", "category"]),
     ],
     "docs": [
         ("DocSection", ["title", "content"], ["section_id", "title", "source", "url"]),
@@ -79,7 +79,7 @@ def _fts_search(
         table, display_fields = _FTS_INDEX_MAP[idx_name]
         field_returns = ", ".join(f"n.{f}" for f in display_fields)
         cypher = (
-            f"CALL fts.query_fts('{idx_name}', $q, $k) "
+            f"CALL QUERY_FTS_INDEX('{table}', '{idx_name}', $q, top := $k) "
             f"WITH node AS n, score "
             f"RETURN {field_returns}, score "
             f"ORDER BY score DESC LIMIT $k"

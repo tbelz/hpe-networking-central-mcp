@@ -242,13 +242,13 @@ def _create_fts_indexes(db: lb.Database) -> int:
     created = 0
     for idx_name, table, fields in fts_defs:
         try:
-            conn.execute(f"CALL fts.drop_fts_index('{idx_name}')")
+            conn.execute(f"CALL DROP_FTS_INDEX('{table}', '{idx_name}')")
         except Exception:
             pass
         try:
             cypher_field_list = ", ".join(f"'{f}'" for f in fields)
             conn.execute(
-                f"CALL fts.create_fts_index('{idx_name}', '{table}', [{cypher_field_list}])"
+                f"CALL CREATE_FTS_INDEX('{table}', '{idx_name}', [{cypher_field_list}])"
             )
             created += 1
             print(f"    Created {idx_name} on {table}")
