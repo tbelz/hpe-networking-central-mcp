@@ -2,5 +2,5 @@
   "description": "Enrich graph with L2 physical topology (LLDP) — CONNECTED_TO/LINKED_TO edges and UnmanagedDevice nodes.",
   "tags": ["graph", "enrichment", "topology", "lldp"],
   "parameters": [],
-  "auto_run": false
+  "auto_run": true
 }
