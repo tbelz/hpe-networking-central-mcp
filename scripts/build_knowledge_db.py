@@ -126,27 +126,36 @@ def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
         # Inline tags as a Cypher list literal (real_ladybug cannot bind
         # Python lists as STRING[] parameters — triggers ANY-type error).
         tags_literal = _cypher_string_list(entry.tags)
+        tags_clause = f"tags: {tags_literal}, " if entry.tags else ""
 
-        conn.execute(
+        cypher = (
             "CREATE (e:ApiEndpoint {"
             "  endpoint_id: $eid, method: $method, path: $path,"
             "  summary: $summary, description: $descr, operationId: $opid,"
-            f"  category: $cat, deprecated: $dep, tags: {tags_literal},"
+            f"  category: $cat, deprecated: $dep, {tags_clause}"
             "  parameters: $params, requestBody: $body, responses: $resps"
-            "})",
-            parameters={
-                "eid": endpoint_id,
-                "method": entry.method,
-                "path": entry.path,
-                "summary": entry.summary,
-                "descr": entry.description,
-                "opid": entry.operation_id,
-                "cat": entry.category,
-                "dep": entry.deprecated,
-                "params": params_json,
-                "body": body_json,
-                "resps": responses_json,
-            },
+            "})"
+        )
+        params = {
+            "eid": endpoint_id,
+            "method": entry.method,
+            "path": entry.path,
+            "summary": entry.summary or "",
+            "descr": entry.description or "",
+            "opid": entry.operation_id or "",
+            "cat": entry.category,
+            "dep": entry.deprecated,
+            "params": params_json,
+            "body": body_json,
+            "resps": responses_json,
+        }
+        try:
+            conn.execute(cypher, parameters=params)
+        except RuntimeError as exc:
+            print(f"  ✗ Failed on endpoint #{count}: {endpoint_id}", file=sys.stderr)
+            print(f"    Cypher: {cypher}", file=sys.stderr)
+            print(f"    Param types: { {k: type(v).__name__ for k, v in params.items()} }", file=sys.stderr)
+            raise exc
         )
         count += 1
 
