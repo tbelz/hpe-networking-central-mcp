@@ -219,7 +219,7 @@ def register_script_tools(mcp, settings: Settings, graph_manager: GraphManager):
                 "fn": filename,
                 "content": content,
                 "descr": description,
-                "tags": tags,
+                "tags": tags or None,
                 "created": created_at,
             },
         )
@@ -321,7 +321,7 @@ def sync_seeds_to_graph(graph_manager: GraphManager, seeds_dir: Path, lib_dir: P
                 {
                     "fn": seed_file.name,
                     "d": meta.get("description", "Seed script"),
-                    "tags": meta.get("tags", []),
+                    "tags": meta.get("tags") or None,
                     "content": content,
                     "created": meta.get("created_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
                 },

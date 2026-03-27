@@ -131,7 +131,7 @@ def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
                 "opid": entry.operation_id,
                 "cat": entry.category,
                 "dep": entry.deprecated,
-                "tags": entry.tags,
+                "tags": entry.tags or None,
                 "params": params_json,
                 "body": body_json,
                 "resps": responses_json,
@@ -179,7 +179,7 @@ def _populate_seeds(db: lb.Database, seeds_dir: Path) -> int:
             parameters={
                 "fn": filename,
                 "descr": meta.get("description", ""),
-                "tags": meta.get("tags", []),
+                "tags": meta.get("tags") or None,
                 "content": content,
                 "params": json.dumps(meta.get("parameters", [])),
             },
