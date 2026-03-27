@@ -41,6 +41,7 @@ config_validation_report.json
 scripts/library/
 scripts/__pycache__/
 scripts/tests/
+tests/__pycache__/
 
 # Debug / investigation scripts (root-level)
 test_merge_*.py

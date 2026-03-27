@@ -21,6 +21,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -29,11 +34,52 @@ jobs:
       - name: Build knowledge database
         run: python scripts/build_knowledge_db.py --output-dir build --tar
 
+      - name: Check for changes against latest release
+        id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Fetch manifest from latest release (if any)
+          PREV=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)
+          if [ -z "$PREV" ]; then
+            echo "No previous release found — publishing."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Download previous manifest
+          gh release download "$PREV" --pattern manifest.json --dir /tmp/prev 2>/dev/null || {
+            echo "Could not download previous manifest — publishing."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          # Compare endpoint and category counts
+          OLD_EP=$(jq -r '.endpoint_count // 0' /tmp/prev/manifest.json)
+          NEW_EP=$(jq -r '.endpoint_count // 0' build/manifest.json)
+          OLD_CAT=$(jq -r '.category_count // 0' /tmp/prev/manifest.json)
+          NEW_CAT=$(jq -r '.category_count // 0' build/manifest.json)
+          OLD_CATS=$(jq -r '.categories | sort | join(",")' /tmp/prev/manifest.json)
+          NEW_CATS=$(jq -r '.categories | sort | join(",")' build/manifest.json)
+
+          echo "Previous: ${OLD_EP} endpoints, ${OLD_CAT} categories"
+          echo "Current:  ${NEW_EP} endpoints, ${NEW_CAT} categories"
+
+          if [ "$OLD_EP" = "$NEW_EP" ] && [ "$OLD_CAT" = "$NEW_CAT" ] && [ "$OLD_CATS" = "$NEW_CATS" ]; then
+            echo "No changes detected — skipping release."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Changes detected — publishing new release."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Generate release tag
+        if: steps.diff.outputs.changed == 'true'
         id: tag
         run: echo "tag=knowledge-db-$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
+        if: steps.diff.outputs.changed == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
@@ -41,5 +87,9 @@ jobs:
           body: |
             Auto-generated knowledge database snapshot.
             Contains scraped API endpoints and seed scripts for the MCP server.
-          files: build/knowledge_db.tar.gz
+          files: |
+            build/knowledge_db.tar.gz
+            build/manifest.json
           prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

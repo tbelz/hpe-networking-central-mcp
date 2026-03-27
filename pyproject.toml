@@ -1,10 +1,18 @@
 [project]
 name = "hpe-networking-central-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP Server for HPE Aruba Networking Central — Code Interpreter Pattern"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
+authors = [{name = "Till Belz"}]
+keywords = ["mcp", "aruba", "hpe", "networking", "central", "greenlake", "api"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Networking",
+]
 dependencies = [
     "mcp[cli]>=1.0.0",
     "pyyaml>=6.0",
@@ -27,6 +35,10 @@ artifacts = ["src/hpe_networking_central_mcp/seeds/*.json"]
 
 [tool.uv]
 python-preference = "only-managed"
+
+[project.urls]
+Repository = "https://github.com/tbelz/hpe-networking-central-mcp"
+Issues = "https://github.com/tbelz/hpe-networking-central-mcp/issues"
 
 [tool.ruff]
 target-version = "py312"

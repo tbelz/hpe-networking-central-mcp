@@ -1,5 +1,10 @@
 # HPE Networking Central MCP Server
 
+[![Build](https://github.com/tbelz/hpe-networking-central-mcp/actions/workflows/build-and-push.yml/badge.svg)](https://github.com/tbelz/hpe-networking-central-mcp/actions/workflows/build-and-push.yml)
+[![Knowledge DB](https://github.com/tbelz/hpe-networking-central-mcp/actions/workflows/update-knowledge-db.yml/badge.svg)](https://github.com/tbelz/hpe-networking-central-mcp/actions/workflows/update-knowledge-db.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://python.org)
+
 MCP Server for **HPE Aruba Networking Central** and the **HPE GreenLake Platform**.
 
 The agent manages network devices through a combination of direct API calls and reusable Python scripts, with full access to both the Central API and GreenLake Platform API.
@@ -175,7 +180,7 @@ Add to `.vscode/mcp.json`:
 ### Environment Variables (.env file)
 
 ```
-CENTRAL_BASE_URL=https://internal.api.central.arubanetworks.com
+CENTRAL_BASE_URL=https://apigw-YOUR_CLUSTER.central.arubanetworks.com
 CENTRAL_CLIENT_ID=your_client_id
 CENTRAL_CLIENT_SECRET=your_client_secret
 GREENLAKE_CLIENT_ID=your_glp_client_id
@@ -184,7 +189,7 @@ GREENLAKE_CLIENT_SECRET=your_glp_client_secret
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `CENTRAL_BASE_URL` | Yes | — | Central API base URL |
+| `CENTRAL_BASE_URL` | Yes | — | Central API base URL ([find yours](https://developer.arubanetworks.com/aruba-central/docs/api-gateway-url)) |
 | `CENTRAL_CLIENT_ID` | Yes | — | OAuth2 client ID for Central |
 | `CENTRAL_CLIENT_SECRET` | Yes | — | OAuth2 client secret for Central |
 | `GREENLAKE_CLIENT_ID` | No | Central client ID | GreenLake Platform client ID |
