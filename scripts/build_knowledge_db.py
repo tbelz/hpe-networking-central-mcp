@@ -156,7 +156,6 @@ def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
             print(f"    Cypher: {cypher}", file=sys.stderr)
             print(f"    Param types: { {k: type(v).__name__ for k, v in params.items()} }", file=sys.stderr)
             raise exc
-        )
         count += 1
 
     # Insert ApiCategory nodes
