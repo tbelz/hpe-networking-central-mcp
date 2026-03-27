@@ -195,16 +195,18 @@ def _populate_seeds(db: lb.Database, seeds_dir: Path) -> int:
         seed_tags = meta.get("tags") or []
         seed_tags_lit = _cypher_string_list(seed_tags)
 
+        # Inline content and params as Cypher literals (real_ladybug binding bug)
+        escaped_content = _cypher_escape(content)
+        escaped_params = _cypher_escape(json.dumps(meta.get("parameters", [])))
+
         conn.execute(
             "CREATE (s:Script {"
             f"  filename: $fn, description: $descr, tags: {seed_tags_lit},"
-            "  content: $content, parameters: $params"
+            f"  content: '{escaped_content}', parameters: '{escaped_params}'"
             "})",
             parameters={
                 "fn": filename,
                 "descr": meta.get("description", ""),
-                "content": content,
-                "params": json.dumps(meta.get("parameters", [])),
             },
         )
         count += 1
