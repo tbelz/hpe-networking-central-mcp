@@ -98,8 +98,8 @@ def ensure_monitoring_tables() -> None:
 
 def fetch_switch_ports(serial: str) -> list[dict]:
     """Fetch port/interface data for a switch."""
-    resp = api.get(f"network-monitoring/v1/switches/{serial}/ports")
-    return resp.get("ports", [])
+    resp = api.get(f"network-monitoring/v1/switches/{serial}/interfaces")
+    return resp.get("items", [])
 
 
 def fetch_ap_radios(serial: str) -> list[dict]:

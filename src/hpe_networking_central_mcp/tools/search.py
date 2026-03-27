@@ -77,10 +77,9 @@ def _fts_search(
     per_index_limit = max(5, limit)
     for idx_name in indexes:
         table, display_fields = _FTS_INDEX_MAP[idx_name]
-        field_returns = ", ".join(f"n.{f}" for f in display_fields)
+        field_returns = ", ".join(f"node.{f}" for f in display_fields)
         cypher = (
             f"CALL QUERY_FTS_INDEX('{table}', '{idx_name}', $q, top := $k) "
-            f"WITH node AS n, score "
             f"RETURN {field_returns}, score "
             f"ORDER BY score DESC LIMIT $k"
         )
@@ -89,7 +88,7 @@ def _fts_search(
             for row in rows:
                 entry: dict[str, Any] = {"type": table, "score": row.get("score", 0)}
                 for f in display_fields:
-                    entry[f] = row.get(f"n.{f}", "")
+                    entry[f] = row.get(f"node.{f}", "")
                 results.append(entry)
         except Exception as exc:
             logger.debug("fts_search_failed", index=idx_name, error=str(exc))
