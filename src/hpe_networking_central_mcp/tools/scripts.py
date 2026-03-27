@@ -32,6 +32,17 @@ def _cypher_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
+def _cypher_string_list(values: list[str]) -> str:
+    """Build a Cypher list literal from Python strings, escaping quotes.
+
+    real_ladybug cannot bind Python lists as STRING[] parameters
+    (triggers 'Trying to create a vector with ANY type' error).
+    """
+    if not values:
+        return "CAST([] AS STRING[])"
+    escaped = [v.replace("\\", "\\\\").replace("'", "\\'") for v in values]
+    return "[" + ", ".join(f"'{e}'" for e in escaped) + "]"
+
 def _validate_filename(filename: str) -> str | None:
     """Validate script filename. Returns error message or None if valid."""
     if not filename:
@@ -210,16 +221,18 @@ def register_script_tools(mcp, settings: Settings, graph_manager: GraphManager):
             "MATCH (s:Script {filename: $fn}) DELETE s",
             {"fn": filename},
         )
+        # Inline tags as Cypher list literal (real_ladybug can't bind lists)
+        tags_lit = _cypher_string_list(tags)
+
         gm.execute(
             "CREATE (s:Script {"
             "filename: $fn, content: $content, description: $descr, "
-            f"tags: $tags, parameters: '{escaped_params}', "
+            f"tags: {tags_lit}, parameters: '{escaped_params}', "
             "created_at: $created})",
             {
                 "fn": filename,
                 "content": content,
                 "descr": description,
-                "tags": tags or None,
                 "created": created_at,
             },
         )
@@ -313,15 +326,16 @@ def sync_seeds_to_graph(graph_manager: GraphManager, seeds_dir: Path, lib_dir: P
                 "MATCH (s:Script {filename: $fn}) DELETE s",
                 {"fn": seed_file.name},
             )
+            # Inline tags as Cypher list literal (real_ladybug can't bind lists)
+            seed_tags_lit = _cypher_string_list(meta.get("tags") or [])
             graph_manager.execute(
                 "CREATE (s:Script {"
-                "filename: $fn, description: $d, tags: $tags, "
+                f"filename: $fn, description: $d, tags: {seed_tags_lit}, "
                 f"content: $content, parameters: '{escaped_params}', "
                 "created_at: $created})",
                 {
                     "fn": seed_file.name,
                     "d": meta.get("description", "Seed script"),
-                    "tags": meta.get("tags") or None,
                     "content": content,
                     "created": meta.get("created_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
                 },

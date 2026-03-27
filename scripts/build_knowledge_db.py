@@ -82,6 +82,14 @@ def _scrape_specs(cache_dir: Path) -> list[dict]:
     return specs
 
 
+def _cypher_string_list(values: list[str]) -> str:
+    """Build a Cypher list literal from Python strings, escaping quotes."""
+    if not values:
+        return "CAST([] AS STRING[])"
+    escaped = [v.replace("\\", "\\\\").replace("'", "\\'") for v in values]
+    return "[" + ", ".join(f"'{e}'" for e in escaped) + "]"
+
+
 def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
     """Insert ApiEndpoint and ApiCategory nodes from the OASIndex."""
     conn = lb.Connection(db)
@@ -115,11 +123,15 @@ def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
             for r in entry.responses
         ]) if entry.responses else ""
 
+        # Inline tags as a Cypher list literal (real_ladybug cannot bind
+        # Python lists as STRING[] parameters — triggers ANY-type error).
+        tags_literal = _cypher_string_list(entry.tags)
+
         conn.execute(
             "CREATE (e:ApiEndpoint {"
             "  endpoint_id: $eid, method: $method, path: $path,"
             "  summary: $summary, description: $descr, operationId: $opid,"
-            "  category: $cat, deprecated: $dep, tags: $tags,"
+            f"  category: $cat, deprecated: $dep, tags: {tags_literal},"
             "  parameters: $params, requestBody: $body, responses: $resps"
             "})",
             parameters={
@@ -131,7 +143,6 @@ def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
                 "opid": entry.operation_id,
                 "cat": entry.category,
                 "dep": entry.deprecated,
-                "tags": entry.tags or None,
                 "params": params_json,
                 "body": body_json,
                 "resps": responses_json,
@@ -171,15 +182,17 @@ def _populate_seeds(db: lb.Database, seeds_dir: Path) -> int:
         content = script_file.read_text(encoding="utf-8")
         filename = script_file.name
 
+        seed_tags = meta.get("tags") or []
+        seed_tags_lit = _cypher_string_list(seed_tags)
+
         conn.execute(
             "CREATE (s:Script {"
-            "  filename: $fn, description: $descr, tags: $tags,"
+            f"  filename: $fn, description: $descr, tags: {seed_tags_lit},"
             "  content: $content, parameters: $params"
             "})",
             parameters={
                 "fn": filename,
                 "descr": meta.get("description", ""),
-                "tags": meta.get("tags") or None,
                 "content": content,
                 "params": json.dumps(meta.get("parameters", [])),
             },
