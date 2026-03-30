@@ -40,7 +40,10 @@ def _run_script(
         return json.dumps({"error": "Invalid script path."})
 
     if not script_path.exists():
-        return json.dumps({"error": f"Script '{filename}' not found in library. Use list_scripts() to see available scripts."})
+        return json.dumps({
+            "error": f"Script '{filename}' not found in library.",
+            "hint": "Use list_scripts() to see available scripts, or save_script() to create a new one.",
+        })
 
     if not script_path.suffix == ".py":
         return json.dumps({"error": "Only .py scripts can be executed."})

@@ -80,9 +80,8 @@ Read the **graph://schema** resource for the full schema, relationships, and exa
 Cypher queries. Use `query_graph(cypher)` for structural questions (hierarchy navigation,
 blast-radius analysis, cross-site comparison, device lookup).
 
-The graph is populated and enriched by seed scripts at startup. Use `refresh_graph()`
-after making changes to reset and re-populate from live APIs. Scripts can also write
-directly to the graph using `from central_helpers import graph`.
+The graph is populated and enriched by seed scripts at startup.
+Scripts can write directly to the graph using `from central_helpers import graph`.
 
 ## 1. Aruba Central APIs (via `call_central_api`)
 
@@ -114,7 +113,7 @@ Base URL: `https://global.api.greenlake.hpe.com`
 
 All endpoints from both platforms are indexed in a single unified catalog.
 
-1. `search_api_catalog(query)` — search for endpoints by keyword. Returns compact results
+1. `unified_search(query)` — search for endpoints by keyword. Returns compact results
    (method, path, summary). GreenLake categories appear as "HPE GreenLake APIs for ...".
 2. `list_api_categories()` — browse all API categories with endpoint counts.
 3. `get_api_endpoint_detail(method, path)` — full parameter schemas, request/response bodies.
@@ -153,7 +152,7 @@ pre-authenticated API clients. No OAuth2 boilerplate needed.
 ## IMPORTANT: Discover endpoints first
 
 Before writing any script, you MUST:
-1. `search_api_catalog(query)` to find relevant endpoints
+1. `unified_search(query)` to find relevant endpoints
 2. `get_api_endpoint_detail(method, path)` to get exact parameter schemas
 
 Never guess or hardcode API paths — always discover them via search.
@@ -387,7 +386,7 @@ After applying config, verify sync status:
    RETURN d.name, d.configStatus
    ```
 
-2. Call `refresh_graph()` to pull latest state from APIs.
+2. Re-run the relevant seed script (e.g., `execute_script('populate_base_graph.py')`) to pull latest state.
 
 3. Values: `synced` = config applied, `not_synced` = pending push, `failed` = error.
 

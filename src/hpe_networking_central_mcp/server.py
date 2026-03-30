@@ -28,7 +28,6 @@ from .tools.api_catalog import register_catalog_tools
 from .tools.execution import register_execution_tools, _run_script
 from .tools.graph import register_graph_tools
 from .tools.scripts import register_script_tools, sync_seeds_to_graph
-from .tools.search import register_search_tools
 
 logger = setup_logging()
 
@@ -45,7 +44,7 @@ direct API reads and reusable Python scripts.
    Devices. The graph is your structural map — use it for navigation, blast-radius analysis,
    cross-site comparison, config provenance, and dependency tracking.
 
-2. **Discover APIs**: Use search_api_catalog(query) to find endpoints by keyword (e.g.,
+2. **Discover APIs**: Use unified_search(query) to find endpoints by keyword (e.g.,
    "vlan", "switch", "dhcp"). Use list_api_categories() to see all API areas. Then use
    get_api_endpoint_detail(method, path) for full parameter and schema details.
 
@@ -82,11 +81,11 @@ direct API reads and reusable Python scripts.
    enriched at any time using `write_graph(cypher, parameters)` to add nodes,
    relationships, or properties you discover during investigation.
    Use `list_scripts(tag="graph")` to find enrichment scripts.
-   To refresh the graph from scratch, execute `refresh_graph()` — this resets and re-runs
-   all auto-run seed scripts.  For custom enrichments, either use `write_graph()` directly
+   For custom enrichments, either use `write_graph()` directly
    or write scripts that use `from central_helpers import graph`.
 
 10. **Reuse**: Always check list_scripts() before writing a new script.
+    Pre-built seed scripts cover common use cases (inventory, topology, config policy).
     Use get_script_content() to inspect existing scripts and learn patterns.
 
 Read docs://script-writing-guide for the script template and authentication pattern.
@@ -97,7 +96,7 @@ Scripts use `from central_helpers import api, glp, graph` — no OAuth2 boilerpl
 Before writing ANY script you MUST complete these steps IN ORDER:
 
 1. `list_scripts()` — check if a seed or saved script already solves the task.
-2. `search_api_catalog(query)` — find relevant endpoints. NEVER guess API paths.
+2. `unified_search(query)` — find relevant endpoints. NEVER guess API paths.
 3. `get_api_endpoint_detail(method, path)` — get exact parameter schemas and response shapes.
 4. Only THEN write the script using the discovered endpoints and schemas.
 
@@ -328,7 +327,6 @@ register_script_tools(mcp, settings, graph_manager)
 register_catalog_tools(mcp, settings, graph_manager)
 register_api_call_tools(mcp, settings, client)
 register_greenlake_api_call_tools(mcp, settings, glp_client)
-register_search_tools(mcp, settings, graph_manager)
 register_resources(mcp, settings)
 register_graph_resources(mcp, graph_manager)
 register_prompts(mcp, graph_manager)

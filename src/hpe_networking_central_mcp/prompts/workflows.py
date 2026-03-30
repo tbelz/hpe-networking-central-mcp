@@ -90,7 +90,7 @@ Follow this workflow:
    ```
 
 4. **Live Diagnostics**: Use call_central_api() for real-time monitoring data.
-   Use search_api_catalog(query) to find relevant monitoring endpoints,
+   Use unified_search(query) to find relevant monitoring endpoints,
    then get_api_endpoint_detail(method, path) for parameter details.
 
 5. **Check Script Library**: Call list_scripts(tag="troubleshooting") for existing diagnostic scripts.
@@ -184,7 +184,7 @@ Follow this workflow:
         """Guide: write a Python automation script for a given task.
 
         Provides the script-writing template and instructs the agent to discover
-        API endpoints via search_api_catalog() instead of embedding the full catalog.
+        API endpoints via unified_search() instead of embedding the full catalog.
 
         Args:
             task_description: What the script should accomplish.
@@ -197,7 +197,7 @@ Follow this workflow:
 ## Step 1 — Discover Endpoints
 
 Before writing ANY code you MUST:
-1. Call `search_api_catalog(query)` with keywords relevant to the task to find candidate endpoints.
+1. Call `unified_search(query)` with keywords relevant to the task to find candidate endpoints.
 2. Call `get_api_endpoint_detail(method, path)` for each endpoint you plan to use — get exact
    parameter names, types, and request/response schemas.
 3. Call `list_api_categories()` if you need to explore what API areas exist.
@@ -266,7 +266,7 @@ except CentralAPIError as e:
 
 ## Rules
 
-1. Use ONLY endpoints discovered via search_api_catalog — NEVER guess API paths.
+1. Use ONLY endpoints discovered via unified_search — NEVER guess API paths.
 2. Use `api.paginate()` for any list/collection endpoint.
 3. Always handle errors with try/except CentralAPIError.
 4. Print results as JSON to stdout.

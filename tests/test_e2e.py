@@ -404,7 +404,7 @@ else:
         print(f"    -> {data['total_endpoints']} endpoints, {len(data['categories'])} categories")
 
     def test_mcp_search():
-        resp = _tool_call("search_api_catalog", {"query": "vlan"})
+        resp = _tool_call("unified_search", {"query": "vlan"})
         assert resp is not None, "No response"
         assert "result" in resp, f"Error: {json.dumps(resp)[:200]}"
         data = json.loads(_get_text(resp))
@@ -415,7 +415,7 @@ else:
         print(f"    -> {data['returned_count']} matches")
 
     def test_mcp_detail():
-        resp = _tool_call("search_api_catalog", {"query": "devices"})
+        resp = _tool_call("unified_search", {"query": "devices"})
         assert resp, "search failed"
         data = json.loads(_get_text(resp))
         if "error" in data and "empty" in data["error"]:
@@ -472,7 +472,7 @@ else:
 
     run_test("MCP: initialize handshake", test_mcp_initialize)
     run_test("MCP: list_api_categories", test_mcp_categories)
-    run_test("MCP: search_api_catalog('vlan')", test_mcp_search)
+    run_test("MCP: unified_search('vlan')", test_mcp_search)
     run_test("MCP: get_api_endpoint_detail", test_mcp_detail)
     run_test("MCP: call_central_api (real API)", test_mcp_api_call)
     run_test("MCP: refresh_inventory", test_mcp_inventory)
