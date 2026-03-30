@@ -10,7 +10,6 @@ This is the foundational graph population — run it before any enrichment scrip
 Hierarchy built:
   Org → SiteCollection → Site → Device
   DeviceGroup → Device (cross-cutting membership)
-  Org → ConfigProfile (library-level config metadata)
 """
 
 import json

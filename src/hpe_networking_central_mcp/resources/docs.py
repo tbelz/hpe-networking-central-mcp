@@ -74,7 +74,7 @@ configuration graph for structural navigation.
 ## Configuration Graph (via `query_graph`)
 
 A file-backed LadybugDB graph models the Central configuration hierarchy:
-Org → SiteCollection → Site → Device, DeviceGroup → Device, Org → ConfigProfile.
+Org → SiteCollection → Site → Device, DeviceGroup → Device.
 
 Read the **graph://schema** resource for the full schema, relationships, and example
 Cypher queries. Use `query_graph(cypher)` for structural questions (hierarchy navigation,
@@ -334,26 +334,24 @@ GET network-config/v1alpha1/{category}
 Add `effective=true` for merged inherited config. Add `detailed=true` for
 source annotations showing which scope each setting comes from.
 
-### Effective Config (Graph vs API)
+### Effective Config (API-first)
 
-The graph pre-computes **EFFECTIVE_CONFIG** edges per device by walking the
-scope hierarchy after seed population.  For quick analysis:
-
-```cypher
-MATCH (d:Device {serial: 'SERIAL'})-[r:EFFECTIVE_CONFIG]->(cp:ConfigProfile)
-RETURN cp.category, cp.name, cp.mergeStrategy, r.sourceScope, r.sourceScopeId
-```
-
-For **authoritative per-device verification** (e.g., confirming overrides or
-live state), call the API with `effective=true&detailed=true`:
+For **effective (resolved) config per device**, use the Central API — it is
+the single source of truth:
 
 ```
 GET network-config/v1alpha1/{category}
     ?scopeId=<device-serial>&scopeType=device&effective=true&detailed=true
 ```
 
-The API response includes `sourceScope`/`sourceScopeId` annotations from
-Central's own resolution.  Use this when the graph result needs validation.
+The `detailed=true` response includes `@.aruba-annotation:scope_device_function`
+provenance annotations — a JSON array where each entry contains:
+- `scope_type`: GLOBAL, SITE, or DEVICE
+- `scope_id`: the originating scope ID
+- `scope_name`: human-readable scope name
+- `device_function`: applicable device function (e.g., AP, CX)
+
+This tells you exactly where each config setting comes from in the hierarchy.
 
 ### Write config
 ```

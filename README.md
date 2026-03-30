@@ -72,7 +72,6 @@ graph LR
         Site
         Device
         DeviceGroup
-        ConfigProfile
         UnmanagedDevice
     end
 
@@ -86,13 +85,6 @@ graph LR
     Site -->|HAS_UNMANAGED| UnmanagedDevice
     Device -->|CONNECTED_TO| Device
     Device -->|LINKED_TO| UnmanagedDevice
-
-    Org -->|HAS_CONFIG| ConfigProfile
-    Org -->|ORG_ASSIGNS_CONFIG| ConfigProfile
-    SiteCollection -->|COLLECTION_ASSIGNS_CONFIG| ConfigProfile
-    Site -->|SITE_ASSIGNS_CONFIG| ConfigProfile
-    DeviceGroup -->|GROUP_ASSIGNS_CONFIG| ConfigProfile
-    Device -->|EFFECTIVE_CONFIG| ConfigProfile
 ```
 
 ### Search Architecture
@@ -111,7 +103,6 @@ graph TD
         doc_fts["doc_fts (DocSection)"]
         device_fts["device_fts (Device)"]
         site_fts["site_fts (Site)"]
-        config_fts["config_fts (ConfigProfile)"]
         script_fts["script_fts (Script)"]
     end
 ```

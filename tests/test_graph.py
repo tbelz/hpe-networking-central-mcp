@@ -228,20 +228,6 @@ if _has_creds and _gm.ready:
             print(f"       {r['grp']} -> {r['device']} ({r['serial']})")
         assert len(rows) > 0, "No HAS_MEMBER relationships populated — deviceGroupId mapping failed"
 
-    def test_query_config_profiles():
-        rows = _gm.query(
-            "MATCH (o:Org)-[:HAS_CONFIG]->(cp:ConfigProfile) "
-            "RETURN cp.category AS category, cp.name AS name "
-            "ORDER BY cp.category, cp.name"
-        )
-        print(f"    -> {len(rows)} library-level config profiles")
-        # Show by category
-        cats: dict[str, int] = {}
-        for r in rows:
-            cats[r["category"]] = cats.get(r["category"], 0) + 1
-        for cat, count in sorted(cats.items()):
-            print(f"       {cat}: {count}")
-
     def test_query_device_count_per_site():
         rows = _gm.query(
             "MATCH (s:Site)-[:HAS_DEVICE]->(d:Device) "

@@ -108,6 +108,61 @@ class GraphManager:
             rel_tables=len(REL_TABLES) + len(TOPOLOGY_REL_TABLES) + len(POLICY_REL_TABLES),
         )
 
+        self._check_ladybug_compat(conn)
+
+    # ── Compatibility diagnostics ─────────────────────────────────
+
+    @staticmethod
+    def _check_ladybug_compat(conn: lb.Connection) -> None:
+        """Log diagnostic warnings for known LadybugDB/Kuzu bugs.
+
+        This runs once at startup and reports which workarounds are still
+        needed so they can be removed when upstream fixes land.
+        """
+        issues: list[str] = []
+
+        # 1. STRING parameter binding with JSON-like values (segfault risk)
+        try:
+            conn.execute(
+                "RETURN $v AS v",
+                parameters={"v": '[{"name":"test"}]'},
+            )
+        except Exception:
+            issues.append("json_string_param_binding")
+
+        # 2. STRING[] list parameter binding
+        try:
+            conn.execute(
+                "RETURN $v AS v",
+                parameters={"v": ["a", "b"]},
+            )
+        except Exception:
+            issues.append("list_param_binding")
+
+        # 3. MERGE on Script nodes (planner crash)
+        try:
+            conn.execute("MERGE (n:Script {filename: '__compat_probe__'}) SET n.description = 'probe'")
+            conn.execute("MATCH (n:Script {filename: '__compat_probe__'}) DELETE n")
+        except Exception:
+            issues.append("merge_script_node")
+            # Clean up probe node if MERGE partially succeeded
+            try:
+                conn.execute("MATCH (n:Script {filename: '__compat_probe__'}) DELETE n")
+            except Exception:
+                pass
+
+        if issues:
+            logger.warning(
+                "ladybug_compat_workarounds_still_needed",
+                issues=issues,
+                hint="These workarounds in tools/scripts.py can be removed when the upstream bugs are fixed.",
+            )
+        else:
+            logger.info(
+                "ladybug_compat_all_clear",
+                hint="All known LadybugDB workarounds may be removable — re-test and simplify.",
+            )
+
     @property
     def is_available(self) -> bool:
         """Return True if the database is open and ready."""
@@ -157,7 +212,6 @@ class GraphManager:
           - DocSection: title, content
           - Device: name, serial, model, deviceType
           - Site: name, address, city, country
-          - ConfigProfile: name, category
           - Script: filename, description
 
         Returns the number of indexes created, or 0 if FTS is unavailable.
@@ -172,7 +226,6 @@ class GraphManager:
             ("doc_fts", "DocSection", ["title", "content"]),
             ("device_fts", "Device", ["name", "serial", "model", "deviceType"]),
             ("site_fts", "Site", ["name", "address", "city", "country"]),
-            ("config_fts", "ConfigProfile", ["name", "category"]),
             ("script_fts", "Script", ["filename", "description"]),
         ]
 
@@ -304,21 +357,40 @@ class GraphManager:
 
         # Hierarchy diagram
         lines.append("""
-## Hierarchy
+## Hierarchy & Configuration Model
+
+Central uses five **configuration scopes** in a directory-style structure.
+Four are hierarchy-based; one (DeviceGroup) is cross-cutting.
 
 ```
-Org (root)
-├── SiteCollection
-│   └── Site
-│       ├── Device ──CONNECTED_TO──► Device
+Org  (= Global scope — config here applies to ALL devices)
+├── SiteCollection  (optional — regions, business units)
+│   └── Site  (physical location)
+│       ├── Device ──CONNECTED_TO──► Device (LLDP topology)
 │       │           └──LINKED_TO──► UnmanagedDevice
 │       └── UnmanagedDevice
-├── Site (standalone, not in a collection)
+├── Site  (standalone, not in a collection)
 │   └── Device / UnmanagedDevice
-├── DeviceGroup (cross-cutting, devices from any site)
+├── DeviceGroup  (cross-cutting — devices from ANY site)
 │   └── Device
-└── ConfigProfile (library-level, inherited by all scopes)
 ```
+
+### Configuration Propagation Paths
+1. `Global (Org) → SiteCollection → Site → Device`
+2. `DeviceGroup → Device`
+
+### Precedence (highest wins on conflict)
+`Device > DeviceGroup > Site > SiteCollection > Global`
+
+### Effective Config (API-only)
+There are no config profile nodes in the graph.  Use the Central API directly:
+- Discover categories via `unified_search("config", scope="api")`
+- Read effective config: `GET network-config/v1alpha1/{category}?effective=true&detailed=true`
+- The `detailed=true` response includes provenance annotations showing which scope each setting comes from.
+
+### Useful Queries
+- Devices at a site: `MATCH (s:Site {name: $n})-[:HAS_DEVICE]->(d) RETURN d.serial, d.name`
+- Blast radius: `MATCH (sc:SiteCollection)-[:CONTAINS_SITE]->(s:Site)-[:HAS_DEVICE]->(d) RETURN s.name, d.serial`
 
 ## Tips
 - Use `list_scripts()` to find enrichment scripts (e.g., populate_base_graph, enrich_topology).

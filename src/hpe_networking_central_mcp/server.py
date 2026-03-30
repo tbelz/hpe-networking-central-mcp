@@ -43,6 +43,13 @@ direct API reads and reusable Python scripts.
    then use query_graph(cypher) to explore the hierarchy: Org → SiteCollections → Sites →
    Devices. The graph is your structural map — use it for navigation, blast-radius analysis,
    cross-site comparison, and dependency tracking.
+   
+   **Configuration model**: Central uses five scopes — Global (Org), SiteCollection, Site,
+   DeviceGroup, and Device. Config propagates top-down; DeviceGroups cut across sites.
+   Precedence: Device > DeviceGroup > Site > SiteCollection > Global.
+   For **effective (resolved) config per device**, call the Central API
+   with `effective=true&detailed=true` — it returns provenance annotations showing
+   exactly which scope each setting originates from.
 
 2. **Discover APIs**: Use unified_search(query) to find endpoints by keyword (e.g.,
    "vlan", "switch", "dhcp"). Use list_api_categories() to see all API areas. Then use
@@ -52,10 +59,8 @@ direct API reads and reusable Python scripts.
    config lookups, health checks. This is the fastest way to read live data.
    Tip: Add `effective=true` to config endpoints for hierarchically merged config,
    and `detailed=true` for source annotations.
-   For bulk effective-config analysis, prefer the graph: the `EFFECTIVE_CONFIG` relationships
-   are pre-computed per device during seed population.  Use the API with `effective=true` and
-   `detailed=true` only when you need authoritative per-device verification or suspect
-   device-level overrides not yet captured in the graph.
+   For bulk config analysis, use the API with `effective=true&detailed=true`
+   for authoritative per-device resolution.
 
 4. **Single writes**: Use call_central_api(path, method="POST", body={...}) for simple
    write operations (create a VLAN, delete a profile, update a setting).
@@ -270,14 +275,16 @@ if settings.has_glp_credentials:
 else:
     logger.info("glp_credentials_not_configured", hint="GreenLake features disabled")
 
-# Ensure script library exists and central_helpers.py is available
+# Ensure script library exists and central_helpers.py + _http_core.py are available
 settings.script_library_path.mkdir(parents=True, exist_ok=True)
 
-_helpers_src = Path(__file__).parent / "central_helpers.py"
-_helpers_dst = settings.script_library_path / "central_helpers.py"
-if _helpers_src.exists():
-    shutil.copy2(_helpers_src, _helpers_dst)
-    logger.info("central_helpers_copied", dest=str(_helpers_dst))
+_pkg_dir = Path(__file__).parent
+for _helper_name in ("_http_core.py", "central_helpers.py"):
+    _helpers_src = _pkg_dir / _helper_name
+    _helpers_dst = settings.script_library_path / _helper_name
+    if _helpers_src.exists():
+        shutil.copy2(_helpers_src, _helpers_dst)
+        logger.info("helper_copied", file=_helper_name, dest=str(_helpers_dst))
 
 # Sync seed scripts into graph DB and disk library
 _seeds_dir = Path(__file__).parent / "seeds"
@@ -323,6 +330,17 @@ def _get_auto_run_seeds() -> list[str]:
     return ordered
 
 
+def _update_script_node(script_name: str, finished: str, exit_code: int):
+    """Update the Script graph node's last_run/last_exit_code after seed execution."""
+    try:
+        graph_manager.query(
+            "MATCH (s:Script {filename: $fn}) SET s.last_run = $lr, s.last_exit_code = $ec",
+            {"fn": script_name, "lr": finished, "ec": exit_code},
+        )
+    except Exception as exc:
+        logger.debug("script_node_update_failed", filename=script_name, error=str(exc))
+
+
 def _bg_auto_run_seeds():
     """Execute all auto_run seed scripts sequentially in a background thread."""
     import time as _time
@@ -336,6 +354,7 @@ def _bg_auto_run_seeds():
             result = json.loads(result_json)
             exit_code = result.get("exit_code", -1)
             finished = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
+            _update_script_node(script_name, finished, exit_code)
             if exit_code == 0:
                 logger.info("auto_run_seed_done", filename=script_name)
                 _seed_status[script_name] = {

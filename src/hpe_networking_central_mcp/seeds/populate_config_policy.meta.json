@@ -1,7 +1,0 @@
-{
-    "description": "Discover config categories, fetch profiles with extended metadata, resolve scope assignments, and infer merge strategy from API response shapes.",
-    "tags": ["config", "graph", "policy", "seed"],
-    "auto_run": true,
-    "depends_on": ["populate_base_graph.py"],
-    "parameters": []
-}

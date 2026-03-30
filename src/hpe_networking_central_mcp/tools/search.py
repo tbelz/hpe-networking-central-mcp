@@ -27,7 +27,6 @@ _SCOPE_CONFIG: dict[str, list[tuple[str, list[str], list[str]]]] = {
     "data": [
         ("Device", ["name", "serial", "model", "deviceType"], ["serial", "name", "model", "deviceType", "status"]),
         ("Site", ["name", "address", "city", "country"], ["scopeId", "name", "city", "country"]),
-        ("ConfigProfile", ["name", "category"], ["id", "name", "category"]),
         ("Script", ["filename", "description"], ["filename", "description"]),
     ],
 }
@@ -38,7 +37,6 @@ _FTS_INDEX_MAP: dict[str, tuple[str, list[str]]] = {
     "doc_fts": ("DocSection", ["section_id", "title", "source", "url"]),
     "device_fts": ("Device", ["serial", "name", "model", "deviceType", "status"]),
     "site_fts": ("Site", ["scopeId", "name", "city", "country"]),
-    "config_fts": ("ConfigProfile", ["id", "name", "category"]),
     "script_fts": ("Script", ["filename", "description"]),
 }
 
@@ -46,8 +44,8 @@ _FTS_INDEX_MAP: dict[str, tuple[str, list[str]]] = {
 _SCOPE_FTS: dict[str, list[str]] = {
     "api": ["api_fts"],
     "docs": ["doc_fts"],
-    "data": ["device_fts", "site_fts", "config_fts", "script_fts"],
-    "all": ["api_fts", "doc_fts", "device_fts", "site_fts", "config_fts", "script_fts"],
+    "data": ["device_fts", "site_fts", "script_fts"],
+    "all": ["api_fts", "doc_fts", "device_fts", "site_fts", "script_fts"],
 }
 
 

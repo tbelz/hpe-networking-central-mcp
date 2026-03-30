@@ -104,78 +104,47 @@ Follow this workflow:
 
     @mcp.prompt()
     def analyze_config(scope: str = "") -> str:
-        """Guide: analyze configuration profiles and policy assignments across scopes."""
+        """Guide: analyze configuration across scopes using the Central API."""
         scope_clause = f' Focus on scope: "{scope}".' if scope else ""
         return f"""You are analyzing configuration policy in HPE Aruba Networking Central.{scope_clause}
 
 Follow this workflow:
 
-1. **Discover Config Categories**: Query the graph for available categories:
+1. **Discover Config Categories**: Use the API to find available config categories:
+   ```
+   unified_search("config category", scope="api")
+   ```
+   Then use `get_api_endpoint_detail(method, path)` to understand the endpoints.
+
+2. **Understand the Hierarchy**: Query the graph for scope structure:
    ```cypher
-   MATCH (cp:ConfigProfile)
-   RETURN DISTINCT cp.category AS category, count(cp) AS profiles,
-          collect(DISTINCT cp.mergeStrategy)[0] AS mergeStrategy
-   ORDER BY category
+   MATCH (o:Org)-[:HAS_SITE]->(s:Site)-[:HAS_DEVICE]->(d:Device)
+   RETURN o.name AS org, s.name AS site, d.serial, d.name, d.deviceType
+   ORDER BY s.name
    ```
 
-2. **Check Library Profiles**: See what config profiles exist at the org level:
-   ```cypher
-   MATCH (o:Org)-[:HAS_CONFIG]->(cp:ConfigProfile)
-   RETURN cp.category, cp.name, cp.mergeStrategy, cp.isDefault, cp.deviceFunction
-   ORDER BY cp.category, cp.name
-   ```
-
-3. **Scope Assignments**: Check what's assigned at each hierarchy level:
-   ```cypher
-   // Site-level assignments
-   MATCH (s:Site)-[:SITE_ASSIGNS_CONFIG]->(cp:ConfigProfile)
-   RETURN s.name AS site, cp.category, cp.name AS profile
-   ORDER BY s.name, cp.category
-   ```
-   Also check collection, group, and device-level assignments using the
-   COLLECTION_ASSIGNS_CONFIG, GROUP_ASSIGNS_CONFIG, and DEVICE_ASSIGNS_CONFIG
-   relationships.
-
-4. **Effective Config per Device** (graph-computed, from scope hierarchy walk):
-   ```cypher
-   MATCH (d:Device {{serial: '<serial>'}})-[r:EFFECTIVE_CONFIG]->(cp:ConfigProfile)
-   RETURN cp.category, cp.name, cp.mergeStrategy, r.sourceScope, r.sourceScopeId
-   ORDER BY cp.category
-   ```
-   This shows the graph's pre-computed view.  For **atomic** categories the
-   closest scope wins (Device > Group > Site > Collection > Org).  For
-   **additive** categories all contributing scopes appear.
-
-   **On-demand API verification** — if you need the authoritative effective
-   config for a specific device (e.g., to verify overrides or see live state),
-   call the Central API directly:
+3. **Read Effective Config per Device** — use the Central API:
    ```
    call_central_api(
        "network-config/v1alpha1/{{category}}",
-       query_params={{"scopeId": "<serial>", "scopeType": "device",
+       query_params={{"scopeId": "<device-serial>", "scopeType": "device",
                      "effective": "true", "detailed": "true"}}
    )
    ```
-   The `detailed=true` response includes `sourceScope` and `sourceScopeId`
-   annotations from Central's own resolution engine.  Use this when the
-   graph-computed result needs validation or when device-level overrides
-   are suspected.
+   The `detailed=true` response includes provenance annotations showing
+   `scope_type` (GLOBAL/SITE/DEVICE), `scope_id`, and `scope_name` for
+   each setting — telling you exactly where it comes from in the hierarchy.
 
-5. **Blast Radius for Config Change**: Before modifying config at a scope:
+4. **Blast Radius for Config Change**: Before modifying config at a scope:
    ```cypher
    MATCH (s:Site {{name: 'MySite'}})-[:HAS_DEVICE]->(d:Device)
    RETURN d.serial, d.name, d.deviceType, d.configStatus
    ```
 
-6. **Merge Strategy Analysis**: Understand how profiles combine:
-   - **additive** (e.g., wlan-ssids): profiles from parent scopes are combined
-   - **atomic** (e.g., ntp): child scope overrides parent completely
-
-7. **Present Report**:
-   - Config categories with profile counts and merge strategies
-   - Hierarchy overview showing where config is assigned
-   - Per-device effective config (with inheritance source)
-   - Anomalies: unassigned profiles, conflicting overrides
+5. **Present Report**:
+   - Hierarchy overview (org → collections → sites → devices)
+   - Per-device effective config (with inheritance source from API)
+   - Anomalies: conflicting overrides, unexpected scope sources
    - Recommendations
 """
 

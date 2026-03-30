@@ -25,6 +25,9 @@ dependencies = [
 [project.scripts]
 hpe-networking-central-mcp = "hpe_networking_central_mcp.server:main"
 
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -46,3 +49,8 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: live API integration tests (require Central credentials in .env)",
+]

@@ -1,10 +1,9 @@
 """LadybugDB graph schema DDL for the Aruba Central configuration hierarchy.
 
 Defines bootstrap node and relationship tables for:
-  - Domain: Org, SiteCollection, Site, Device, DeviceGroup, ConfigProfile, UnmanagedDevice
+  - Domain: Org, SiteCollection, Site, Device, DeviceGroup, UnmanagedDevice
   - Knowledge: ApiEndpoint, ApiCategory, DocSection, Script
   - Topology: CONNECTED_TO, LINKED_TO
-  - Policy: *_ASSIGNS_CONFIG, EFFECTIVE_CONFIG
 """
 
 from __future__ import annotations
@@ -76,23 +75,6 @@ NODE_TABLES: list[str] = [
         deviceGroupId   STRING,
         deviceGroupName STRING,
         PRIMARY KEY (serial)
-    )
-    """,
-    """
-    CREATE NODE TABLE IF NOT EXISTS ConfigProfile (
-        id               STRING,
-        name             STRING,
-        category         STRING,
-        scopeId          STRING,
-        deviceFunction   STRING,
-        objectType       STRING,
-        isDefault        BOOLEAN,
-        isEditable       BOOLEAN,
-        deviceScopeOnly  BOOLEAN,
-        mergeStrategy    STRING,
-        assignedScopeIds STRING,
-        assignedDeviceFunctions STRING,
-        PRIMARY KEY (id)
     )
     """,
     """
@@ -177,8 +159,7 @@ REL_TABLES: list[str] = [
     "CREATE REL TABLE IF NOT EXISTS CONTAINS_SITE   (FROM SiteCollection TO Site)",
     "CREATE REL TABLE IF NOT EXISTS HAS_DEVICE      (FROM Site TO Device)",
     "CREATE REL TABLE IF NOT EXISTS HAS_MEMBER      (FROM DeviceGroup TO Device)",
-    "CREATE REL TABLE IF NOT EXISTS HAS_CONFIG      (FROM Org TO ConfigProfile)",
-    "CREATE REL TABLE IF NOT EXISTS HAS_UNMANAGED   (FROM Site TO UnmanagedDevice)",
+    "CREATE REL TABLE IF NOT EXISTS HAS_UNMANAGED   (FROM Site TO UnmanagedDevice)"
 ]
 
 # Topology relationship tables — created alongside the main schema but
@@ -214,20 +195,7 @@ TOPOLOGY_REL_TABLES: list[str] = [
 
 # ── Config policy relationship tables ────────────────────────────────
 
-POLICY_REL_TABLES: list[str] = [
-    "CREATE REL TABLE IF NOT EXISTS ORG_ASSIGNS_CONFIG         (FROM Org            TO ConfigProfile)",
-    "CREATE REL TABLE IF NOT EXISTS COLLECTION_ASSIGNS_CONFIG  (FROM SiteCollection TO ConfigProfile)",
-    "CREATE REL TABLE IF NOT EXISTS SITE_ASSIGNS_CONFIG        (FROM Site           TO ConfigProfile)",
-    "CREATE REL TABLE IF NOT EXISTS GROUP_ASSIGNS_CONFIG       (FROM DeviceGroup    TO ConfigProfile)",
-    "CREATE REL TABLE IF NOT EXISTS DEVICE_ASSIGNS_CONFIG      (FROM Device         TO ConfigProfile)",
-    """
-    CREATE REL TABLE IF NOT EXISTS EFFECTIVE_CONFIG (
-        FROM Device TO ConfigProfile,
-        sourceScope  STRING,
-        sourceScopeId STRING
-    )
-    """,
-]
+POLICY_REL_TABLES: list[str] = []
 
 # ── Helpers for dynamic property lookup (used by error hints) ────────
 
@@ -262,11 +230,23 @@ def get_rel_tables() -> list[str]:
     return [m.group(1) for ddl in all_ddl if (m := _rel_re.search(ddl))]
 
 
+def get_rel_tables_with_endpoints() -> list[tuple[str, str, str]]:
+    """Return [(rel_name, from_table, to_table), ...] parsed from DDL."""
+    _rel_detail_re = re.compile(
+        r"CREATE REL TABLE (?:GROUP )?IF NOT EXISTS (\w+)\s*\(\s*FROM\s+(\w+)\s+TO\s+(\w+)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    all_ddl = REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES
+    return [(m.group(1), m.group(2), m.group(3)) for ddl in all_ddl if (m := _rel_detail_re.search(ddl))]
+
+
 def compact_schema_hint() -> str:
     """One-line-per-table property summary for error messages."""
     lines = []
     for table, props in get_node_properties().items():
         lines.append(f"  {table}: {', '.join(props)}")
-    rels = get_rel_tables()
-    lines.append(f"  Relationships: {', '.join(rels)}")
+    rels = get_rel_tables_with_endpoints()
+    lines.append("  Relationships:")
+    for name, src, dst in rels:
+        lines.append(f"    {src} -[{name}]-> {dst}")
     return "\n".join(lines)
