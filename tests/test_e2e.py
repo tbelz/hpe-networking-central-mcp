@@ -422,7 +422,7 @@ else:
             print(f"    -> Catalog still loading, acceptable")
             return
         ep = data["endpoints"][0]
-        resp2 = _tool_call("get_api_endpoint_detail", {"method": ep["method"], "path": ep["path"]})
+        resp2 = _tool_call("get_api_endpoint_detail", {"method": ep["methods"][0], "path": ep["path"]})
         assert resp2, "detail failed"
         detail = json.loads(_get_text(resp2))
         assert "method" in detail and "path" in detail

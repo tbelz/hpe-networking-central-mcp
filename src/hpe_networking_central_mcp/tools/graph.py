@@ -60,8 +60,6 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
             rows = graph.query(cypher, read_only=True)
         except ValueError as exc:
             raise ToolError(str(exc))
-        except RuntimeError as exc:
-            raise ToolError(str(exc))
         except Exception as exc:
             msg = str(exc)
             hint = _build_error_hint(msg)
@@ -137,6 +135,8 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
 
         try:
             rows = graph.execute(cypher, params=params)
+        except ValueError as exc:
+            raise ToolError(str(exc))
         except Exception as exc:
             msg = str(exc)
             hint = _build_error_hint(msg)

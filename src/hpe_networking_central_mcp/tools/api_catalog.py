@@ -118,23 +118,31 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
 
         rows = gm.query(cypher, params, read_only=True)
 
-        endpoints = [
-            {
-                "method": r.get("e.method", ""),
-                "path": r.get("e.path", ""),
-                "summary": r.get("e.summary", ""),
-                "category": r.get("e.category", ""),
-            }
-            for r in rows
-        ]
-
-        if not endpoints:
+        if not rows:
             return json.dumps({
                 "query": query,
                 "returned_count": 0,
                 "endpoints": [],
                 "hint": "No matches. Try broader terms or use list_api_categories() to see available categories.",
             }, indent=2)
+
+        # Group multiple methods on the same path into one entry
+        from collections import OrderedDict
+        grouped: OrderedDict[str, dict] = OrderedDict()
+        for r in rows:
+            path = r.get("e.path", "")
+            method = r.get("e.method", "")
+            if path not in grouped:
+                grouped[path] = {
+                    "path": path,
+                    "methods": [method],
+                    "summary": r.get("e.summary", ""),
+                    "category": r.get("e.category", ""),
+                }
+            else:
+                grouped[path]["methods"].append(method)
+
+        endpoints = list(grouped.values())
 
         return json.dumps({
             "query": query,

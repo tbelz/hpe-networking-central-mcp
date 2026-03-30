@@ -109,6 +109,8 @@ for relationship traversals or property filters.
 Read these resources for context — they are always up to date:
 - `graph://schema` — Full graph schema: node types, properties, relationships, row counts,
   and example Cypher queries. **Read this first** before writing any Cypher.
+- `graph://seed-status` — Startup seed execution results. Check this if graph data seems
+  incomplete or queries return empty results.
 - `docs://script-writing-guide` — Script template, authentication pattern, available helpers.
 
 ## MANDATORY: Research before scripting
@@ -284,6 +286,8 @@ if _seeds_dir.is_dir():
 
 
 # Run auto-run seed scripts in background to populate graph on startup
+_seed_status: dict[str, dict] = {}  # filename -> {status, exit_code, error, started_at, finished_at}
+
 def _get_auto_run_seeds() -> list[str]:
     """Return seed script filenames in dependency order (topological sort)."""
     lib = settings.script_library_path
@@ -321,23 +325,62 @@ def _get_auto_run_seeds() -> list[str]:
 
 def _bg_auto_run_seeds():
     """Execute all auto_run seed scripts sequentially in a background thread."""
+    import time as _time
+
     for script_name in _get_auto_run_seeds():
         logger.info("auto_run_seed_start", filename=script_name)
+        started = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
+        _seed_status[script_name] = {"status": "running", "started_at": started}
         try:
             result_json = _run_script(settings, script_name)
             result = json.loads(result_json)
             exit_code = result.get("exit_code", -1)
+            finished = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
             if exit_code == 0:
                 logger.info("auto_run_seed_done", filename=script_name)
+                _seed_status[script_name] = {
+                    "status": "success",
+                    "exit_code": 0,
+                    "started_at": started,
+                    "finished_at": finished,
+                }
             else:
+                stderr = result.get("stderr", "")[:500]
                 logger.warning(
                     "auto_run_seed_failed",
                     filename=script_name,
                     exit_code=exit_code,
-                    stderr=result.get("stderr", "")[:500],
+                    stderr=stderr,
                 )
+                _seed_status[script_name] = {
+                    "status": "failed",
+                    "exit_code": exit_code,
+                    "error": stderr or result.get("stdout", "")[:500],
+                    "started_at": started,
+                    "finished_at": finished,
+                }
         except Exception as e:
+            finished = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
             logger.warning("auto_run_seed_error", filename=script_name, error=str(e))
+            _seed_status[script_name] = {
+                "status": "error",
+                "error": str(e)[:500],
+                "started_at": started,
+                "finished_at": finished,
+            }
+
+    # Log summary at startup
+    succeeded = sum(1 for s in _seed_status.values() if s["status"] == "success")
+    failed = sum(1 for s in _seed_status.values() if s["status"] != "success")
+    if failed:
+        logger.error(
+            "seed_startup_summary",
+            succeeded=succeeded,
+            failed=failed,
+            failures={k: v.get("error", "") for k, v in _seed_status.items() if v["status"] != "success"},
+        )
+    else:
+        logger.info("seed_startup_summary", succeeded=succeeded, failed=0)
 
 
 # Register all components
@@ -348,7 +391,7 @@ register_catalog_tools(mcp, settings, graph_manager)
 register_api_call_tools(mcp, settings, client)
 register_greenlake_api_call_tools(mcp, settings, glp_client)
 register_resources(mcp, settings)
-register_graph_resources(mcp, graph_manager)
+register_graph_resources(mcp, graph_manager, lambda: _seed_status)
 register_prompts(mcp, graph_manager)
 
 # Start auto-run seeds in background AFTER tools are registered
