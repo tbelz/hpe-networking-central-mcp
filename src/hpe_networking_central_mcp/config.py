@@ -39,6 +39,14 @@ class Settings:
     knowledge_release_repo: str = ""
 
     @property
+    def parsed_glp_included_slugs(self) -> set[str] | None:
+        """Parse ``glp_included_slugs`` into a set, or ``None`` for all."""
+        val = self.glp_included_slugs
+        if not val or val == "*":
+            return None
+        return {s.strip() for s in val.split(",") if s.strip()}
+
+    @property
     def has_credentials(self) -> bool:
         return bool(self.central_base_url and self.central_client_id and self.central_client_secret)
 

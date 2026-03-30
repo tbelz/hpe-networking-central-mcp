@@ -41,19 +41,7 @@ _MAX_WORKERS = 6
 # control which API specs are included in the search index.
 # A value of None means "fetch everything discovered on the portal".
 
-GLP_INCLUDED_SLUGS: set[str] | None = {
-    "device-management",       # device inventory, onboarding
-    "subscription-management", # license / subscription info
-    "authorization",           # RBAC, role assignments
-    "credentials",             # API client credential management
-    "identity",                # user / service account management
-    "workspace",               # workspace management
-    "service-catalog",         # service provisioning & registry
-    "tags",                    # tagging devices / resources
-    "location-management",     # site / location hierarchy
-    "audit-logs",              # audit trail
-    "event",                   # webhook / event subscriptions
-}
+GLP_INCLUDED_SLUGS: set[str] | None = None
 
 
 # ── Gatsby page-data discovery ───────────────────────────────────────────────────
@@ -65,13 +53,18 @@ def _fetch_json(url: str) -> dict:
     return resp.json()
 
 
-def _discover_services() -> list[tuple[str, str]]:
+def _discover_services(
+    included_slugs: set[str] | None = None,
+) -> list[tuple[str, str]]:
     """Return ``(slug, portal_link)`` pairs from the catalog sidebar.
 
     Fetches the Gatsby page-data sidebar JSON for the services catalog
     and extracts each service as ``(slug, link)`` where *link* is the
     portal path like ``/docs/greenlake/services/device-management/public``.
+
+    Pass *included_slugs* to filter; ``None`` means fetch everything.
     """
+    effective = included_slugs if included_slugs is not None else GLP_INCLUDED_SLUGS
     sidebar = _fetch_json(_CATALOG_SIDEBAR_URL)
     services: list[tuple[str, str]] = []
     for group in sidebar.get("items", []):
@@ -84,7 +77,7 @@ def _discover_services() -> list[tuple[str, str]]:
             if link == "/docs/greenlake/services":
                 continue
             slug = link.split("/services/")[1].split("/")[0]
-            if GLP_INCLUDED_SLUGS is not None and slug not in GLP_INCLUDED_SLUGS:
+            if effective is not None and slug not in effective:
                 continue
             services.append((slug, link))
     return services
@@ -225,6 +218,7 @@ def _fetch_spec(
 def discover_and_fetch(
     cache_dir: Path = Path("/data/oas_cache"),
     ttl: int = 86400,
+    included_slugs: set[str] | None = None,
 ) -> list[dict]:
     """Auto-discover GreenLake APIs and fetch their OpenAPI specs.
 
@@ -236,13 +230,13 @@ def discover_and_fetch(
        falling back to the ``page-data/shared/oas-docs`` wrapper.
     4. Returns all parsed specs as a list of dicts.
 
-    Only services whose slug is in :data:`GLP_INCLUDED_SLUGS` are fetched
-    (set it to ``None`` to fetch everything).
+    Pass *included_slugs* to filter services; ``None`` uses the module default.
     """
-    logger.info("glp_discovery_start", included_slugs=GLP_INCLUDED_SLUGS)
+    effective = included_slugs if included_slugs is not None else GLP_INCLUDED_SLUGS
+    logger.info("glp_discovery_start", included_slugs=effective)
 
     try:
-        services = _discover_services()
+        services = _discover_services(included_slugs=effective)
         logger.info("glp_services_discovered", count=len(services),
                      slugs=[s for s, _ in services])
     except Exception as exc:
@@ -312,9 +306,14 @@ class GreenLakeSpecProvider:
     :class:`~hpe_networking_central_mcp.spec_provider.SpecProvider` protocol.
     """
 
+    def __init__(self, included_slugs: set[str] | None = None) -> None:
+        self._included_slugs = included_slugs
+
     @property
     def name(self) -> str:
         return "GreenLake"
 
     def fetch_specs(self, cache_dir: Path, ttl: int) -> list[dict]:
-        return discover_and_fetch(cache_dir=cache_dir, ttl=ttl)
+        return discover_and_fetch(
+            cache_dir=cache_dir, ttl=ttl, included_slugs=self._included_slugs,
+        )

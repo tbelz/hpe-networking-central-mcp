@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write          # Needed for creating releases
+  issues: write            # Needed for scrape-alert issues
 
 jobs:
   build-knowledge-db:
@@ -34,8 +35,93 @@ jobs:
       - name: Build knowledge database
         run: python scripts/build_knowledge_db.py --output-dir build --tar
 
+      - name: Check scrape health
+        id: health
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NEW_EP=$(jq -r '.endpoint_count // 0' build/manifest.json)
+          echo "new_ep=$NEW_EP" >> "$GITHUB_OUTPUT"
+
+          # Check for provider-level errors in scrape_health
+          ERRORS=$(jq -r '[.scrape_health // {} | to_entries[] | select(.value.status == "error")] | length' build/manifest.json)
+
+          # Fetch previous release to compare counts
+          PREV=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)
+          if [ -z "$PREV" ]; then
+            echo "No previous release — skipping health comparison."
+            echo "healthy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          gh release download "$PREV" --pattern manifest.json --dir /tmp/prev 2>/dev/null || {
+            echo "Could not download previous manifest — skipping comparison."
+            echo "healthy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          OLD_EP=$(jq -r '.endpoint_count // 0' /tmp/prev/manifest.json)
+          echo "Previous: ${OLD_EP} endpoints, Current: ${NEW_EP} endpoints, Errors: ${ERRORS}"
+
+          # Flag unhealthy if >50% drop OR any provider fully errored
+          if [ "$OLD_EP" -gt 0 ] && [ "$NEW_EP" -lt $(( OLD_EP / 2 )) ]; then
+            echo "⚠ Significant endpoint drop detected (${OLD_EP} → ${NEW_EP})"
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+            echo "reason=Endpoint count dropped from ${OLD_EP} to ${NEW_EP} (>50% loss)" >> "$GITHUB_OUTPUT"
+          elif [ "$ERRORS" -gt 0 ]; then
+            echo "⚠ Provider errors detected"
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+            echo "reason=${ERRORS} provider(s) returned errors (see scrape_health in manifest)" >> "$GITHUB_OUTPUT"
+          else
+            echo "healthy=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create scrape-alert issue (if unhealthy)
+        if: steps.health.outputs.healthy == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Check for existing open scrape-alert issue to avoid duplicates
+          EXISTING=$(gh issue list --label scrape-alert --state open --json number -q '.[0].number' 2>/dev/null || true)
+          if [ -n "$EXISTING" ]; then
+            echo "Open scrape-alert issue #${EXISTING} already exists — adding comment."
+            gh issue comment "$EXISTING" --body "Scrape health check failed again on $(date -u +%Y-%m-%dT%H:%M:%SZ).
+
+          **Reason:** ${{ steps.health.outputs.reason }}
+          **Endpoint count:** ${{ steps.health.outputs.new_ep }}
+
+          See [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
+          else
+            gh issue create \
+              --title "Scrape health degraded: ${{ steps.health.outputs.reason }}" \
+              --label scrape-alert \
+              --body "The daily knowledge DB build detected a scrape health issue.
+
+          **Reason:** ${{ steps.health.outputs.reason }}
+          **Endpoint count:** ${{ steps.health.outputs.new_ep }}
+          **Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          This issue was auto-created. It will be auto-closed when a healthy build succeeds.
+
+          Check \`build/manifest.json\` → \`scrape_health\` for per-provider details."
+          fi
+
+      - name: Auto-close scrape-alert issues (if healthy)
+        if: steps.health.outputs.healthy == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Close any open scrape-alert issues since the build is healthy
+          gh issue list --label scrape-alert --state open --json number -q '.[].number' 2>/dev/null | while read -r NUM; do
+            if [ -n "$NUM" ]; then
+              gh issue close "$NUM" --comment "Scrape health restored — auto-closing. Endpoint count: ${{ steps.health.outputs.new_ep }}"
+              echo "Closed issue #${NUM}"
+            fi
+          done
+
       - name: Check for changes against latest release
         id: diff
+        if: steps.health.outputs.healthy == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -74,12 +160,12 @@ jobs:
           fi
 
       - name: Generate release tag
-        if: steps.diff.outputs.changed == 'true'
+        if: steps.health.outputs.healthy == 'true' && steps.diff.outputs.changed == 'true'
         id: tag
         run: echo "tag=knowledge-db-$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        if: steps.diff.outputs.changed == 'true'
+        if: steps.health.outputs.healthy == 'true' && steps.diff.outputs.changed == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}

@@ -54,9 +54,14 @@ def _apply_schema(db: lb.Database) -> None:
     print(f"  Schema applied: {len(all_ddl)} DDL statements")
 
 
-def _scrape_specs(cache_dir: Path) -> list[dict]:
-    """Scrape API specs from all public documentation sources."""
+def _scrape_specs(cache_dir: Path) -> tuple[list[dict], dict]:
+    """Scrape API specs from all public documentation sources.
+
+    Returns (all_specs, scrape_health) where scrape_health is a dict
+    with per-provider stats for the manifest.
+    """
     specs: list[dict] = []
+    scrape_health: dict = {}
 
     # Central (ReadMe.io)
     print("  Scraping Central API docs (ReadMe.io)...")
@@ -64,8 +69,10 @@ def _scrape_specs(cache_dir: Path) -> list[dict]:
         provider = ReadMeSpecProvider()
         central_specs = provider.fetch_specs(cache_dir=cache_dir / "central", ttl=0)
         specs.extend(central_specs)
+        scrape_health["central"] = {"status": "ok", "spec_count": len(central_specs)}
         print(f"    → {len(central_specs)} Central specs")
     except Exception as e:
+        scrape_health["central"] = {"status": "error", "spec_count": 0, "error": str(e)}
         print(f"    ⚠ Central scrape failed: {e}", file=sys.stderr)
 
     # GreenLake (developer portal)
@@ -75,11 +82,13 @@ def _scrape_specs(cache_dir: Path) -> list[dict]:
             glp_provider = GreenLakeSpecProvider()
             glp_specs = glp_provider.fetch_specs(cache_dir=cache_dir / "glp", ttl=0)
             specs.extend(glp_specs)
+            scrape_health["greenlake"] = {"status": "ok", "spec_count": len(glp_specs)}
             print(f"    → {len(glp_specs)} GreenLake specs")
         except Exception as e:
+            scrape_health["greenlake"] = {"status": "error", "spec_count": 0, "error": str(e)}
             print(f"    ⚠ GreenLake scrape failed: {e}", file=sys.stderr)
 
-    return specs
+    return specs, scrape_health
 
 
 def _cypher_string_list(values: list[str]) -> str:
@@ -284,7 +293,7 @@ def main() -> None:
 
     # 2. Scrape API specs
     print("\n[2/5] Scraping API documentation...")
-    specs = _scrape_specs(cache_dir)
+    specs, scrape_health = _scrape_specs(cache_dir)
     if not specs:
         print("⚠ No specs scraped — database will have no API endpoints.", file=sys.stderr)
 
@@ -318,6 +327,7 @@ def main() -> None:
         "category_count": len(index.categories),
         "categories": sorted(index.categories.keys()),
         "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "scrape_health": scrape_health,
     }
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

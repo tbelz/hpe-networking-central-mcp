@@ -1,13 +1,19 @@
 """Scrape OpenAPI specs from ReadMe.io-hosted developer documentation.
 
-Fetches HTML pages from developer.arubanetworks.com, extracts the embedded
-``oasDefinition`` JSON, and caches specs to disk with TTL-based freshness.
-Auto-discovers API categories from the sidebar metadata in each page.
+Uses the ReadMe ``.md`` URL protocol: appending ``.md`` to any reference
+page URL returns the full OpenAPI 3.x spec embedded in a markdown code block.
+
+Discovery flow:
+    1. Fetch the root reference page HTML (SSR sidebar lists all endpoints).
+    2. Extract endpoint slugs from sidebar ``<a href>`` links.
+    3. For each slug, fetch ``{slug}.md`` to get the per-endpoint OAS spec.
+    4. Cache specs to disk with TTL-based freshness.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -27,8 +33,8 @@ DOCS_HOST = "https://developer.arubanetworks.com"
 class SpecSource:
     """A ReadMe.io API documentation site to scrape.
 
-    Each source maps to one ``/reference`` site. Categories are auto-discovered
-    from the sidebar metadata embedded in the first page load.
+    Each source maps to one ``/reference`` site.  Endpoint slugs are
+    auto-discovered from the server-side rendered sidebar HTML.
     """
 
     name: str
@@ -38,7 +44,7 @@ class SpecSource:
     """Path under the docs host, e.g. ``/new-central/reference``."""
 
     # Populated after auto-discovery
-    category_slugs: list[str] = field(default_factory=list)
+    endpoint_slugs: list[str] = field(default_factory=list)
 
 
 # Default sources — extend this list to add new API doc sites later.
@@ -48,55 +54,47 @@ DEFAULT_SOURCES: list[SpecSource] = [
 ]
 
 
-# ----- HTML extraction --------------------------------------------------------
+# ----- Slug discovery ---------------------------------------------------------
+
+_SLUG_RE = re.compile(r'href="[^"]*?/reference/([a-zA-Z0-9_-]+)"')
 
 
-def _extract_page_data(html: str) -> dict:
-    """Extract the large JSON blob from a ReadMe.io reference page.
+def _extract_endpoint_slugs(html: str) -> list[str]:
+    """Extract unique endpoint slugs from sidebar links in SSR HTML.
 
-    ReadMe.io server-side renders a ``<script>`` tag whose content starts with
-    ``{"sidebars"`` containing full sidebar metadata *and* the ``oasDefinition``.
+    ReadMe SuperHub renders the full sidebar server-side so all endpoint
+    links are present in the initial HTML response.
     """
-    marker = '{"sidebars"'
-    start = html.find(marker)
-    if start == -1:
-        raise ValueError("Could not find page data JSON in HTML")
-
-    # Find the closing </script> tag after the JSON blob
-    end = html.find("</script>", start)
-    if end == -1:
-        raise ValueError("Could not find closing </script> for page data")
-
-    return json.loads(html[start:end])
+    seen: set[str] = set()
+    slugs: list[str] = []
+    for match in _SLUG_RE.finditer(html):
+        slug = match.group(1)
+        if slug not in seen:
+            seen.add(slug)
+            slugs.append(slug)
+    return slugs
 
 
-def _discover_categories(page_data: dict) -> list[dict]:
-    """Extract reference sidebar categories from the page data.
+# ----- Markdown spec extraction -----------------------------------------------
 
-    Returns a list of dicts with keys: title, slug, first_child_slug.
-    Each category in the sidebar has child pages; we only need one slug per
-    category to load that category's OAS definition.
+_JSON_BLOCK_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
+
+
+def _extract_oas_from_markdown(text: str) -> dict | None:
+    """Extract an OpenAPI spec from a ReadMe ``.md`` response.
+
+    The ``.md`` endpoint returns markdown containing a JSON code block
+    with the full OpenAPI 3.x specification for that endpoint.
     """
-    refs = page_data.get("sidebars", {}).get("refs", [])
-    categories = []
-    for cat in refs:
-        pages = cat.get("pages", [])
-        if not pages:
-            continue
-        first_page = pages[0]
-        categories.append({
-            "title": cat.get("title", ""),
-            "slug": cat.get("slug", ""),
-            "first_child_slug": first_page.get("slug", ""),
-        })
-    return categories
-
-
-def _extract_oas(page_data: dict) -> dict | None:
-    """Extract the ``oasDefinition`` from parsed page data."""
-    oas = page_data.get("oasDefinition")
-    if oas and isinstance(oas, dict) and "paths" in oas:
-        return oas
+    m = _JSON_BLOCK_RE.search(text)
+    if not m:
+        return None
+    try:
+        spec = json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return None
+    if isinstance(spec, dict) and "paths" in spec:
+        return spec
     return None
 
 
@@ -133,7 +131,7 @@ _MAX_WORKERS = 5
 
 
 def _fetch_page(url: str) -> str:
-    """Fetch a single HTML page."""
+    """Fetch a page and return the response text."""
     resp = httpx.get(url, timeout=_HTTP_TIMEOUT, follow_redirects=True)
     resp.raise_for_status()
     return resp.text
@@ -146,7 +144,7 @@ def _fetch_spec_for_slug(
     cache_dir: Path,
     ttl: int,
 ) -> tuple[str, dict | None, bool]:
-    """Fetch one category's OAS spec, using cache if fresh.
+    """Fetch one endpoint's OAS spec via the ``.md`` protocol.
 
     Returns (slug, spec_or_None, was_cached).
     """
@@ -157,11 +155,10 @@ def _fetch_spec_for_slug(
         if spec:
             return slug, spec, True
 
-    url = f"{DOCS_HOST}{reference_path}/{slug}"
+    url = f"{DOCS_HOST}{reference_path}/{slug}.md"
     try:
-        html = _fetch_page(url)
-        page_data = _extract_page_data(html)
-        spec = _extract_oas(page_data)
+        text = _fetch_page(url)
+        spec = _extract_oas_from_markdown(text)
         if spec:
             _write_cache(cp, spec)
             return slug, spec, False
@@ -188,8 +185,8 @@ def discover_and_scrape(
     """Scrape OpenAPI specs from all configured sources.
 
     For each source:
-    1. Fetch the root reference page to auto-discover categories from the sidebar.
-    2. For each category, fetch the first child page to extract its ``oasDefinition``.
+    1. Fetch the root reference page to discover endpoint slugs from the sidebar.
+    2. For each slug, fetch ``{slug}.md`` to get the per-endpoint OAS spec.
     3. Cache specs to disk; reuse fresh caches (``ttl`` seconds).
 
     Returns a list of parsed OpenAPI spec dicts.
@@ -202,38 +199,26 @@ def discover_and_scrape(
     for source in sources:
         logger.info("oas_source_start", source=source.name, path=source.reference_path)
 
-        # Step 1: auto-discover categories from the root page
-        if not source.category_slugs:
+        # Step 1: discover endpoint slugs from the sidebar HTML
+        if not source.endpoint_slugs:
             try:
                 root_url = f"{DOCS_HOST}{source.reference_path}"
                 root_html = _fetch_page(root_url)
-                root_data = _extract_page_data(root_html)
-                categories = _discover_categories(root_data)
-                source.category_slugs = [c["first_child_slug"] for c in categories if c["first_child_slug"]]
-
-                # The root page itself may have redirected to a category page — extract its spec too
-                root_spec = _extract_oas(root_data)
-                if root_spec:
-                    # Cache under the slug that the root page resolved to
-                    doc = root_data.get("doc", {})
-                    root_slug = doc.get("slug", "") if isinstance(doc, dict) else ""
-                    if root_slug:
-                        _write_cache(_cache_path(cache_dir, source.name, root_slug), root_spec)
+                source.endpoint_slugs = _extract_endpoint_slugs(root_html)
 
                 logger.info(
-                    "oas_categories_discovered",
+                    "oas_slugs_discovered",
                     source=source.name,
-                    count=len(source.category_slugs),
-                    categories=[c["title"] for c in categories],
+                    count=len(source.endpoint_slugs),
                 )
             except Exception as e:
                 logger.error("oas_discovery_failed", source=source.name, error=str(e))
                 continue
 
-        # Step 2: fetch specs for each category in parallel
-        seen_titles: set[str] = set()
+        # Step 2: fetch specs for each endpoint in parallel
         cached_count = 0
         fetched_count = 0
+        spec_count = 0
 
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
             futures = {
@@ -245,7 +230,7 @@ def discover_and_scrape(
                     cache_dir,
                     ttl,
                 ): slug
-                for slug in source.category_slugs
+                for slug in source.endpoint_slugs
             }
 
             for future in as_completed(futures):
@@ -256,15 +241,13 @@ def discover_and_scrape(
                     fetched_count += 1
 
                 if spec:
-                    title = spec.get("info", {}).get("title", slug)
-                    if title not in seen_titles:
-                        seen_titles.add(title)
-                        all_specs.append(spec)
+                    all_specs.append(spec)
+                    spec_count += 1
 
         logger.info(
             "oas_source_done",
             source=source.name,
-            specs=len(seen_titles),
+            specs=spec_count,
             cached=cached_count,
             fetched=fetched_count,
         )
