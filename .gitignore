@@ -48,7 +48,6 @@ test_merge_*.py
 test_delete_create.py
 
 # Leftover seed copies from run_seed() (real seeds live in seeds/)
-src/hpe_networking_central_mcp/_provenance.py
 src/hpe_networking_central_mcp/analyze_topology.*
 src/hpe_networking_central_mcp/enrich_topology.*
 src/hpe_networking_central_mcp/onboard_device.*

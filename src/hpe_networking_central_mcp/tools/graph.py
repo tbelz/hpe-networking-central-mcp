@@ -32,7 +32,7 @@ def _build_error_hint(error_msg: str) -> str:
 
 
 def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
-    """Register graph query and refresh tools with the MCP server."""
+    """Register graph query and write tools with the MCP server."""
 
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),

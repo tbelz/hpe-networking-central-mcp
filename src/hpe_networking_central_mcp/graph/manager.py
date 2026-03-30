@@ -11,7 +11,7 @@ from typing import Any
 import real_ladybug as lb
 import structlog
 
-from .schema import KNOWLEDGE_NODE_TABLES, KNOWLEDGE_REL_TABLES, NODE_TABLES, POLICY_REL_TABLES, PROVENANCE_REL_TABLES, REL_TABLES, TOPOLOGY_REL_TABLES
+from .schema import KNOWLEDGE_NODE_TABLES, KNOWLEDGE_REL_TABLES, NODE_TABLES, POLICY_REL_TABLES, REL_TABLES, TOPOLOGY_REL_TABLES
 
 logger = structlog.get_logger("graph.manager")
 
@@ -62,7 +62,6 @@ class GraphManager:
             NODE_TABLES + KNOWLEDGE_NODE_TABLES
             + REL_TABLES + KNOWLEDGE_REL_TABLES
             + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES
-            + PROVENANCE_REL_TABLES
         )
         for ddl in bootstrap_ddl:
             conn.execute(ddl.strip())

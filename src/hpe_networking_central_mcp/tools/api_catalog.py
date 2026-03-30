@@ -155,7 +155,8 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         """
         gm = _graph_manager
         if gm is None or not gm.is_available:
-            return json.dumps({"error": "API catalog not available — graph database not initialized."})
+            return json.dumps({"error": "API catalog not available — graph database not initialized.",
+                               "hint": "The graph database may still be loading. Try again shortly."})
 
         rows = gm.query(
             "MATCH (e:ApiEndpoint) "
@@ -191,7 +192,8 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         """
         gm = _graph_manager
         if gm is None or not gm.is_available:
-            return json.dumps({"error": "Graph database not available."})
+            return json.dumps({"error": "Graph database not available.",
+                               "hint": "The graph database may still be loading. Try again shortly."})
 
         rows = gm.query(
             "MATCH (e:ApiEndpoint {endpoint_id: $eid}) "

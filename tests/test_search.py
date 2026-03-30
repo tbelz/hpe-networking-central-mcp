@@ -1,4 +1,4 @@
-"""TDD tests for search tools — unified_search, get_data_provenance.
+"""TDD tests for search tools — unified_search.
 
 Uses an in-memory LadybugDB database with a small fixture graph.
 """
@@ -16,10 +16,8 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from hpe_networking_central_mcp.graph.manager import GraphManager
 from hpe_networking_central_mcp.tools.search import (
-    _fts_search,
-    _contains_search,
-    _unified_search_impl,
-    _get_data_provenance_impl,
+    fts_search,
+    contains_search,
 )
 
 
@@ -78,26 +76,18 @@ def gm(tmp_path_factory):
         "})"
     )
 
-    # Domain nodes with provenance
+    # Domain nodes
     gm.execute(
         "CREATE (d:Device {"
         "  serial: 'SN001', name: 'Switch-01', model: 'Aruba 6300',"
-        "  deviceType: 'SWITCH', status: 'Up', fetched_at: '2024-01-01T00:00:00Z',"
-        "  source_api: 'GET:/monitoring/v1/devices'"
+        "  deviceType: 'SWITCH', status: 'Up'"
         "})"
     )
     gm.execute(
         "CREATE (s:Site {"
         "  scopeId: 'site-001', name: 'NYC Office', address: '123 Main St',"
-        "  city: 'New York', country: 'US', fetched_at: '2024-01-01T00:00:00Z',"
-        "  source_api: 'GET:/config/v1/sites'"
+        "  city: 'New York', country: 'US'"
         "})"
-    )
-
-    # POPULATED_BY edges
-    gm.execute(
-        "MATCH (d:Device {serial: 'SN001'}), (e:ApiEndpoint {endpoint_id: 'GET:/monitoring/v1/devices'}) "
-        "CREATE (d)-[:POPULATED_BY {fetched_at: '2024-01-01T00:00:00Z', seed: 'populate_base_graph', run_id: 'run-001'}]->(e)"
     )
 
     # DocSection node
@@ -130,28 +120,28 @@ class TestContainsSearch:
     """Test fallback CONTAINS-based search."""
 
     def test_search_api_by_keyword(self, gm):
-        results = _contains_search(gm, "devices", scope="api", limit=10)
+        results = contains_search(gm, "devices", scope="api", limit=10)
         assert len(results) >= 2
         assert all(r["type"] == "ApiEndpoint" for r in results)
 
     def test_search_data_nodes(self, gm):
-        results = _contains_search(gm, "Switch", scope="data", limit=10)
+        results = contains_search(gm, "Switch", scope="data", limit=10)
         assert len(results) >= 1
         assert any(r["type"] == "Device" for r in results)
 
     def test_search_docs(self, gm):
-        results = _contains_search(gm, "devices", scope="docs", limit=10)
+        results = contains_search(gm, "devices", scope="docs", limit=10)
         assert len(results) >= 1
         assert any(r["type"] == "DocSection" for r in results)
 
     def test_search_all_scopes(self, gm):
-        results = _contains_search(gm, "devices", scope="all", limit=20)
+        results = contains_search(gm, "devices", scope="all", limit=20)
         types = {r["type"] for r in results}
         # Should find across multiple node types
         assert len(results) >= 2
 
     def test_limit_respected(self, gm):
-        results = _contains_search(gm, "devices", scope="all", limit=1)
+        results = contains_search(gm, "devices", scope="all", limit=1)
         assert len(results) <= 1
 
 
@@ -161,79 +151,12 @@ class TestFtsSearch:
     def test_fts_api_search(self, gm):
         if not gm.fts_available:
             pytest.skip("FTS extension not available")
-        results = _fts_search(gm, "devices network", scope="api", limit=10)
+        results = fts_search(gm, "devices network", scope="api", limit=10)
         assert len(results) >= 1
         assert all(r["type"] == "ApiEndpoint" for r in results)
 
     def test_fts_returns_empty_for_no_match(self, gm):
         if not gm.fts_available:
             pytest.skip("FTS extension not available")
-        results = _fts_search(gm, "xyznonexistent123", scope="api", limit=10)
+        results = fts_search(gm, "xyznonexistent123", scope="api", limit=10)
         assert results == []
-
-
-class TestUnifiedSearchImpl:
-    """Test the unified search implementation."""
-
-    def test_search_returns_json_with_results(self, gm):
-        result = json.loads(_unified_search_impl(gm, "devices", scope="all", limit=10))
-        assert "results" in result
-        assert "total" in result
-        assert result["total"] >= 1
-
-    def test_scope_api_only(self, gm):
-        result = json.loads(_unified_search_impl(gm, "devices", scope="api", limit=10))
-        for r in result["results"]:
-            assert r["type"] == "ApiEndpoint"
-
-    def test_scope_data_only(self, gm):
-        result = json.loads(_unified_search_impl(gm, "Switch", scope="data", limit=10))
-        for r in result["results"]:
-            assert r["type"] in ("Device", "Site", "ConfigProfile", "Script")
-
-    def test_scope_docs_only(self, gm):
-        result = json.loads(_unified_search_impl(gm, "devices", scope="docs", limit=10))
-        for r in result["results"]:
-            assert r["type"] == "DocSection"
-
-    def test_empty_query_returns_error(self, gm):
-        result = json.loads(_unified_search_impl(gm, "", scope="all", limit=10))
-        assert "error" in result
-
-    def test_invalid_scope_returns_error(self, gm):
-        result = json.loads(_unified_search_impl(gm, "test", scope="invalid", limit=10))
-        assert "error" in result
-
-
-# ── C3: get_data_provenance ──────────────────────────────────────────
-
-class TestGetDataProvenance:
-    """Test get_data_provenance_impl."""
-
-    def test_device_provenance(self, gm):
-        result = json.loads(_get_data_provenance_impl(gm, "Device", "SN001"))
-        assert result["node_label"] == "Device"
-        assert result["identifier"] == "SN001"
-        assert result["source_api"] == "GET:/monitoring/v1/devices"
-        assert result["fetched_at"] == "2024-01-01T00:00:00Z"
-
-    def test_populated_by_edges(self, gm):
-        result = json.loads(_get_data_provenance_impl(gm, "Device", "SN001"))
-        assert "populated_by" in result
-        assert len(result["populated_by"]) >= 1
-        edge = result["populated_by"][0]
-        assert edge["seed"] == "populate_base_graph"
-
-    def test_populated_by_has_seed(self, gm):
-        result = json.loads(_get_data_provenance_impl(gm, "Device", "SN001"))
-        assert len(result["populated_by"]) >= 1
-        assert result["populated_by"][0]["seed"] == "populate_base_graph"
-
-    def test_unknown_node(self, gm):
-        result = json.loads(_get_data_provenance_impl(gm, "Device", "NONEXISTENT"))
-        assert result["source_api"] is None
-        assert result["populated_by"] == []
-
-    def test_site_provenance(self, gm):
-        result = json.loads(_get_data_provenance_impl(gm, "Site", "site-001"))
-        assert result["source_api"] == "GET:/config/v1/sites"

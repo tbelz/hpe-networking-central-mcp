@@ -95,23 +95,6 @@ graph LR
     Device -->|EFFECTIVE_CONFIG| ConfigProfile
 ```
 
-### Data Provenance
-
-Every domain node tracks where its data came from. This lets an LLM answer
-"which API populated this device?" or "when was this site data last refreshed?"
-
-```mermaid
-graph LR
-    subgraph "Instance-level (runtime)"
-        D[Device<br/>fetched_at, source_api] -->|"POPULATED_BY<br/>(seed, run_id, fetched_at)"| EP2[ApiEndpoint]
-        S[Site<br/>fetched_at, source_api] -->|POPULATED_BY| EP3[ApiEndpoint]
-    end
-```
-
-**Instance-level provenance** records which specific API and seed script populated
-each node at runtime, with timestamps and run IDs using `POPULATED_BY` edges and
-`fetched_at`/`source_api` fields on the node itself.
-
 ### Search Architecture
 
 ```mermaid

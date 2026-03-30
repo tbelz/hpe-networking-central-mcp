@@ -17,13 +17,10 @@ Merge strategy is detected by inspecting the API response shape:
 
 import json
 import sys
-import uuid
 
 from central_helpers import api, graph, CentralAPIError
-from _provenance import set_source_fields, record_provenance
 
 SEED_NAME = "populate_config_policy"
-RUN_ID = str(uuid.uuid4())
 
 
 # ── Category discovery ───────────────────────────────────────────────
@@ -169,12 +166,6 @@ def upsert_profile(category: str, profile: dict, merge_strategy: str) -> str:
                                           profile.get("assigned_device_functions", []))),
         },
     )
-    # Provenance
-    api_path = f"network-config/v1alpha1/{category}"
-    cypher_prov, params_prov = set_source_fields("ConfigProfile", "id", full_id, "GET", api_path)
-    graph.execute(cypher_prov, params_prov)
-    for stmt, prm in record_provenance(node_label="ConfigProfile", pk_field="id", pk_value=full_id, method="GET", api_path=api_path, seed_name=SEED_NAME, run_id=RUN_ID):
-        graph.execute(stmt, prm)
     return full_id
 
 

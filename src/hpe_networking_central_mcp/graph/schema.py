@@ -27,8 +27,6 @@ NODE_TABLES: list[str] = [
         name        STRING,
         siteCount   INT64,
         deviceCount INT64,
-        fetched_at  STRING,
-        source_api  STRING,
         PRIMARY KEY (scopeId)
     )
     """,
@@ -47,8 +45,6 @@ NODE_TABLES: list[str] = [
         collectionId   STRING,
         collectionName STRING,
         timezoneId     STRING,
-        fetched_at     STRING,
-        source_api     STRING,
         PRIMARY KEY (scopeId)
     )
     """,
@@ -57,8 +53,6 @@ NODE_TABLES: list[str] = [
         scopeId     STRING,
         name        STRING,
         deviceCount INT64,
-        fetched_at  STRING,
-        source_api  STRING,
         PRIMARY KEY (scopeId)
     )
     """,
@@ -81,8 +75,6 @@ NODE_TABLES: list[str] = [
         configStatus    STRING,
         deviceGroupId   STRING,
         deviceGroupName STRING,
-        fetched_at      STRING,
-        source_api      STRING,
         PRIMARY KEY (serial)
     )
     """,
@@ -100,8 +92,6 @@ NODE_TABLES: list[str] = [
         mergeStrategy    STRING,
         assignedScopeIds STRING,
         assignedDeviceFunctions STRING,
-        fetched_at       STRING,
-        source_api       STRING,
         PRIMARY KEY (id)
     )
     """,
@@ -115,8 +105,6 @@ NODE_TABLES: list[str] = [
         status         STRING,
         ipv4           STRING,
         siteId         STRING,
-        fetched_at     STRING,
-        source_api     STRING,
         PRIMARY KEY (mac)
     )
     """,
@@ -173,23 +161,6 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         last_run    STRING,
         last_exit_code INT64,
         PRIMARY KEY (filename)
-    )
-    """,
-]
-
-# Provenance tables — track which API populated domain nodes
-PROVENANCE_REL_TABLES: list[str] = [
-    """
-    CREATE REL TABLE GROUP IF NOT EXISTS POPULATED_BY (
-        FROM Device TO ApiEndpoint,
-        FROM Site TO ApiEndpoint,
-        FROM SiteCollection TO ApiEndpoint,
-        FROM DeviceGroup TO ApiEndpoint,
-        FROM ConfigProfile TO ApiEndpoint,
-        FROM UnmanagedDevice TO ApiEndpoint,
-        fetched_at STRING,
-        seed       STRING,
-        run_id     STRING
     )
     """,
 ]
@@ -287,7 +258,7 @@ def get_node_tables() -> list[str]:
 def get_rel_tables() -> list[str]:
     """Return all relationship table names (including topology, policy, provenance)."""
     _rel_re = re.compile(r"CREATE REL TABLE (?:GROUP )?IF NOT EXISTS (\w+)")
-    all_ddl = REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES + PROVENANCE_REL_TABLES
+    all_ddl = REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES
     return [m.group(1) for ddl in all_ddl if (m := _rel_re.search(ddl))]
 
 

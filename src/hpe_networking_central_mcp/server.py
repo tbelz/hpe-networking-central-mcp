@@ -42,7 +42,7 @@ direct API reads and reusable Python scripts.
 1. **Understand the network**: Read the graph://schema resource to learn the graph model,
    then use query_graph(cypher) to explore the hierarchy: Org → SiteCollections → Sites →
    Devices. The graph is your structural map — use it for navigation, blast-radius analysis,
-   cross-site comparison, config provenance, and dependency tracking.
+   cross-site comparison, and dependency tracking.
 
 2. **Discover APIs**: Use unified_search(query) to find endpoints by keyword (e.g.,
    "vlan", "switch", "dhcp"). Use list_api_categories() to see all API areas. Then use
@@ -90,6 +90,26 @@ direct API reads and reusable Python scripts.
 
 Read docs://script-writing-guide for the script template and authentication pattern.
 Scripts use `from central_helpers import api, glp, graph` — no OAuth2 boilerplate needed.
+
+## Choosing the right search tool
+
+- **unified_search(query, scope="api")**: Find API endpoints by keyword. Default scope.
+- **unified_search(query, scope="data")**: Quick keyword lookup in graph nodes (devices,
+  sites, config profiles). Use when you know a name fragment but not the full identifier.
+- **unified_search(query, scope="docs")**: Search documentation sections.
+- **query_graph(cypher)**: Structured Cypher queries for topology traversal, filtering by
+  properties, aggregations, or following relationships. Use when you need precise graph
+  navigation (e.g., "all devices at site X", "effective config for device Y").
+
+When in doubt: use `unified_search(scope="data")` for keyword lookups and `query_graph()`
+for relationship traversals or property filters.
+
+## MCP Resources
+
+Read these resources for context — they are always up to date:
+- `graph://schema` — Full graph schema: node types, properties, relationships, row counts,
+  and example Cypher queries. **Read this first** before writing any Cypher.
+- `docs://script-writing-guide` — Script template, authentication pattern, available helpers.
 
 ## MANDATORY: Research before scripting
 

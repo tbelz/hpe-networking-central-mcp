@@ -131,7 +131,7 @@ def run_seed(seed_name: str, seeds_dir: Path, socket_path: Path) -> dict:
     """Execute a seed script as a subprocess (same model as the MCP server).
 
     Replicates the MCP server's script library setup: copies central_helpers.py
-    and _provenance.py alongside the seed so imports resolve correctly.
+    alongside the seed so imports resolve correctly.
     """
     script_path = seeds_dir / f"{seed_name}.py"
     if not script_path.exists():
@@ -141,13 +141,10 @@ def run_seed(seed_name: str, seeds_dir: Path, socket_path: Path) -> dict:
     work_dir = Path(tempfile.mkdtemp(prefix="mcp_seed_run_"))
     src_pkg = Path(__file__).parent / "src" / "hpe_networking_central_mcp"
     helpers_src = src_pkg / "central_helpers.py"
-    prov_src = seeds_dir / "_provenance.py"
 
     shutil.copy2(script_path, work_dir / f"{seed_name}.py")
     if helpers_src.exists():
         shutil.copy2(helpers_src, work_dir / "central_helpers.py")
-    if prov_src.exists():
-        shutil.copy2(prov_src, work_dir / "_provenance.py")
 
     env = os.environ.copy()
     env["CENTRAL_BASE_URL"] = base_url

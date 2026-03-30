@@ -290,7 +290,7 @@ def sync_seeds_to_graph(graph_manager: GraphManager, seeds_dir: Path, lib_dir: P
 
     for seed_file in sorted(seeds_dir.iterdir()):
         if seed_file.suffix == ".py" and seed_file.name != "__init__.py":
-            # Copy to disk (includes helper modules like _provenance.py)
+            # Copy to disk (includes helper modules)
             shutil.copy2(seed_file, lib_dir / seed_file.name)
 
             # Skip private helper modules from graph registration
