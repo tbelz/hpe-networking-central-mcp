@@ -121,7 +121,7 @@ nodes from ReadMe.io or other documentation sources.
 
 ## Prerequisites
 
-- Docker
+- Docker (supports both **amd64** and **arm64** — Apple Silicon Macs pull the native image automatically)
 - HPE Aruba Networking Central API credentials (client_id + client_secret)
 - Optionally: HPE GreenLake Platform credentials (may share the same credentials)
 
