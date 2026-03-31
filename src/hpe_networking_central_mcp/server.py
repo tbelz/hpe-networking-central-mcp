@@ -81,6 +81,8 @@ direct API reads and reusable Python scripts.
 8. **GreenLake Platform**: Use call_greenlake_api(path, query_params) for HPE GreenLake APIs
    (device onboarding, subscriptions, licenses, locations, service catalog). These hit
    https://global.api.greenlake.hpe.com. In scripts, use `from central_helpers import glp`.
+   **Note:** The call_greenlake_api tool and glp helper are only available when GreenLake
+   credentials are configured. If the tool is not listed, GreenLake access is not enabled.
 
 9. **Graph enrichment**: The graph is populated by seed scripts at startup and can be
    enriched at any time using `write_graph(cypher, parameters)` to add nodes,
@@ -408,7 +410,10 @@ register_graph_tools(mcp, settings, graph_manager)
 register_script_tools(mcp, settings, graph_manager)
 register_catalog_tools(mcp, settings, graph_manager)
 register_api_call_tools(mcp, settings, client)
-register_greenlake_api_call_tools(mcp, settings, glp_client)
+if glp_client is not None:
+    register_greenlake_api_call_tools(mcp, settings, glp_client)
+else:
+    logger.info("greenlake_tools_disabled", reason="GreenLake credentials not configured")
 register_resources(mcp, settings)
 register_graph_resources(mcp, graph_manager, lambda: _seed_status)
 register_prompts(mcp, graph_manager)

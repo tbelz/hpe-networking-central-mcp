@@ -35,6 +35,7 @@ The agent manages network devices through a combination of direct API calls and 
 │                         │
 │  Resources:             │
 │  ├─ graph://schema      │──► Live schema introspection
+│  ├─ graph://seed-status │──► Startup seed execution results
 │  ├─ docs://central/overview  │
 │  ├─ docs://script-writing-guide │
 │  ├─ docs://config-workflows │
@@ -147,6 +148,36 @@ Add to `.vscode/mcp.json`:
 }
 ```
 
+> **Tip — interactive credentials:** If you prefer entering credentials on each
+> server start instead of storing them in a `.env` file, use VS Code input
+> variables:
+>
+> ```json
+> {
+>   "inputs": [
+>     { "id": "centralBaseUrl", "type": "promptString", "description": "Central API base URL" },
+>     { "id": "centralClientId", "type": "promptString", "description": "Central Client ID" },
+>     { "id": "centralClientSecret", "type": "promptString", "description": "Central Client Secret", "password": true }
+>   ],
+>   "servers": {
+>     "hpe-networking-central-mcp": {
+>       "command": "docker",
+>       "args": [
+>         "run", "-i", "--rm", "--pull", "always",
+>         "-v", "central-scripts:/scripts/library",
+>         "-e", "CENTRAL_BASE_URL=${input:centralBaseUrl}",
+>         "-e", "CENTRAL_CLIENT_ID=${input:centralClientId}",
+>         "-e", "CENTRAL_CLIENT_SECRET=${input:centralClientSecret}",
+>         "ghcr.io/tbelz/hpe-networking-central-mcp:main"
+>       ]
+>     }
+>   }
+> }
+> ```
+>
+> VS Code will prompt you for each credential when the server starts.
+> GreenLake credentials can be added the same way if needed.
+
 ### Environment Variables (.env file)
 
 ```
@@ -172,7 +203,7 @@ GREENLAKE_CLIENT_SECRET=your_glp_client_secret
 | Tool | Description |
 |------|-------------|
 | `call_central_api` | Make authenticated requests to any Central API endpoint |
-| `call_greenlake_api` | Make authenticated requests to any GreenLake Platform API endpoint |
+| `call_greenlake_api` | Make authenticated requests to any GreenLake Platform API endpoint (only available when GreenLake credentials are configured) |
 | `unified_search` | Search APIs, docs, and graph data by keyword (BM25/FTS with scope filtering) |
 | `list_api_categories` | List all API categories with endpoint counts |
 | `get_api_endpoint_detail` | Get full parameter and schema details for a specific endpoint |
