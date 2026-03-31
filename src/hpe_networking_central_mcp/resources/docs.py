@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 
 from ..config import Settings
 
+if TYPE_CHECKING:
+    from ..graph.manager import GraphManager
+
 logger = structlog.get_logger("resources.docs")
 
 
-def register_resources(mcp, settings: Settings):
+def register_resources(mcp, settings: Settings, graph_manager: GraphManager | None = None):
     """Register documentation resources with the MCP server."""
 
     @mcp.resource("docs://central/overview")
@@ -54,6 +59,53 @@ def register_resources(mcp, settings: Settings):
         if not entries:
             return "No seed scripts available."
         return "# Seed Scripts\n\nPre-built reusable scripts. Use `list_scripts()` to see them, `execute_script()` to run.\n\n" + "\n\n".join(entries)
+
+    # ── Dynamic VSG documentation resources ───────────────────────────
+
+    @mcp.resource("docs://vsg/list")
+    def vsg_doc_list() -> str:
+        """List all available VSG documentation sections. Use section_id values to read full content via docs://vsg/{section_id}."""
+        gm = graph_manager
+        if gm is None or not gm.is_available:
+            return json.dumps({"error": "Graph database not available."})
+        try:
+            rows = gm.query(
+                "MATCH (d:DocSection) WHERE d.source = 'vsg-central' "
+                "RETURN d.section_id, d.title, d.url ORDER BY d.section_id",
+                read_only=True,
+            )
+            sections = [
+                {"section_id": r["d.section_id"], "title": r["d.title"], "url": r["d.url"]}
+                for r in rows
+            ]
+            return json.dumps({"total": len(sections), "sections": sections}, indent=2)
+        except Exception as exc:
+            logger.debug("vsg_list_failed", error=str(exc))
+            return json.dumps({"error": "No VSG documentation available.", "detail": str(exc)})
+
+    @mcp.resource("docs://vsg/{section_id}")
+    def vsg_doc_section(section_id: str) -> str:
+        """Read full content of a VSG documentation section by section_id."""
+        gm = graph_manager
+        if gm is None or not gm.is_available:
+            return "Documentation not available — graph database not initialized."
+        try:
+            rows = gm.query(
+                "MATCH (d:DocSection {section_id: $sid}) "
+                "RETURN d.title, d.content, d.url",
+                {"sid": section_id},
+                read_only=True,
+            )
+            if not rows:
+                return f"No documentation section found with id '{section_id}'.\n\nUse docs://vsg/list to see available sections."
+            r = rows[0]
+            title = r.get("d.title", "")
+            content = r.get("d.content", "")
+            url = r.get("d.url", "")
+            return f"# {title}\n\n{content}\n\n---\nSource: {url}"
+        except Exception as exc:
+            logger.debug("vsg_section_failed", section_id=section_id, error=str(exc))
+            return f"Error retrieving section '{section_id}': {exc}"
 
 
 def _read_doc(path: Path, fallback: str = "Documentation not available.") -> str:

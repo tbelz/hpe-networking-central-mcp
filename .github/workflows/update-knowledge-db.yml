@@ -145,13 +145,15 @@ jobs:
           NEW_EP=$(jq -r '.endpoint_count // 0' build/manifest.json)
           OLD_CAT=$(jq -r '.category_count // 0' /tmp/prev/manifest.json)
           NEW_CAT=$(jq -r '.category_count // 0' build/manifest.json)
+          OLD_DOC=$(jq -r '.doc_count // 0' /tmp/prev/manifest.json)
+          NEW_DOC=$(jq -r '.doc_count // 0' build/manifest.json)
           OLD_CATS=$(jq -r '.categories | sort | join(",")' /tmp/prev/manifest.json)
           NEW_CATS=$(jq -r '.categories | sort | join(",")' build/manifest.json)
 
-          echo "Previous: ${OLD_EP} endpoints, ${OLD_CAT} categories"
-          echo "Current:  ${NEW_EP} endpoints, ${NEW_CAT} categories"
+          echo "Previous: ${OLD_EP} endpoints, ${OLD_CAT} categories, ${OLD_DOC} docs"
+          echo "Current:  ${NEW_EP} endpoints, ${NEW_CAT} categories, ${NEW_DOC} docs"
 
-          if [ "$OLD_EP" = "$NEW_EP" ] && [ "$OLD_CAT" = "$NEW_CAT" ] && [ "$OLD_CATS" = "$NEW_CATS" ]; then
+          if [ "$OLD_EP" = "$NEW_EP" ] && [ "$OLD_CAT" = "$NEW_CAT" ] && [ "$OLD_CATS" = "$NEW_CATS" ] && [ "$OLD_DOC" = "$NEW_DOC" ]; then
             echo "No changes detected — skipping release."
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
@@ -172,7 +174,7 @@ jobs:
           name: "Knowledge DB ${{ steps.tag.outputs.tag }}"
           body: |
             Auto-generated knowledge database snapshot.
-            Contains scraped API endpoints and seed scripts for the MCP server.
+            Contains scraped API endpoints, VSG documentation sections, and seed scripts for the MCP server.
           files: |
             build/knowledge_db.tar.gz
             build/manifest.json

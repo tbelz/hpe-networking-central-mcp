@@ -414,7 +414,7 @@ if glp_client is not None:
     register_greenlake_api_call_tools(mcp, settings, glp_client)
 else:
     logger.info("greenlake_tools_disabled", reason="GreenLake credentials not configured")
-register_resources(mcp, settings)
+register_resources(mcp, settings, graph_manager)
 register_graph_resources(mcp, graph_manager, lambda: _seed_status)
 register_prompts(mcp, graph_manager)
 

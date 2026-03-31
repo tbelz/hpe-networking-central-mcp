@@ -34,6 +34,7 @@ from hpe_networking_central_mcp.graph.schema import (  # noqa: E402
 )
 from hpe_networking_central_mcp.oas_index import OASIndex  # noqa: E402
 from hpe_networking_central_mcp.oas_scraper import ReadMeSpecProvider  # noqa: E402
+from hpe_networking_central_mcp.vsg_scraper import VsgDocProvider  # noqa: E402
 
 # GLP provider may fail if dependencies vary; import conditionally
 try:
@@ -186,6 +187,50 @@ def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
     return count
 
 
+def _scrape_docs(cache_dir: Path) -> tuple[list, dict]:
+    """Scrape VSG documentation pages.
+
+    Returns (doc_entries, scrape_health_entry).
+    """
+    print("  Scraping VSG Central documentation...")
+    try:
+        provider = VsgDocProvider()
+        entries = provider.fetch_docs(cache_dir=cache_dir / "vsg", ttl=0)
+        health = {"status": "ok", "section_count": len(entries)}
+        print(f"    → {len(entries)} documentation sections")
+        return entries, health
+    except Exception as e:
+        health = {"status": "error", "section_count": 0, "error": str(e)}
+        print(f"    ⚠ VSG scrape failed: {e}", file=sys.stderr)
+        return [], health
+
+
+def _populate_docs(db: lb.Database, docs: list) -> int:
+    """Insert DocSection nodes from scraped VSG documentation."""
+    conn = lb.Connection(db)
+    count = 0
+
+    for entry in docs:
+        escaped_content = _cypher_escape(entry.content)
+        conn.execute(
+            "CREATE (d:DocSection {"
+            "  section_id: $sid, title: $title,"
+            f"  content: '{escaped_content}',"
+            "  source: $source, url: $url"
+            "})",
+            parameters={
+                "sid": entry.section_id,
+                "title": entry.title,
+                "source": entry.source,
+                "url": entry.url,
+            },
+        )
+        count += 1
+
+    print(f"  Inserted {count} documentation sections")
+    return count
+
+
 def _populate_seeds(db: lb.Database, seeds_dir: Path) -> int:
     """Insert seed scripts as Script nodes."""
     conn = lb.Connection(db)
@@ -286,24 +331,30 @@ def main() -> None:
     print("=== Building Knowledge Database ===\n")
 
     # 1. Create DB and apply schema
-    print("[1/5] Creating database and applying schema...")
+    print("[1/6] Creating database and applying schema...")
     db = lb.Database(str(db_path))
     _apply_schema(db)
 
     # 2. Scrape API specs
-    print("\n[2/5] Scraping API documentation...")
+    print("\n[2/6] Scraping API documentation...")
     specs, scrape_health = _scrape_specs(cache_dir)
     if not specs:
         print("⚠ No specs scraped — database will have no API endpoints.", file=sys.stderr)
 
     # 3. Build index and populate
-    print("\n[3/5] Populating API endpoints...")
+    print("\n[3/6] Populating API endpoints...")
     index = OASIndex()
     index.build(specs)
     endpoint_count = _populate_endpoints(db, index)
 
-    # 4. Populate seed scripts
-    print("\n[4/5] Populating seed scripts...")
+    # 4. Scrape and populate VSG documentation
+    print("\n[4/6] Scraping and populating VSG documentation...")
+    doc_entries, vsg_health = _scrape_docs(cache_dir)
+    scrape_health["vsg"] = vsg_health
+    doc_count = _populate_docs(db, doc_entries) if doc_entries else 0
+
+    # 5. Populate seed scripts
+    print("\n[5/6] Populating seed scripts...")
     seeds_dir = Path(__file__).resolve().parent.parent / "src" / "hpe_networking_central_mcp" / "seeds"
     if seeds_dir.is_dir():
         _populate_seeds(db, seeds_dir)
@@ -311,7 +362,7 @@ def main() -> None:
         print(f"  ⚠ Seeds dir not found: {seeds_dir}")
 
     # Create FTS indexes for BM25-ranked search
-    print("\n[5/5] Creating FTS indexes...")
+    print("\n[6/6] Creating FTS indexes...")
     fts_count = _create_fts_indexes(db)
     print(f"  FTS indexes: {fts_count}")
 
@@ -324,6 +375,7 @@ def main() -> None:
         "version": time.strftime("knowledge-db-%Y%m%d-%H%M%S", time.gmtime()),
         "endpoint_count": endpoint_count,
         "category_count": len(index.categories),
+        "doc_count": doc_count,
         "categories": sorted(index.categories.keys()),
         "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "scrape_health": scrape_health,
@@ -334,6 +386,7 @@ def main() -> None:
     print(f"\n✓ Knowledge DB ready at {db_path}")
     print(f"  Endpoints: {endpoint_count}")
     print(f"  Categories: {len(index.categories)}")
+    print(f"  Doc sections: {doc_count}")
     print(f"  Manifest: {manifest_path}")
 
     # Optionally tar (include both DB and manifest)
