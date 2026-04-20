@@ -19,7 +19,7 @@
   aspect-ratio: "16-9",
   config-info(
     title: [MCP Server for\ HPE Aruba Networking Central],
-    subtitle: [Bridging 3 000+ APIs with AI],
+    subtitle: [Bridging 2 000+ APIs with AI],
     author: [Till Belz],
     date: [HP Networking Days — 2026],
     institution: [Hewlett Packard Enterprise],
@@ -73,7 +73,7 @@
   = MCP Server for HPE Aruba Networking Central
 
   #v(1em)
-  Bridging 3 000+ APIs with AI
+  Bridging 2 000+ APIs with AI
 
   #v(2em)
   Till Belz #h(2em) HP Networking Days 2026
@@ -164,17 +164,17 @@
 #grid(
   columns: (1fr, 1fr, 1fr),
   gutter: 1.5em,
-  dim-box[~1 500 Central API endpoints][
+  dim-box[2 100+ API endpoints][
     Monitoring, Configuration, \
     Alerting, Firmware, Topology, \
     Troubleshooting, ...
   ],
-  dim-box[~60 GreenLake endpoints][
+  dim-box[Central + GreenLake][
     Device onboarding, \
     Subscriptions, Licensing, \
     Locations, Identity, ...
   ],
-  dim-box[40+ API categories][
+  dim-box[50 API categories][
     Full OpenAPI specs available \
     on developer.arubanetworks.com
   ],
@@ -194,6 +194,7 @@
     via REST APIs
   - Full OpenAPI specifications are publicly documented
   - Both the Central platform AND the GreenLake platform have APIs
+  - 2121 endpoints across 50 categories (from the latest knowledge DB build)
   - This is the foundation that makes the MCP server possible — you can't
     build AI tooling on top of a platform that doesn't have APIs
   - "If your platform has APIs, you already have an AI-ready platform —
@@ -219,7 +220,7 @@
     #dim-box[Naïve approach: 1:1 mapping][
       1 API endpoint = 1 MCP tool \
       \
-      ~1 500 tools × full schemas \
+      ~2 100 tools × full schemas \
       = *millions of tokens* \
       \
       #text(fill: red, weight: "bold")[⛔ Context window explosion]
@@ -248,7 +249,7 @@
   ~60 seconds. This is the core design insight.
 
   - Other MCP servers for simple platforms can map 1 API = 1 tool
-  - With 1500+ endpoints, that's impossible — the tool list alone would
+  - With 2100+ endpoints, that's impossible — the tool list alone would
     exceed the LLM's context window
   - Even pre-loading schemas for "likely" endpoints is wasteful and fragile
   - The invocation pattern solves this: instead of pre-loading, the LLM
@@ -332,7 +333,7 @@
 
   1. SEARCH: The LLM doesn't know what APIs exist. It uses unified_search()
      with a keyword like "vlan" or "firmware". This queries a BM25 full-text
-     search index over all 1500+ endpoints and returns a ranked list of
+     search index over all 2100+ endpoints and returns a ranked list of
      matching endpoints (method, path, summary).
 
   2. DISCOVER: The LLM picks the most relevant endpoint and calls
@@ -343,7 +344,7 @@
      and parameters. Done.
 
   Key insight: The search index is built at startup by scraping the OpenAPI
-  specs from the developer portal. The LLM never needs to see all 1500
+  specs from the developer portal. The LLM never needs to see all 2100+
   endpoint schemas — it pulls exactly what it needs, when it needs it.
   This is the "invocation pattern" for MCP servers.
 ]
@@ -415,10 +416,10 @@
         width: 100%,
         align(center)[
           #text(fill: white, weight: "bold", size: 0.9em)[Aruba Central] \
-          #text(fill: hpe-green, size: 0.7em)[~1 500 endpoints]
+          #text(fill: hpe-green, size: 0.7em)[2 100+ endpoints]
           #v(8pt)
           #text(fill: white, weight: "bold", size: 0.9em)[GreenLake] \
-          #text(fill: hpe-green, size: 0.7em)[~60 endpoints]
+          #text(fill: hpe-green, size: 0.7em)[+ GreenLake APIs]
         ],
       ),
     )
@@ -663,7 +664,7 @@
 
   Total: 11 tools that give access to the entire platform. The
   invocation pattern means these 11 tools replace what would otherwise
-  be 1500+ individual tools.
+  be 2100+ individual tools.
 ]
 
 

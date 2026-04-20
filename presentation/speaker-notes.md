@@ -51,7 +51,7 @@
 
 **Key points:**
 - "Aruba Central verfolgt eine API-First-Strategie"
-- ~1500 Central Endpoints + ~60 GreenLake Endpoints
+- 2100+ Endpoints über 50 API-Kategorien (Central + GreenLake)
 - Vollständige OpenAPI-Spezifikationen auf developer.arubanetworks.com
 - Monitoring, Konfiguration, Alerting, Firmware, Topologie, Troubleshooting...
 - "Das ist die Grundlage, die den MCP Server überhaupt möglich macht"
@@ -65,7 +65,7 @@
 
 **Key points:**
 - "Bei anderen Plattformen mit 20-30 APIs kann man 1:1 mappen — ein Endpoint,
-  ein Tool. Bei 1500 Endpoints geht das nicht."
+  ein Tool. Bei 2100 Endpoints geht das nicht."
 - Naiver Ansatz: Jeder Endpoint wird ein MCP Tool → Millionen von Tokens allein
   für die Tool-Definitionen → sprengt jedes Context Window
 - Auch "häufige Endpoints vorladen" ist fragil und unvollständig
@@ -80,13 +80,13 @@
 **Key points:**
 - Drei Phasen: Search → Discover → Execute
 - **Search:** unified_search("vlan") durchsucht einen BM25 Full-Text Index
-  über alle 1500+ Endpoints. Liefert eine gerankte Liste: method, path, summary.
+  über alle 2100+ Endpoints. Liefert eine gerankte Liste: method, path, summary.
 - **Discover:** get_api_endpoint_detail() holt das vollständige OpenAPI Schema —
   Parameter, Request Body, Response Format. Jetzt weiß der LLM genau, wie er
   den Endpoint aufrufen muss.
 - **Execute:** call_central_api() mit den richtigen Parametern.
 - "Der LLM lernt die API on-the-fly — keine vorgeladenen Schemas nötig."
-- "Drei generische Tools ersetzen, was ansonsten 1500 einzelne Tools wären."
+- "Drei generische Tools ersetzen, was ansonsten 2100 einzelne Tools wären."
 - Der Suchindex wird beim Start aus den gescrapten OpenAPI-Specs aufgebaut.
 
 ---
@@ -157,7 +157,7 @@ Quick walkthrough:
 4. **Scripts:** Mehrstufige Automatisierung
 
 "11 Tools geben Zugang zur gesamten Plattform. Das Invocation Pattern heißt:
-diese 11 Tools ersetzen, was ansonsten 1500+ einzelne Tools wären."
+diese 11 Tools ersetzen, was ansonsten 2100+ einzelne Tools wären."
 
 ---
 
