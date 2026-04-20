@@ -65,10 +65,12 @@
 
 **Key points:**
 - "Bei anderen Plattformen mit 20-30 APIs kann man 1:1 mappen — ein Endpoint,
-  ein Tool. Bei 2100 Endpoints geht das nicht."
-- Naiver Ansatz: Jeder Endpoint wird ein MCP Tool → Millionen von Tokens allein
-  für die Tool-Definitionen → sprengt jedes Context Window
-- Auch "häufige Endpoints vorladen" ist fragil und unvollständig
+  ein Tool. Bei 2121 Endpoints geht das nicht."
+- Naiver Ansatz: Jeder Endpoint wird ein MCP Tool — wir haben es gemessen:
+  durchschnittlich ~8200 Tokens pro Endpoint-Schema, insgesamt ~17,4 Millionen
+  Tokens. Das ist 88× das größte verfügbare Context Window.
+- Einzelne Endpoints wie Roles & Policy brauchen allein 250 KB — größer als
+  die meisten Context Windows
 - "Wir brauchen einen anderen Ansatz — das Invocation Pattern"
 
 ---

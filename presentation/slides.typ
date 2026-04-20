@@ -220,10 +220,11 @@
     #dim-box[Naïve approach: 1:1 mapping][
       1 API endpoint = 1 MCP tool \
       \
-      ~2 100 tools × full schemas \
-      = *millions of tokens* \
+      2 121 tools × ~8 200 tokens avg \
+      = *~17.4 million tokens* \
+      = *88 × the context window* \
       \
-      #text(fill: red, weight: "bold")[⛔ Context window explosion]
+      #text(fill: red, weight: "bold")[⛔ Impossible]
     ]
   ],
   align(horizon, text(size: 3em, fill: hpe-gray)[→]),
@@ -249,11 +250,12 @@
   ~60 seconds. This is the core design insight.
 
   - Other MCP servers for simple platforms can map 1 API = 1 tool
-  - With 2100+ endpoints, that's impossible — the tool list alone would
-    exceed the LLM's context window
-  - Even pre-loading schemas for "likely" endpoints is wasteful and fragile
-  - The invocation pattern solves this: instead of pre-loading, the LLM
-    *discovers* the right API at runtime, reads its schema, then calls it
+  - We measured: 2121 endpoints average ~8200 tokens each for their full schemas
+  - 1:1 mapping = ~17.4 million tokens just for tool definitions
+  - That's 88× Claude's 200K context window — completely impossible
+  - Worst offenders: Roles & Policy endpoints average 250 KB each,
+    Interfaces average 143 KB — single endpoints bigger than most context windows
+  - The invocation pattern solves this: LLM *discovers* the right API at runtime
   - Only 3 tools needed: search, detail, call — universal gateway to all APIs
 ]
 
