@@ -115,6 +115,12 @@ def register_api_call_tools(mcp, settings: Settings, client: CentralClient):
                 "Set CENTRAL_BASE_URL, CENTRAL_CLIENT_ID, CENTRAL_CLIENT_SECRET."
             )
 
+        if settings.read_only and method.upper() in _WRITE_METHODS:
+            raise ToolError(
+                f"Server is in READ_ONLY mode; {method.upper()} requests are not permitted. "
+                "Network-side configuration changes are disabled."
+            )
+
         return _make_api_call(client, "central", path, method, query_params, body)
 
 
@@ -158,6 +164,12 @@ def register_greenlake_api_call_tools(mcp, settings: Settings, glp_client: Green
                 "GreenLake credentials not configured. "
                 "Set GREENLAKE_CLIENT_ID and GREENLAKE_CLIENT_SECRET in your .env file "
                 "(or GLP_CLIENT_ID / GLP_CLIENT_SECRET)."
+            )
+
+        if settings.read_only and method.upper() in _WRITE_METHODS:
+            raise ToolError(
+                f"Server is in READ_ONLY mode; {method.upper()} requests are not permitted. "
+                "Network-side configuration changes are disabled."
             )
 
         return _make_api_call(glp_client, "greenlake", path, method, query_params, body)

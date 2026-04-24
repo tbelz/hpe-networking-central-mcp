@@ -101,12 +101,14 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             }, indent=2)
 
         # API scope: structured Cypher query
+        method_filter = " AND e.method = 'GET' " if settings.read_only else " "
         cypher = (
             "MATCH (e:ApiEndpoint) "
             "WHERE (lower(e.path) CONTAINS lower($q) "
             "   OR lower(e.summary) CONTAINS lower($q) "
             "   OR lower(e.operationId) CONTAINS lower($q) "
             "   OR lower(e.category) CONTAINS lower($q)) "
+            f"{method_filter}"
         )
         params: dict[str, Any] = {"q": query, "lim": limit}
 
@@ -168,7 +170,8 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
 
         rows = gm.query(
             "MATCH (e:ApiEndpoint) "
-            "RETURN e.category AS category, count(e) AS cnt "
+            + ("WHERE e.method = 'GET' " if settings.read_only else "")
+            + "RETURN e.category AS category, count(e) AS cnt "
             "ORDER BY category",
             read_only=True,
         )
@@ -202,6 +205,14 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         if gm is None or not gm.is_available:
             return json.dumps({"error": "Graph database not available.",
                                "hint": "The graph database may still be loading. Try again shortly."})
+
+        if settings.read_only and method.upper() != "GET":
+            return json.dumps({
+                "error": (
+                    f"Endpoint {method.upper()} {path} is hidden because the server "
+                    "is in READ_ONLY mode. Only GET endpoints are exposed."
+                ),
+            })
 
         rows = gm.query(
             "MATCH (e:ApiEndpoint {endpoint_id: $eid}) "

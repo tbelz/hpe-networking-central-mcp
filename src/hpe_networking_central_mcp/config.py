@@ -38,6 +38,11 @@ class Settings:
     # GitHub release repository for knowledge DB (owner/repo)
     knowledge_release_repo: str = ""
 
+    # Read-only mode: refuse mutating Central / GreenLake API calls and hide
+    # non-GET endpoints from the API catalog tools. Local graph writes and
+    # script CRUD/execution remain available.
+    read_only: bool = False
+
     @property
     def parsed_glp_included_slugs(self) -> set[str] | None:
         """Parse ``glp_included_slugs`` into a set, or ``None`` for all."""
@@ -63,6 +68,13 @@ class Settings:
         return bool(self.effective_glp_client_id and self.effective_glp_client_secret)
 
 
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _parse_bool(value: str) -> bool:
+    return value.strip().lower() in _TRUTHY
+
+
 def load_settings() -> Settings:
     """Load settings from environment variables."""
     return Settings(
@@ -79,4 +91,5 @@ def load_settings() -> Settings:
         graph_db_path=Path(os.environ.get("GRAPH_DB_PATH", "/data/graph_db")),
         graph_ipc_socket=Path(os.environ.get("GRAPH_IPC_SOCKET", "/tmp/ladybug_graph.sock")),
         knowledge_release_repo=os.environ.get("KNOWLEDGE_RELEASE_REPO", "").strip(),
+        read_only=_parse_bool(os.environ.get("READ_ONLY", "")),
     )
