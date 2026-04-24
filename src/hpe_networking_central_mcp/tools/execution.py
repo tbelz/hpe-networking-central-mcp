@@ -115,9 +115,18 @@ def _build_env(settings: Settings) -> dict[str, str]:
     env["GRAPH_DB_PATH"] = str(settings.graph_db_path)
     env["GRAPH_IPC_SOCKET"] = str(settings.graph_ipc_socket)
     # Propagate read-only mode so script subprocesses' HTTP clients refuse
-    # mutating Central / GreenLake API calls (enforced in _http_core).
+    # mutating Central / GreenLake API calls (enforced in _http_core for the
+    # central_helpers path, and at the httpx layer via the sitecustomize
+    # module shipped in script_runtime/ for raw-httpx bypasses).
     if settings.read_only:
         env["READ_ONLY"] = "true"
+        # Prepend script_runtime/ so its sitecustomize.py is auto-imported
+        # by Python at interpreter startup and installs the httpx guard.
+        runtime_dir = str(Path(__file__).resolve().parent.parent / "script_runtime")
+        existing_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            runtime_dir + os.pathsep + existing_pp if existing_pp else runtime_dir
+        )
     else:
         env.pop("READ_ONLY", None)
     # Ensure no stale values leak through from host environment

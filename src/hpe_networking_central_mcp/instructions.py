@@ -126,11 +126,15 @@ configuration changes are NOT permitted in this session:
     unified_search, list_api_categories, and get_api_endpoint_detail.
 
 Local operations remain available for analysis: write_graph,
-save_script, delete_script, and execute_script (as long as the script
-itself only performs GET requests).
+save_script, and execute_script (as long as the script itself only
+performs GET requests against Central / GreenLake).
 
-Do NOT attempt to make configuration changes to the Central / GreenLake
-network. Only read-only inspection and reporting are permitted.
+Note: scripts run as subprocesses with OAuth credentials available in
+their environment. READ_ONLY is enforced at the HTTP-client layer
+(BaseHTTPClient and httpx) but is an agent behavioural guardrail, not
+a hard sandbox. Do NOT write scripts that attempt to bypass these
+guards (e.g. by using raw urllib / requests / sockets). Only read-only
+inspection and reporting are permitted.
 
 ────────────────────────────────────────────────────────────────────────
 

@@ -255,6 +255,23 @@ class TestBuildEnvPropagation:
         env = _build_env(s)
         assert env.get("READ_ONLY") == "true"
 
+    def test_pythonpath_includes_script_runtime_when_readonly(self, monkeypatch):
+        monkeypatch.delenv("READ_ONLY", raising=False)
+        monkeypatch.delenv("PYTHONPATH", raising=False)
+        s = Settings(
+            central_base_url="https://x",
+            central_client_id="cid",
+            central_client_secret="csec",
+            read_only=True,
+        )
+        env = _build_env(s)
+        pp = env.get("PYTHONPATH", "")
+        assert "script_runtime" in pp
+        # The sitecustomize.py shipped in script_runtime must exist so that
+        # Python actually picks it up at interpreter startup.
+        first_entry = pp.split(os.pathsep)[0]
+        assert (Path(first_entry) / "sitecustomize.py").exists()
+
     def test_read_only_not_set_when_false(self, monkeypatch):
         monkeypatch.delenv("READ_ONLY", raising=False)
         s = Settings(
@@ -267,6 +284,93 @@ class TestBuildEnvPropagation:
         # Either absent or explicitly empty/false — must not be truthy
         val = env.get("READ_ONLY", "")
         assert val.lower() not in ("1", "true", "yes", "on")
+
+
+# ── sitecustomize httpx guard ───────────────────────────────────────
+
+
+class TestScriptRuntimeHttpxGuard:
+    """Verify that the sitecustomize shipped to script subprocesses
+    monkey-patches httpx so raw-httpx scripts cannot bypass READ_ONLY."""
+
+    def test_httpx_post_blocked_in_subprocess(self, tmp_path):
+        runtime_dir = (
+            Path(__file__).parent.parent
+            / "src"
+            / "hpe_networking_central_mcp"
+            / "script_runtime"
+        )
+        assert (runtime_dir / "sitecustomize.py").exists()
+
+        script = tmp_path / "evil.py"
+        script.write_text(
+            "import sys, httpx\n"
+            "try:\n"
+            "    httpx.Client().post('https://example.invalid/x', json={'a': 1})\n"
+            "except httpx.HTTPError as e:\n"
+            "    msg = str(e)\n"
+            "    if 'READ_ONLY' in msg:\n"
+            "        print('BLOCKED'); sys.exit(0)\n"
+            "    print('UNEXPECTED:' + msg); sys.exit(2)\n"
+            "print('NOT_BLOCKED'); sys.exit(1)\n",
+            encoding="utf-8",
+        )
+
+        import subprocess
+        env = os.environ.copy()
+        env["READ_ONLY"] = "true"
+        env["PYTHONPATH"] = str(runtime_dir) + os.pathsep + env.get("PYTHONPATH", "")
+        result = subprocess.run(
+            [sys.executable, str(script)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        assert result.returncode == 0, (
+            f"expected sitecustomize to block POST; "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "BLOCKED" in result.stdout
+
+    def test_httpx_get_allowed_when_readonly(self, tmp_path):
+        """GET must not be blocked by the sitecustomize guard."""
+        runtime_dir = (
+            Path(__file__).parent.parent
+            / "src"
+            / "hpe_networking_central_mcp"
+            / "script_runtime"
+        )
+
+        script = tmp_path / "ok.py"
+        # We don't actually want to make a real network call — just verify
+        # that the guard does not raise *before* httpx tries to connect.
+        # A connection error is fine; a "READ_ONLY" HTTPError is not.
+        script.write_text(
+            "import sys, httpx\n"
+            "try:\n"
+            "    httpx.Client(timeout=0.1).get('http://127.0.0.1:1/x')\n"
+            "except httpx.HTTPError as e:\n"
+            "    if 'READ_ONLY' in str(e):\n"
+            "        print('WRONGLY_BLOCKED'); sys.exit(1)\n"
+            "    print('OK_CONNECT_ERROR'); sys.exit(0)\n"
+            "print('OK_RESPONSE'); sys.exit(0)\n",
+            encoding="utf-8",
+        )
+
+        import subprocess
+        env = os.environ.copy()
+        env["READ_ONLY"] = "true"
+        env["PYTHONPATH"] = str(runtime_dir) + os.pathsep + env.get("PYTHONPATH", "")
+        result = subprocess.run(
+            [sys.executable, str(script)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        assert result.returncode == 0
+        assert "WRONGLY_BLOCKED" not in result.stdout
 
 
 # ── Server instructions banner ──────────────────────────────────────

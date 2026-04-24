@@ -197,7 +197,7 @@ GREENLAKE_CLIENT_SECRET=your_glp_client_secret
 | `GREENLAKE_CLIENT_SECRET` | No | Central client secret | GreenLake Platform client secret |
 | `GLP_BASE_URL` | No | `https://global.api.greenlake.hpe.com` | GreenLake API base URL |
 | `GLP_INCLUDED_SLUGS` | No | — | Comma-separated service slugs to include (or empty for default set) |
-| `READ_ONLY` | No | `false` | When set to `true`/`1`/`yes`, the server refuses any non-GET Central / GreenLake API call (both via tools and from inside scripts) and hides mutating endpoints from `unified_search`, `list_api_categories`, and `get_api_endpoint_detail`. Local operations (`write_graph`, `save_script`, `execute_script`) remain available. |
+| `READ_ONLY` | No | `false` | When set to `true`/`1`/`yes`/`on` (case-insensitive), the server refuses any non-GET Central / GreenLake API call (both via tools and from inside scripts) and hides mutating endpoints from `unified_search`, `list_api_categories`, and `get_api_endpoint_detail`. Local operations (`write_graph`, `save_script`, `execute_script`) remain available. |
 
 ### Read-Only Mode
 
@@ -216,6 +216,17 @@ Start the container with `READ_ONLY=true` to lock the server into a
 - Local-only operations (graph writes, saving / editing scripts, executing
   scripts that only read) continue to work — useful for auditing and
   reporting workflows.
+
+> **Scope of enforcement.** READ_ONLY is an *agent behavioural guardrail*,
+> not a hard sandbox. Scripts run as subprocesses with the OAuth
+> credentials available in their environment. Enforcement happens at the
+> HTTP-client layer in two places: `BaseHTTPClient._request` (covers
+> `central_helpers.api` / `glp`, the documented script API) and an
+> `httpx.Client` / `httpx.AsyncClient` monkey-patch installed via a
+> `sitecustomize` module that is added to the script subprocess
+> `PYTHONPATH` only when READ_ONLY is active. A deliberately malicious
+> script that uses `urllib`, `requests`, or raw sockets could still issue
+> mutating calls — do not expose READ_ONLY mode to untrusted authors.
 
 ## Claude Desktop Configuration
 
