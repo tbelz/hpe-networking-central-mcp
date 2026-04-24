@@ -10,6 +10,7 @@ This file is also copied into the script library directory at startup so that
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -17,6 +18,13 @@ from datetime import datetime, timezone
 import httpx
 
 TOKEN_URL = "https://sso.common.cloud.hpe.com/as/token.oauth2"
+
+_READ_ONLY_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _read_only_enabled() -> bool:
+    """Return True if the READ_ONLY env var is set to a truthy value."""
+    return os.environ.get("READ_ONLY", "").strip().lower() in _READ_ONLY_TRUTHY
 
 
 # ── Error hierarchy ──────────────────────────────────────────────────
@@ -178,6 +186,16 @@ class BaseHTTPClient:
         _retry: bool = True,
     ) -> dict:
         """Internal request method with auto-retry on 401 and 429."""
+        # READ_ONLY enforcement: refuse any non-GET request when the
+        # READ_ONLY env var is truthy. This is the single chokepoint that
+        # covers both the server-side CentralClient/GreenLakeClient and
+        # the script-side CentralAPI/GreenLakeAPI helpers.
+        if method.upper() != "GET" and _read_only_enabled():
+            raise CentralAPIError(
+                403,
+                "READ_ONLY",
+                f"Server is in READ_ONLY mode; {method.upper()} not permitted.",
+            )
         self._ensure_token()
         url = f"{self._base_url}/{path.lstrip('/')}"
         resp = self._http.request(

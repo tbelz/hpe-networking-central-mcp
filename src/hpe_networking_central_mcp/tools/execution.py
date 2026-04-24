@@ -114,6 +114,12 @@ def _build_env(settings: Settings) -> dict[str, str]:
     env["GLP_BASE_URL"] = settings.glp_base_url
     env["GRAPH_DB_PATH"] = str(settings.graph_db_path)
     env["GRAPH_IPC_SOCKET"] = str(settings.graph_ipc_socket)
+    # Propagate read-only mode so script subprocesses' HTTP clients refuse
+    # mutating Central / GreenLake API calls (enforced in _http_core).
+    if settings.read_only:
+        env["READ_ONLY"] = "true"
+    else:
+        env.pop("READ_ONLY", None)
     # Ensure no stale values leak through from host environment
     for key in ("BASE_URL", "CLIENT_ID", "CLIENT_SECRET"):
         env.pop(key, None)
