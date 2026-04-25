@@ -1,4 +1,4 @@
-"""Scrape OpenAPI specs from ReadMe.io-hosted developer documentation.
+"""Sync OpenAPI specs from ReadMe.io-hosted developer documentation.
 
 Uses the ReadMe ``.md`` URL protocol: appending ``.md`` to any reference
 page URL returns the full OpenAPI 3.x spec embedded in a markdown code block.
@@ -8,16 +8,29 @@ Discovery flow:
     2. Extract endpoint slugs from sidebar ``<a href>`` links.
     3. For each slug, fetch ``{slug}.md`` to get the per-endpoint OAS spec.
     4. Cache specs to disk with TTL-based freshness.
+
+Resilience:
+    * A realistic browser ``User-Agent`` is sent on every request.
+    * Per-host pacing keeps request rates well below the upstream's 429
+      threshold.
+    * Transient HTTP errors (429, 5xx) are retried with exponential backoff
+      and ``Retry-After`` honoured when present.
+    * Failures are summarised with structured counts (HTTP status histogram)
+      so unhealthy sync runs can be diagnosed quickly from the logs.
 """
 
 from __future__ import annotations
 
 import json
+import random
 import re
+import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 import structlog
@@ -26,12 +39,35 @@ logger = structlog.get_logger("oas_scraper")
 
 DOCS_HOST = "https://developer.arubanetworks.com"
 
+# Browser-like UA — many CDNs (Akamai/Cloudflare) increasingly block plain
+# httpx/python defaults outright.  Keep this string realistic and current.
+_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+_DEFAULT_HEADERS = {
+    "User-Agent": _USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+# Tunables — keep conservative.  ReadMe.io starts returning 429 above ~5
+# requests/sec for unauthenticated clients, so we cap well below that.
+_HTTP_TIMEOUT = 30.0
+_MAX_WORKERS = 3
+_MIN_INTERVAL_SECONDS = 0.25  # ≈ 4 requests/sec/host
+_MAX_RETRIES = 5
+_BACKOFF_BASE = 1.0
+_BACKOFF_CAP = 30.0
+
+
 # ----- Spec source definitions ------------------------------------------------
 
 
 @dataclass
 class SpecSource:
-    """A ReadMe.io API documentation site to scrape.
+    """A ReadMe.io API documentation site to fetch.
 
     Each source maps to one ``/reference`` site.  Endpoint slugs are
     auto-discovered from the server-side rendered sidebar HTML.
@@ -52,6 +88,47 @@ DEFAULT_SOURCES: list[SpecSource] = [
     SpecSource(name="MRT", reference_path="/new-central/reference"),
     SpecSource(name="Config", reference_path="/new-central-config/reference"),
 ]
+
+
+# ----- Per-host pacing --------------------------------------------------------
+
+
+class _HostPacer:
+    """Tiny per-host serialiser that enforces a minimum interval between
+    requests against the same origin.
+
+    Composes well with ``ThreadPoolExecutor`` and avoids needing async glue.
+    """
+
+    def __init__(self, min_interval: float) -> None:
+        self._min_interval = min_interval
+        self._locks: dict[str, threading.Lock] = {}
+        self._next_allowed: dict[str, float] = {}
+        self._registry_lock = threading.Lock()
+
+    def _lock_for(self, host: str) -> threading.Lock:
+        with self._registry_lock:
+            lock = self._locks.get(host)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[host] = lock
+            return lock
+
+    def wait(self, url: str) -> None:
+        host = urlsplit(url).netloc
+        if not host:
+            return
+        lock = self._lock_for(host)
+        with lock:
+            now = time.monotonic()
+            next_ok = self._next_allowed.get(host, 0.0)
+            if next_ok > now:
+                time.sleep(next_ok - now)
+                now = time.monotonic()
+            self._next_allowed[host] = now + self._min_interval
+
+
+_PACER = _HostPacer(_MIN_INTERVAL_SECONDS)
 
 
 # ----- Slug discovery ---------------------------------------------------------
@@ -126,15 +203,84 @@ def _write_cache(path: Path, spec: dict) -> None:
 
 # ----- Fetching ---------------------------------------------------------------
 
-_HTTP_TIMEOUT = 30.0
-_MAX_WORKERS = 5
+
+class FetchError(Exception):
+    """Wraps the last error of a failed fetch with classification info."""
+
+    def __init__(self, message: str, *, status: int | None, kind: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.kind = kind  # one of: "http", "network", "timeout"
+
+
+def _retry_after_seconds(resp: httpx.Response) -> float | None:
+    """Parse ``Retry-After`` header; returns seconds or None."""
+    val = resp.headers.get("Retry-After")
+    if not val:
+        return None
+    try:
+        return max(0.0, float(val))
+    except ValueError:
+        return None
+
+
+def _backoff_delay(attempt: int, retry_after: float | None) -> float:
+    """Exponential backoff with jitter, honouring ``Retry-After``."""
+    if retry_after is not None:
+        return min(retry_after, _BACKOFF_CAP)
+    base = min(_BACKOFF_BASE * (2 ** attempt), _BACKOFF_CAP)
+    return base * (0.5 + random.random() / 2)
 
 
 def _fetch_page(url: str) -> str:
-    """Fetch a page and return the response text."""
-    resp = httpx.get(url, timeout=_HTTP_TIMEOUT, follow_redirects=True)
-    resp.raise_for_status()
-    return resp.text
+    """Fetch a page, return text. Raises :class:`FetchError` on failure."""
+    last_status: int | None = None
+    last_kind = "network"
+    last_msg = ""
+    for attempt in range(_MAX_RETRIES):
+        _PACER.wait(url)
+        try:
+            resp = httpx.get(
+                url,
+                timeout=_HTTP_TIMEOUT,
+                follow_redirects=True,
+                headers=_DEFAULT_HEADERS,
+            )
+        except httpx.TimeoutException as e:
+            last_kind = "timeout"
+            last_msg = str(e) or "timeout"
+            time.sleep(_backoff_delay(attempt, None))
+            continue
+        except httpx.HTTPError as e:
+            last_kind = "network"
+            last_msg = str(e) or e.__class__.__name__
+            time.sleep(_backoff_delay(attempt, None))
+            continue
+
+        # Retryable HTTP statuses: 429 and 5xx.
+        if resp.status_code == 429 or 500 <= resp.status_code < 600:
+            last_status = resp.status_code
+            last_kind = "http"
+            last_msg = f"HTTP {resp.status_code}"
+            delay = _backoff_delay(attempt, _retry_after_seconds(resp))
+            time.sleep(delay)
+            continue
+
+        if resp.is_success:
+            return resp.text
+
+        # Non-retryable HTTP status (e.g. 4xx other than 429).
+        raise FetchError(
+            f"HTTP {resp.status_code} for {url}",
+            status=resp.status_code,
+            kind="http",
+        )
+
+    raise FetchError(
+        f"giving up after {_MAX_RETRIES} attempts ({last_msg}) for {url}",
+        status=last_status,
+        kind=last_kind,
+    )
 
 
 def _fetch_spec_for_slug(
@@ -143,60 +289,101 @@ def _fetch_spec_for_slug(
     slug: str,
     cache_dir: Path,
     ttl: int,
-) -> tuple[str, dict | None, bool]:
+) -> tuple[str, dict | None, bool, str | None]:
     """Fetch one endpoint's OAS spec via the ``.md`` protocol.
 
-    Returns (slug, spec_or_None, was_cached).
+    Returns ``(slug, spec_or_None, was_cached, failure_reason_or_None)``.
     """
     cp = _cache_path(cache_dir, source_name, slug)
 
     if _is_fresh(cp, ttl):
         spec = _read_cache(cp)
         if spec:
-            return slug, spec, True
+            return slug, spec, True, None
 
     url = f"{DOCS_HOST}{reference_path}/{slug}.md"
     try:
         text = _fetch_page(url)
-        spec = _extract_oas_from_markdown(text)
-        if spec:
-            _write_cache(cp, spec)
-            return slug, spec, False
-        logger.warning("oas_no_definition", source=source_name, slug=slug)
-        return slug, None, False
-    except Exception as e:
-        logger.warning("oas_fetch_failed", source=source_name, slug=slug, error=str(e))
-        # Fall back to stale cache if available
+    except FetchError as e:
+        logger.warning(
+            "oas_fetch_failed",
+            source=source_name,
+            slug=slug,
+            status=e.status,
+            kind=e.kind,
+            error=str(e),
+        )
         spec = _read_cache(cp)
         if spec:
             logger.info("oas_using_stale_cache", source=source_name, slug=slug)
-            return slug, spec, True
-        return slug, None, False
+            return slug, spec, True, None
+        reason = f"http_{e.status}" if e.status else e.kind
+        return slug, None, False, reason
+
+    spec = _extract_oas_from_markdown(text)
+    if spec:
+        _write_cache(cp, spec)
+        return slug, spec, False, None
+
+    logger.warning("oas_no_definition", source=source_name, slug=slug)
+    return slug, None, False, "no_oas_block"
 
 
 # ----- Public API -------------------------------------------------------------
 
 
-def discover_and_scrape(
+@dataclass
+class SourceReport:
+    """Per-source counters returned by :func:`discover_and_sync`."""
+
+    name: str
+    discovered: int = 0
+    fetched_specs: int = 0
+    cached_specs: int = 0
+    missing_specs: int = 0
+    discovery_error: str | None = None
+    failure_reasons: Counter = field(default_factory=Counter)
+
+    @property
+    def total_specs(self) -> int:
+        return self.fetched_specs + self.cached_specs
+
+    def as_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "discovered": self.discovered,
+            "fetched_specs": self.fetched_specs,
+            "cached_specs": self.cached_specs,
+            "missing_specs": self.missing_specs,
+            "discovery_error": self.discovery_error,
+            "failure_reasons": dict(self.failure_reasons),
+        }
+
+
+def discover_and_sync(
     sources: list[SpecSource] | None = None,
     cache_dir: Path = Path("/data/oas_cache"),
     ttl: int = 86400,
-) -> list[dict]:
-    """Scrape OpenAPI specs from all configured sources.
+) -> tuple[list[dict], list[SourceReport]]:
+    """Sync OpenAPI specs from all configured sources.
 
     For each source:
-    1. Fetch the root reference page to discover endpoint slugs from the sidebar.
-    2. For each slug, fetch ``{slug}.md`` to get the per-endpoint OAS spec.
-    3. Cache specs to disk; reuse fresh caches (``ttl`` seconds).
+        1. Fetch the root reference page to discover endpoint slugs.
+        2. For each slug, fetch ``{slug}.md`` to get the per-endpoint OAS spec.
+        3. Cache specs to disk; reuse fresh caches (``ttl`` seconds).
 
-    Returns a list of parsed OpenAPI spec dicts.
+    Returns ``(all_specs, reports)`` where ``reports`` contains per-source
+    counters useful for downstream health checks.
     """
     if sources is None:
         sources = [SpecSource(s.name, s.reference_path) for s in DEFAULT_SOURCES]
 
     all_specs: list[dict] = []
+    reports: list[SourceReport] = []
 
     for source in sources:
+        report = SourceReport(name=source.name)
+        reports.append(report)
         logger.info("oas_source_start", source=source.name, path=source.reference_path)
 
         # Step 1: discover endpoint slugs from the sidebar HTML
@@ -205,21 +392,25 @@ def discover_and_scrape(
                 root_url = f"{DOCS_HOST}{source.reference_path}"
                 root_html = _fetch_page(root_url)
                 source.endpoint_slugs = _extract_endpoint_slugs(root_html)
-
                 logger.info(
                     "oas_slugs_discovered",
                     source=source.name,
                     count=len(source.endpoint_slugs),
                 )
-            except Exception as e:
-                logger.error("oas_discovery_failed", source=source.name, error=str(e))
+            except FetchError as e:
+                report.discovery_error = str(e)
+                logger.error(
+                    "oas_discovery_failed",
+                    source=source.name,
+                    status=e.status,
+                    kind=e.kind,
+                    error=str(e),
+                )
                 continue
 
-        # Step 2: fetch specs for each endpoint in parallel
-        cached_count = 0
-        fetched_count = 0
-        spec_count = 0
+        report.discovered = len(source.endpoint_slugs)
 
+        # Step 2: fetch specs for each endpoint in parallel
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
             futures = {
                 pool.submit(
@@ -234,44 +425,72 @@ def discover_and_scrape(
             }
 
             for future in as_completed(futures):
-                slug, spec, was_cached = future.result()
-                if was_cached:
-                    cached_count += 1
-                else:
-                    fetched_count += 1
-
+                slug, spec, was_cached, reason = future.result()
                 if spec:
                     all_specs.append(spec)
-                    spec_count += 1
+                    if was_cached:
+                        report.cached_specs += 1
+                    else:
+                        report.fetched_specs += 1
+                else:
+                    report.missing_specs += 1
+                    if reason:
+                        report.failure_reasons[reason] += 1
 
         logger.info(
             "oas_source_done",
             source=source.name,
-            specs=spec_count,
-            cached=cached_count,
-            fetched=fetched_count,
+            specs=report.total_specs,
+            cached=report.cached_specs,
+            fetched=report.fetched_specs,
+            missing=report.missing_specs,
+            failures=dict(report.failure_reasons),
         )
 
-    logger.info("oas_scrape_complete", total_specs=len(all_specs))
-    return all_specs
+    logger.info(
+        "oas_sync_complete",
+        total_specs=len(all_specs),
+        sources=[r.as_dict() for r in reports],
+    )
+    return all_specs, reports
+
+
+# Backwards-compatible alias kept so callers/tests using the old name keep
+# working.  Returns specs only; use :func:`discover_and_sync` if you also need
+# the per-source reports.
+def discover_and_scrape(
+    sources: list[SpecSource] | None = None,
+    cache_dir: Path = Path("/data/oas_cache"),
+    ttl: int = 86400,
+) -> list[dict]:
+    specs, _reports = discover_and_sync(sources=sources, cache_dir=cache_dir, ttl=ttl)
+    return specs
 
 
 # ----- SpecProvider wrapper ---------------------------------------------------
 
 
 class ReadMeSpecProvider:
-    """SpecProvider that scrapes OpenAPI specs from ReadMe.io-hosted docs.
+    """SpecProvider that pulls OpenAPI specs from ReadMe.io-hosted docs.
 
-    Wraps :func:`discover_and_scrape` to conform to the
+    Wraps :func:`discover_and_sync` to conform to the
     :class:`~hpe_networking_central_mcp.spec_provider.SpecProvider` protocol.
+
+    After :meth:`fetch_specs` runs, ``last_reports`` holds the per-source
+    counters from the most recent invocation.
     """
 
     def __init__(self, sources: list[SpecSource] | None = None) -> None:
         self._sources = sources
+        self.last_reports: list[SourceReport] = []
 
     @property
     def name(self) -> str:
         return "Central"
 
     def fetch_specs(self, cache_dir: Path, ttl: int) -> list[dict]:
-        return discover_and_scrape(sources=self._sources, cache_dir=cache_dir, ttl=ttl)
+        specs, reports = discover_and_sync(
+            sources=self._sources, cache_dir=cache_dir, ttl=ttl
+        )
+        self.last_reports = reports
+        return specs

@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: write          # Needed for creating releases
-  issues: write            # Needed for scrape-alert issues
+  issues: write            # Needed for knowledge-sync alert issues
 
 jobs:
   build-knowledge-db:
@@ -35,7 +35,25 @@ jobs:
       - name: Build knowledge database
         run: python scripts/build_knowledge_db.py --output-dir build --tar
 
-      - name: Check scrape health
+      - name: Ensure alert label exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Idempotently create the label used by the alert step below.
+          # `gh label create` exits non-zero if the label already exists, so
+          # we tolerate that and only fail on other errors.
+          gh label create knowledge-sync-alert \
+            --description "Auto-opened when the daily knowledge sync is degraded" \
+            --color B60205 2>/tmp/label.err || {
+            if grep -qiE "already exists|already in use" /tmp/label.err; then
+              echo "Label already exists — continuing."
+            else
+              cat /tmp/label.err >&2
+              exit 1
+            fi
+          }
+
+      - name: Check sync health
         id: health
         env:
           GH_TOKEN: ${{ github.token }}
@@ -43,49 +61,62 @@ jobs:
           NEW_EP=$(jq -r '.endpoint_count // 0' build/manifest.json)
           echo "new_ep=$NEW_EP" >> "$GITHUB_OUTPUT"
 
-          # Check for provider-level errors in scrape_health
-          ERRORS=$(jq -r '[.scrape_health // {} | to_entries[] | select(.value.status == "error")] | length' build/manifest.json)
+          # A provider is "bad" if it ended in error.  "degraded" is allowed
+          # because it still publishes useful data (e.g. partial coverage,
+          # WAF block on optional VSG docs).
+          BAD=$(jq -r '[.sync_health // {} | to_entries[] | select(.value.status == "error")] | length' build/manifest.json)
+          DEGRADED=$(jq -r '[.sync_health // {} | to_entries[] | select(.value.status == "degraded")] | length' build/manifest.json)
+          DEGRADED_NAMES=$(jq -r '[.sync_health // {} | to_entries[] | select(.value.status == "degraded") | .key] | join(", ")' build/manifest.json)
+          echo "Providers in error: $BAD; degraded: $DEGRADED ($DEGRADED_NAMES)"
 
-          # Fetch previous release to compare counts
           PREV=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)
           if [ -z "$PREV" ]; then
-            echo "No previous release — skipping health comparison."
-            echo "healthy=true" >> "$GITHUB_OUTPUT"
+            echo "No previous release — skipping coverage comparison."
+            if [ "$BAD" -gt 0 ]; then
+              echo "healthy=false" >> "$GITHUB_OUTPUT"
+              echo "reason=${BAD} provider(s) errored (see sync_health in manifest)" >> "$GITHUB_OUTPUT"
+            else
+              echo "healthy=true" >> "$GITHUB_OUTPUT"
+            fi
             exit 0
           fi
 
           gh release download "$PREV" --pattern manifest.json --dir /tmp/prev 2>/dev/null || {
             echo "Could not download previous manifest — skipping comparison."
-            echo "healthy=true" >> "$GITHUB_OUTPUT"
+            if [ "$BAD" -gt 0 ]; then
+              echo "healthy=false" >> "$GITHUB_OUTPUT"
+              echo "reason=${BAD} provider(s) errored (see sync_health in manifest)" >> "$GITHUB_OUTPUT"
+            else
+              echo "healthy=true" >> "$GITHUB_OUTPUT"
+            fi
             exit 0
           }
 
           OLD_EP=$(jq -r '.endpoint_count // 0' /tmp/prev/manifest.json)
-          echo "Previous: ${OLD_EP} endpoints, Current: ${NEW_EP} endpoints, Errors: ${ERRORS}"
+          echo "Previous: ${OLD_EP} endpoints, Current: ${NEW_EP} endpoints"
 
-          # Flag unhealthy if >50% drop OR any provider fully errored
-          if [ "$OLD_EP" -gt 0 ] && [ "$NEW_EP" -lt $(( OLD_EP / 2 )) ]; then
+          # Flag unhealthy if >25% drop OR any provider fully errored
+          if [ "$BAD" -gt 0 ]; then
+            echo "⚠ Provider error detected"
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+            echo "reason=${BAD} provider(s) errored (see sync_health in manifest)" >> "$GITHUB_OUTPUT"
+          elif [ "$OLD_EP" -gt 0 ] && [ "$NEW_EP" -lt $(( OLD_EP * 75 / 100 )) ]; then
             echo "⚠ Significant endpoint drop detected (${OLD_EP} → ${NEW_EP})"
             echo "healthy=false" >> "$GITHUB_OUTPUT"
-            echo "reason=Endpoint count dropped from ${OLD_EP} to ${NEW_EP} (>50% loss)" >> "$GITHUB_OUTPUT"
-          elif [ "$ERRORS" -gt 0 ]; then
-            echo "⚠ Provider errors detected"
-            echo "healthy=false" >> "$GITHUB_OUTPUT"
-            echo "reason=${ERRORS} provider(s) returned errors (see scrape_health in manifest)" >> "$GITHUB_OUTPUT"
+            echo "reason=Endpoint count dropped from ${OLD_EP} to ${NEW_EP} (>25% loss)" >> "$GITHUB_OUTPUT"
           else
             echo "healthy=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create scrape-alert issue (if unhealthy)
+      - name: Open knowledge-sync alert issue (if unhealthy)
         if: steps.health.outputs.healthy == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Check for existing open scrape-alert issue to avoid duplicates
-          EXISTING=$(gh issue list --label scrape-alert --state open --json number -q '.[0].number' 2>/dev/null || true)
+          EXISTING=$(gh issue list --label knowledge-sync-alert --state open --json number -q '.[0].number' 2>/dev/null || true)
           if [ -n "$EXISTING" ]; then
-            echo "Open scrape-alert issue #${EXISTING} already exists — adding comment."
-            gh issue comment "$EXISTING" --body "Scrape health check failed again on $(date -u +%Y-%m-%dT%H:%M:%SZ).
+            echo "Open alert issue #${EXISTING} already exists — adding comment."
+            gh issue comment "$EXISTING" --body "Knowledge sync health check failed again on $(date -u +%Y-%m-%dT%H:%M:%SZ).
 
           **Reason:** ${{ steps.health.outputs.reason }}
           **Endpoint count:** ${{ steps.health.outputs.new_ep }}
@@ -93,9 +124,9 @@ jobs:
           See [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
           else
             gh issue create \
-              --title "Scrape health degraded: ${{ steps.health.outputs.reason }}" \
-              --label scrape-alert \
-              --body "The daily knowledge DB build detected a scrape health issue.
+              --title "Knowledge sync degraded: ${{ steps.health.outputs.reason }}" \
+              --label knowledge-sync-alert \
+              --body "The daily knowledge DB build detected a sync health issue.
 
           **Reason:** ${{ steps.health.outputs.reason }}
           **Endpoint count:** ${{ steps.health.outputs.new_ep }}
@@ -103,18 +134,17 @@ jobs:
 
           This issue was auto-created. It will be auto-closed when a healthy build succeeds.
 
-          Check \`build/manifest.json\` → \`scrape_health\` for per-provider details."
+          Check \`build/manifest.json\` → \`sync_health\` for per-provider details."
           fi
 
-      - name: Auto-close scrape-alert issues (if healthy)
+      - name: Auto-close knowledge-sync alert issues (if healthy)
         if: steps.health.outputs.healthy == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Close any open scrape-alert issues since the build is healthy
-          gh issue list --label scrape-alert --state open --json number -q '.[].number' 2>/dev/null | while read -r NUM; do
+          gh issue list --label knowledge-sync-alert --state open --json number -q '.[].number' 2>/dev/null | while read -r NUM; do
             if [ -n "$NUM" ]; then
-              gh issue close "$NUM" --comment "Scrape health restored — auto-closing. Endpoint count: ${{ steps.health.outputs.new_ep }}"
+              gh issue close "$NUM" --comment "Knowledge sync health restored — auto-closing. Endpoint count: ${{ steps.health.outputs.new_ep }}"
               echo "Closed issue #${NUM}"
             fi
           done
@@ -125,7 +155,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Fetch manifest from latest release (if any)
           PREV=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)
           if [ -z "$PREV" ]; then
             echo "No previous release found — publishing."
@@ -133,14 +162,12 @@ jobs:
             exit 0
           fi
 
-          # Download previous manifest
           gh release download "$PREV" --pattern manifest.json --dir /tmp/prev 2>/dev/null || {
             echo "Could not download previous manifest — publishing."
             echo "changed=true" >> "$GITHUB_OUTPUT"
             exit 0
           }
 
-          # Compare endpoint and category counts
           OLD_EP=$(jq -r '.endpoint_count // 0' /tmp/prev/manifest.json)
           NEW_EP=$(jq -r '.endpoint_count // 0' build/manifest.json)
           OLD_CAT=$(jq -r '.category_count // 0' /tmp/prev/manifest.json)
@@ -174,7 +201,7 @@ jobs:
           name: "Knowledge DB ${{ steps.tag.outputs.tag }}"
           body: |
             Auto-generated knowledge database snapshot.
-            Contains scraped API endpoints, VSG documentation sections, and seed scripts for the MCP server.
+            Contains the API endpoints, VSG documentation sections, and seed scripts the MCP server uses for offline lookups.
           files: |
             build/knowledge_db.tar.gz
             build/manifest.json

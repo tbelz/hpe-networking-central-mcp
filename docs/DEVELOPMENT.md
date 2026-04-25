@@ -18,7 +18,7 @@ The graph schema uses a single bootstrap DDL layer:
 
 `scripts/build_knowledge_db.py` runs on GitHub Actions:
 
-1. Scrape OpenAPI specs from Aruba Central docs
+1. Sync OpenAPI references from Aruba Central docs
 2. Apply bootstrap DDL to knowledge DB
 3. Index and populate API endpoints
 4. Populate seed scripts

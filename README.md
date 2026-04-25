@@ -113,11 +113,11 @@ Scopes filter which indexes/tables are searched: `all`, `api`, `docs`, `data`.
 ### Documentation Pipeline
 
 The `DocSection` node table and `doc_fts` FTS index are defined in the schema
-and ready for use, but **no doc scraping pipeline actively populates them yet**.
-The existing scrapers (`oas_scraper.py`, `glp_spec_provider.py`) fetch OpenAPI
-specs and populate `ApiEndpoint` nodes — they do not extract prose documentation.
-A future iteration will add a doc chunking pipeline to populate `DocSection`
-nodes from ReadMe.io or other documentation sources.
+and ready for use, but **no doc sync pipeline actively populates them from
+prose yet**.  The existing fetchers (`oas_scraper.py`, `glp_spec_provider.py`)
+pull OpenAPI references and populate `ApiEndpoint` nodes — they do not extract
+prose documentation.  A future iteration will add a doc chunking pipeline to
+populate `DocSection` nodes from ReadMe.io or other documentation sources.
 
 ## Prerequisites
 

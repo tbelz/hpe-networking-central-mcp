@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Build a LadybugDB knowledge database from scraped API specs and seed scripts.
+"""Build a LadybugDB knowledge database from public API specs and seed scripts.
 
 Run on a GitHub Actions runner (no Central/GLP credentials required).
-Scrapes public developer documentation, parses OpenAPI specs, and populates
+Fetches public developer documentation, parses OpenAPI specs, and populates
 a LadybugDB graph database with ApiEndpoint, ApiCategory, DocSection, and Script
 nodes.  The resulting DB directory is then tar'd for publishing as a GH release.
 
@@ -54,41 +54,102 @@ def _apply_schema(db: lb.Database) -> None:
     print(f"  Schema applied: {len(all_ddl)} DDL statements")
 
 
-def _scrape_specs(cache_dir: Path) -> tuple[list[dict], dict]:
-    """Scrape API specs from all public documentation sources.
+def _sync_specs(cache_dir: Path) -> tuple[list[dict], dict]:
+    """Sync API specs from all public documentation sources.
 
-    Returns (all_specs, scrape_health) where scrape_health is a dict
-    with per-provider stats for the manifest.
+    Returns ``(all_specs, sync_health)`` where ``sync_health`` is a dict
+    with per-provider stats for the manifest.  Each provider entry includes
+    a coverage ratio so downstream health checks can detect partial outages
+    even when a few specs come back successfully.
     """
     specs: list[dict] = []
-    scrape_health: dict = {}
+    sync_health: dict = {}
 
     # Central (ReadMe.io)
-    print("  Scraping Central API docs (ReadMe.io)...")
+    print("  Refreshing Central API references (ReadMe.io)...")
     try:
         provider = ReadMeSpecProvider()
         central_specs = provider.fetch_specs(cache_dir=cache_dir / "central", ttl=0)
         specs.extend(central_specs)
-        scrape_health["central"] = {"status": "ok", "spec_count": len(central_specs)}
+        sync_health["central"] = _summarise_oas_reports(
+            provider.last_reports, central_specs
+        )
         print(f"    → {len(central_specs)} Central specs")
+        for r in provider.last_reports:
+            print(
+                f"      {r.name}: {r.total_specs}/{r.discovered} "
+                f"(missing={r.missing_specs}, failures={dict(r.failure_reasons)})"
+            )
     except Exception as e:
-        scrape_health["central"] = {"status": "error", "spec_count": 0, "error": str(e)}
-        print(f"    ⚠ Central scrape failed: {e}", file=sys.stderr)
+        sync_health["central"] = {
+            "status": "error",
+            "spec_count": 0,
+            "coverage": 0.0,
+            "error": str(e),
+        }
+        print(f"    ⚠ Central refresh failed: {e}", file=sys.stderr)
 
     # GreenLake (developer portal)
     if _HAS_GLP:
-        print("  Scraping GreenLake API docs (developer portal)...")
+        print("  Refreshing GreenLake API references (developer portal)...")
         try:
             glp_provider = GreenLakeSpecProvider()
             glp_specs = glp_provider.fetch_specs(cache_dir=cache_dir / "glp", ttl=0)
             specs.extend(glp_specs)
-            scrape_health["greenlake"] = {"status": "ok", "spec_count": len(glp_specs)}
+            sync_health["greenlake"] = {
+                "status": "ok",
+                "spec_count": len(glp_specs),
+                "coverage": 1.0,
+            }
             print(f"    → {len(glp_specs)} GreenLake specs")
         except Exception as e:
-            scrape_health["greenlake"] = {"status": "error", "spec_count": 0, "error": str(e)}
-            print(f"    ⚠ GreenLake scrape failed: {e}", file=sys.stderr)
+            sync_health["greenlake"] = {
+                "status": "error",
+                "spec_count": 0,
+                "coverage": 0.0,
+                "error": str(e),
+            }
+            print(f"    ⚠ GreenLake refresh failed: {e}", file=sys.stderr)
 
-    return specs, scrape_health
+    return specs, sync_health
+
+
+def _summarise_oas_reports(reports, specs: list[dict]) -> dict:
+    """Build a manifest entry from per-source OAS reports.
+
+    The status reflects coverage:
+        * ``ok``        — 100% of discovered slugs have a spec
+        * ``degraded``  — at least one spec returned but coverage < 95%
+        * ``error``     — zero specs or every source had a discovery error
+    """
+    discovered = sum(r.discovered for r in reports)
+    fetched = sum(r.total_specs for r in reports)
+    missing = sum(r.missing_specs for r in reports)
+    discovery_errors = [r.name for r in reports if r.discovery_error]
+    coverage = (fetched / discovered) if discovered else 0.0
+
+    if fetched == 0:
+        status = "error"
+    elif coverage < 0.95 or discovery_errors:
+        status = "degraded"
+    else:
+        status = "ok"
+
+    failure_reasons: dict[str, int] = {}
+    for r in reports:
+        for reason, count in r.failure_reasons.items():
+            failure_reasons[reason] = failure_reasons.get(reason, 0) + count
+
+    return {
+        "status": status,
+        "spec_count": fetched,
+        "discovered": discovered,
+        "missing": missing,
+        "coverage": round(coverage, 4),
+        "sources": [r.as_dict() for r in reports],
+        "discovery_errors": discovery_errors,
+        "failure_reasons": failure_reasons,
+    }
 
 
 def _cypher_string_list(values: list[str]) -> str:
@@ -173,7 +234,7 @@ def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
     for cat_name, cat_count in index.categories.items():
         conn.execute(
             "CREATE (c:ApiCategory {name: $cname, endpointCount: $cnt, sourceProvider: $src})",
-            parameters={"cname": cat_name, "cnt": cat_count, "src": "scraped"},
+            parameters={"cname": cat_name, "cnt": cat_count, "src": "public-docs"},
         )
 
     # Create BELONGS_TO_CATEGORY relationships
@@ -187,26 +248,59 @@ def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
     return count
 
 
-def _scrape_docs(cache_dir: Path) -> tuple[list, dict]:
-    """Scrape VSG documentation pages.
+def _sync_docs(cache_dir: Path) -> tuple[list, dict]:
+    """Sync VSG documentation pages.
 
-    Returns (doc_entries, scrape_health_entry).
+    Returns ``(doc_entries, sync_health_entry)``.  When the upstream WAF
+    blocks the runner the entry is marked ``degraded`` (not ``error``) so
+    the daily build can still publish a fresh API catalog.
     """
-    print("  Scraping VSG Central documentation...")
+    print("  Refreshing VSG Central documentation...")
     try:
         provider = VsgDocProvider()
         entries = provider.fetch_docs(cache_dir=cache_dir / "vsg", ttl=0)
-        health = {"status": "ok", "section_count": len(entries)}
+        report = provider.last_report
+        if report is None:
+            health = {"status": "ok", "section_count": len(entries)}
+        elif report.access_denied:
+            health = {
+                "status": "degraded",
+                "section_count": len(entries),
+                "reason": "access_denied",
+                "detail": (
+                    "VSG host returned HTTP 403 for every page; the runner's "
+                    "egress IP is likely blocked at the upstream WAF."
+                ),
+                "report": report.as_dict(),
+            }
+        elif report.pages_failed > 0:
+            health = {
+                "status": "degraded",
+                "section_count": len(entries),
+                "reason": "partial_failure",
+                "report": report.as_dict(),
+            }
+        else:
+            health = {
+                "status": "ok",
+                "section_count": len(entries),
+                "report": report.as_dict(),
+            }
         print(f"    → {len(entries)} documentation sections")
+        if report and report.pages_failed:
+            print(
+                f"    ⚠ VSG: {report.pages_failed}/{report.pages_total} pages "
+                f"unavailable (failures={dict(report.failure_reasons)})"
+            )
         return entries, health
     except Exception as e:
         health = {"status": "error", "section_count": 0, "error": str(e)}
-        print(f"    ⚠ VSG scrape failed: {e}", file=sys.stderr)
+        print(f"    ⚠ VSG refresh failed: {e}", file=sys.stderr)
         return [], health
 
 
 def _populate_docs(db: lb.Database, docs: list) -> int:
-    """Insert DocSection nodes from scraped VSG documentation."""
+    """Insert DocSection nodes from synced VSG documentation."""
     conn = lb.Connection(db)
     count = 0
 
@@ -335,11 +429,11 @@ def main() -> None:
     db = lb.Database(str(db_path))
     _apply_schema(db)
 
-    # 2. Scrape API specs
-    print("\n[2/6] Scraping API documentation...")
-    specs, scrape_health = _scrape_specs(cache_dir)
+    # 2. Sync API specs
+    print("\n[2/6] Refreshing API documentation...")
+    specs, sync_health = _sync_specs(cache_dir)
     if not specs:
-        print("⚠ No specs scraped — database will have no API endpoints.", file=sys.stderr)
+        print("⚠ No specs available — database will have no API endpoints.", file=sys.stderr)
 
     # 3. Build index and populate
     print("\n[3/6] Populating API endpoints...")
@@ -347,10 +441,10 @@ def main() -> None:
     index.build(specs)
     endpoint_count = _populate_endpoints(db, index)
 
-    # 4. Scrape and populate VSG documentation
-    print("\n[4/6] Scraping and populating VSG documentation...")
-    doc_entries, vsg_health = _scrape_docs(cache_dir)
-    scrape_health["vsg"] = vsg_health
+    # 4. Sync and populate VSG documentation
+    print("\n[4/6] Refreshing and populating VSG documentation...")
+    doc_entries, vsg_health = _sync_docs(cache_dir)
+    sync_health["vsg"] = vsg_health
     doc_count = _populate_docs(db, doc_entries) if doc_entries else 0
 
     # 5. Populate seed scripts
@@ -378,7 +472,7 @@ def main() -> None:
         "doc_count": doc_count,
         "categories": sorted(index.categories.keys()),
         "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "scrape_health": scrape_health,
+        "sync_health": sync_health,
     }
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
