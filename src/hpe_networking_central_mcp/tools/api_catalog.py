@@ -25,13 +25,6 @@ logger = structlog.get_logger("tools.api_catalog")
 
 _graph_manager: GraphManager | None = None
 
-_API_SCOPE_DEPRECATION_WARNING = (
-    "unified_search(scope='api') is deprecated. The full API endpoint catalog "
-    "is now embedded in the system instructions as a category-grouped path-tree. "
-    "Scan it directly to find the right METHOD /path, then call "
-    "get_api_endpoint_detail(...) for the full schema."
-)
-
 
 def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: GraphManager):
     """Register API discovery tools with the MCP server."""
@@ -41,27 +34,21 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
     def unified_search(
         query: str,
-        scope: str = "api",
+        scope: str = "data",
         limit: int = 20,
-        category: str | None = None,
     ) -> str:
-        """Search the API catalog, documentation, or graph data by keyword.
+        """Full-text search the documentation or graph data by keyword.
 
-        Default scope is "api" — searches API endpoints by path, summary,
-        operationId, or category.  Use this BEFORE writing scripts or making
-        API calls to discover relevant endpoints.  Then call
-        get_api_endpoint_detail(method, path) for full parameter schemas.
-
-        Other scopes use BM25 full-text search:
-        - "docs": documentation sections
-        - "data": devices, sites, config profiles, scripts in the graph
-        - "all": everything
+        Use this to find sections of the VSG documentation, or to look up
+        devices / sites / config profiles / scripts in the graph by name.
+        For API endpoints, scan the **API Endpoint Catalog** embedded in
+        the system instructions instead — it lists every reachable
+        ``METHOD /path``.
 
         Args:
-            query: Search term (e.g., "vlan", "switch", "dhcp", "devices").
-            scope: What to search — "api" (default), "docs", "data", or "all".
+            query: Search term (e.g., "vlan", "switch", "Site-NYC").
+            scope: "data" (default), "docs", or "all".
             limit: Maximum results to return (default 20, max 50).
-            category: Optional category name to restrict API results (scope="api" only).
 
         Returns:
             JSON with matching results.
@@ -79,86 +66,34 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                 "hint": "Provide a search term, e.g. unified_search(query='vlan').",
             })
 
-        valid_scopes = {"api", "docs", "data", "all"}
+        valid_scopes = {"docs", "data", "all"}
         if scope not in valid_scopes:
             return json.dumps({
-                "error": f"Invalid scope '{scope}'. Must be one of: {', '.join(sorted(valid_scopes))}.",
-                "hint": "Use scope='api' (default) for endpoint discovery, 'data' for graph nodes, 'docs' for documentation.",
+                "error": (
+                    f"Invalid scope '{scope}'. Must be one of: "
+                    f"{', '.join(sorted(valid_scopes))}. "
+                    "For API endpoints, scan the API Endpoint Catalog in the "
+                    "system instructions and call get_api_endpoint_detail()."
+                ),
             })
 
         limit = max(1, min(limit, 50))
 
-        # Non-API scopes delegate to FTS/CONTAINS helpers
-        if scope != "api":
-            if gm.fts_available:
-                results = fts_search(gm, query, scope=scope, limit=limit)
-                search_method = "fts"
-                if not results:
-                    results = contains_search(gm, query, scope=scope, limit=limit)
-                    search_method = "contains_fallback"
-            else:
+        if gm.fts_available:
+            results = fts_search(gm, query, scope=scope, limit=limit)
+            search_method = "fts"
+            if not results:
                 results = contains_search(gm, query, scope=scope, limit=limit)
-                search_method = "contains"
-            return json.dumps({
-                "query": query,
-                "scope": scope,
-                "search_method": search_method,
-                "total": len(results),
-                "results": results,
-            }, indent=2)
-
-        # API scope: structured Cypher query
-        method_filter = " AND e.method = 'GET' " if settings.read_only else " "
-        cypher = (
-            "MATCH (e:ApiEndpoint) "
-            "WHERE (lower(e.path) CONTAINS lower($q) "
-            "   OR lower(e.summary) CONTAINS lower($q) "
-            "   OR lower(e.operationId) CONTAINS lower($q) "
-            "   OR lower(e.category) CONTAINS lower($q)) "
-            f"{method_filter}"
-        )
-        params: dict[str, Any] = {"q": query, "lim": limit}
-
-        if category:
-            cypher += "AND e.category = $cat "
-            params["cat"] = category
-
-        cypher += "RETURN e.method, e.path, e.summary, e.category ORDER BY e.category, e.path LIMIT $lim"
-
-        rows = gm.query(cypher, params, read_only=True)
-
-        if not rows:
-            return json.dumps({
-                "query": query,
-                "returned_count": 0,
-                "endpoints": [],
-                "hint": "No matches. Try broader terms or use list_api_categories() to see available categories.",
-                "deprecation_warning": _API_SCOPE_DEPRECATION_WARNING,
-            }, indent=2)
-
-        # Group multiple methods on the same path into one entry
-        from collections import OrderedDict
-        grouped: OrderedDict[str, dict] = OrderedDict()
-        for r in rows:
-            path = r.get("e.path", "")
-            method = r.get("e.method", "")
-            if path not in grouped:
-                grouped[path] = {
-                    "path": path,
-                    "methods": [method],
-                    "summary": r.get("e.summary", ""),
-                    "category": r.get("e.category", ""),
-                }
-            else:
-                grouped[path]["methods"].append(method)
-
-        endpoints = list(grouped.values())
-
+                search_method = "contains_fallback"
+        else:
+            results = contains_search(gm, query, scope=scope, limit=limit)
+            search_method = "contains"
         return json.dumps({
             "query": query,
-            "returned_count": len(endpoints),
-            "endpoints": endpoints,
-            "deprecation_warning": _API_SCOPE_DEPRECATION_WARNING,
+            "scope": scope,
+            "search_method": search_method,
+            "total": len(results),
+            "results": results,
         }, indent=2)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
@@ -166,8 +101,9 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         """List all API categories with their endpoint counts.
 
         Returns every category name and how many endpoints it contains.
-        Use this to discover what API areas are available, then
-        unified_search(query, category=...) to drill in.
+        Use this to discover what API areas are available; then scan the
+        API Endpoint Catalog in the system instructions for the exact
+        ``METHOD /path``.
 
         Returns:
             JSON with categories and total endpoint count.
@@ -192,286 +128,180 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             "total_endpoints": total,
         }, indent=2)
 
+    # ── Shared resolver for the (method, path) / endpoints argument shape ──
+
+    def _resolve_request(
+        method: str | None,
+        path: str | None,
+        endpoints: list[dict] | None,
+    ) -> tuple[list[tuple[str, str]] | None, str | None, bool]:
+        """Return (requested_pairs, error_json, is_bulk) for a tool call."""
+        if endpoints is not None:
+            if not isinstance(endpoints, list) or not endpoints:
+                return None, json.dumps({
+                    "error": "`endpoints` must be a non-empty list of {method, path} objects.",
+                }), True
+            requested: list[tuple[str, str]] = []
+            for item in endpoints:
+                if not isinstance(item, dict) or "method" not in item or "path" not in item:
+                    return None, json.dumps({
+                        "error": "Each entry in `endpoints` must be an object with 'method' and 'path' keys.",
+                    }), True
+                requested.append((str(item["method"]).upper(), str(item["path"])))
+            return requested, None, True
+        if not method or not path:
+            return None, json.dumps({
+                "error": "Provide either (method, path) or `endpoints=[...]`.",
+            }), False
+        return [(method.upper(), path)], None, False
+
+    def _filter_read_only(
+        requested: list[tuple[str, str]],
+    ) -> tuple[list[tuple[str, str]], list[dict]]:
+        if not settings.read_only:
+            return requested, []
+        allowed: list[tuple[str, str]] = []
+        skipped: list[dict] = []
+        for m, p in requested:
+            if m == "GET":
+                allowed.append((m, p))
+            else:
+                skipped.append({"method": m, "path": p})
+        return allowed, skipped
+
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
     def get_api_endpoint_detail(
         method: str | None = None,
         path: str | None = None,
         endpoints: list[dict] | None = None,
-        view: str = "compact",
     ) -> str:
-        """Get full details for one or more API endpoints.
+        """Get the structural skeleton of one or more API endpoints.
 
-        Returns the API specification: parameters (with types, location,
-        required flags), request body schema, and response status codes
-        with their schemas.
+        Returns parameters, request body schema, success and first-error
+        response shapes, and a transitive ``$components`` side-table —
+        with all human-readable prose (descriptions, titles, examples)
+        stripped at every nested level.  The operation-level ``summary``
+        is intentionally preserved as a one-line label so an agent can
+        recognise the endpoint without a second tool call.  An agent can
+        map configuration values onto field names directly from
+        names + types + enums alone, which keeps the payload small enough
+        to fit several endpoints into one prompt.
+
+        For ambiguous field names, follow up with
+        ``get_api_endpoint_glossary(method, path)`` to fetch the
+        descriptions on demand.  Most workflows do not need it.
 
         Two call forms are supported:
 
         1. **Single**: pass ``method`` and ``path``.
-           Returns one JSON object with the endpoint detail.
+           Returns one JSON object with the endpoint skeleton.
         2. **Bulk**: pass ``endpoints`` as a list of
            ``{"method": "GET", "path": "/foo"}`` objects.
-           Returns ``{"endpoints": [...], "missing": [...]}`` with one detail
-           object per matched endpoint and a ``missing`` list naming any
-           endpoints that were not found in the catalog.
+           Returns ``{"endpoints": [...], "missing": [...]}``.
 
-        ``view`` selects how much detail to return:
-
-        - ``"compact"`` *(default)* — Repeated error responses and nested
-          object schemas are kept as ``$ref`` and bundled in a
-          ``$components`` side-table.  ~5–15 KB per endpoint, suitable for
-          most workflows.
-        - ``"request-only"`` — Just the request-body schema plus a flat
-          ``required_paths`` list.  Use when you only need to construct a
-          POST/PUT/PATCH payload.
-        - ``"full"`` — Every ``$ref`` is fully resolved inline.  May exceed
-          100 KB on heavy endpoints; use only when you need a single
-          self-contained schema with no indirection.
-        - ``"raw"`` — The untouched OpenAPI operation object plus the raw
-          ``components`` table.  Diagnostic.  Note: when served from the
-          cached knowledge DB this view degrades to ``"full"`` because
-          only the resolved shape is stored on disk; the response will
-          carry a ``"note"`` field explaining the fallback.
-
-        DELETE endpoints are catalogued and callable via ``call_central_api``
-        when ``READ_ONLY=false``.  In ``READ_ONLY=true`` mode, non-GET
-        endpoints are silently skipped (single form returns an error; bulk
-        form lists them under ``skipped_read_only``).
+        DELETE / POST / PUT / PATCH endpoints are catalogued and callable
+        via ``call_central_api`` when ``READ_ONLY=false``.  In
+        ``READ_ONLY=true`` mode, non-GET endpoints are skipped (single form
+        returns an error; bulk form lists them under ``skipped_read_only``).
 
         Args:
             method: HTTP method (GET, POST, PUT, PATCH, DELETE). Single form.
             path: Full API path (e.g. "/monitoring/v2/aps"). Single form.
             endpoints: List of {"method", "path"} dicts. Bulk form.
-            view: One of "compact" (default), "request-only", "full", "raw".
 
         Returns:
-            JSON with endpoint specification(s) under the chosen view.
+            JSON with endpoint skeleton(s).
         """
         gm = _graph_manager
         if gm is None or not gm.is_available:
             return json.dumps({"error": "Graph database not available.",
                                "hint": "The graph database may still be loading. Try again shortly."})
 
-        valid_views = {"compact", "request-only", "full", "raw"}
-        if view not in valid_views:
+        requested, err, is_bulk = _resolve_request(method, path, endpoints)
+        if err is not None:
+            return err
+        assert requested is not None
+
+        requested, skipped_read_only = _filter_read_only(requested)
+        if not requested:
+            if is_bulk:
+                return json.dumps({
+                    "endpoints": [],
+                    "missing": [],
+                    "skipped_read_only": skipped_read_only,
+                }, indent=2)
             return json.dumps({
-                "error": f"Invalid view '{view}'. Must be one of: {', '.join(sorted(valid_views))}.",
+                "error": (
+                    f"Endpoint {skipped_read_only[0]['method']} "
+                    f"{skipped_read_only[0]['path']} is hidden because the server "
+                    "is in READ_ONLY mode. Only GET endpoints are exposed."
+                ),
             })
 
-        # ── Resolve call form ─────────────────────────────────────────
-        if endpoints is not None:
-            if not isinstance(endpoints, list) or not endpoints:
-                return json.dumps({
-                    "error": "`endpoints` must be a non-empty list of {method, path} objects.",
-                })
-            requested: list[tuple[str, str]] = []
-            for item in endpoints:
-                if not isinstance(item, dict) or "method" not in item or "path" not in item:
-                    return json.dumps({
-                        "error": "Each entry in `endpoints` must be an object with 'method' and 'path' keys.",
-                    })
-                requested.append((str(item["method"]).upper(), str(item["path"])))
-        else:
-            if not method or not path:
-                return json.dumps({
-                    "error": "Provide either (method, path) or `endpoints=[...]`.",
-                })
-            requested = [(method.upper(), path)]
-
-        # ── READ_ONLY filter ──────────────────────────────────────────
-        skipped_read_only: list[dict] = []
-        if settings.read_only:
-            allowed = []
-            for m, p in requested:
-                if m == "GET":
-                    allowed.append((m, p))
-                else:
-                    skipped_read_only.append({"method": m, "path": p})
-            requested = allowed
-            if not requested:
-                # All requested endpoints are non-GET in read-only mode
-                if endpoints is not None:
-                    return json.dumps({
-                        "endpoints": [],
-                        "missing": [],
-                        "skipped_read_only": skipped_read_only,
-                    }, indent=2)
-                return json.dumps({
-                    "error": (
-                        f"Endpoint {skipped_read_only[0]['method']} "
-                        f"{skipped_read_only[0]['path']} is hidden because the server "
-                        "is in READ_ONLY mode. Only GET endpoints are exposed."
-                    ),
-                })
-
-        # ── Bulk Cypher fetch ─────────────────────────────────────────
         eids = [f"{m}:{p}" for m, p in requested]
-
-        # Try to read the projection columns introduced in schema_version 2;
-        # fall back gracefully when running against an older DB.
-        select_extra = ""
-        if view in {"compact", "request-only"}:
-            select_extra = ", e.bodyCompactJson, e.bodyRequestOnlyJson"
-
-        try:
-            rows = gm.query(
-                "MATCH (e:ApiEndpoint) WHERE e.endpoint_id IN $eids "
-                "RETURN e.method, e.path, e.summary, e.description, e.operationId, "
-                "e.category, e.deprecated, e.tags, e.parameters, e.requestBody, "
-                f"e.responses{select_extra}",
-                {"eids": eids},
-                read_only=True,
-            )
-        except Exception as exc:
-            # Only fall back when the failure is consistent with the projection
-            # columns being absent (older DBs predating schema_version 2).
-            # All other query errors must surface to the caller.
-            msg = str(exc).lower()
-            missing_columns = (
-                "bodycompactjson" in msg
-                or "bodyrequestonlyjson" in msg
-                or "no such column" in msg
-                or "unknown property" in msg
-            )
-            if not missing_columns:
-                raise
-            logger.warning(
-                "endpoint_detail_view_fallback",
-                view=view,
-                error=str(exc),
-                hint="Projection columns missing — knowledge DB predates schema_version 2.",
-            )
-            rows = gm.query(
-                "MATCH (e:ApiEndpoint) WHERE e.endpoint_id IN $eids "
-                "RETURN e.method, e.path, e.summary, e.description, e.operationId, "
-                "e.category, e.deprecated, e.tags, e.parameters, e.requestBody, "
-                "e.responses",
-                {"eids": eids},
-                read_only=True,
-            )
-            requested_view = view
-            view = "full"  # serve the legacy resolved view
-            _view_fallback_note = (
-                f"requested view '{requested_view}' is unavailable in the cached "
-                "knowledge DB (schema_version < 2); served 'full' instead."
-            )
-        else:
-            _view_fallback_note = None
+        rows = gm.query(
+            "MATCH (e:ApiEndpoint) WHERE e.endpoint_id IN $eids "
+            "RETURN e.method, e.path, e.category, e.bodySkeletonJson",
+            {"eids": eids},
+            read_only=True,
+        )
 
         details_by_eid: dict[str, dict] = {}
+        # Track every eid the DB returned a row for (even if the blob was
+        # broken) so we can distinguish "endpoint unknown" from "blob corrupt".
+        found_eids: set[str] = set()
         for r in rows:
             method_val = r.get("e.method", "")
             path_val = r.get("e.path", "")
-
-            # ── view='compact' / 'request-only': prefer precomputed JSON ──
-            requested_view = view
-            if view == "compact":
-                blob = r.get("e.bodyCompactJson") or ""
-                if blob:
-                    try:
-                        d = json.loads(blob)
-                        d.setdefault("category", r.get("e.category", ""))
-                        details_by_eid[f"{method_val}:{path_val}"] = d
-                        continue
-                    except (json.JSONDecodeError, TypeError) as exc:
-                        logger.warning(
-                            "endpoint_detail_blob_invalid",
-                            view=view,
-                            method=method_val,
-                            path=path_val,
-                            error=str(exc),
-                        )
-            elif view == "request-only":
-                blob = r.get("e.bodyRequestOnlyJson") or ""
-                if blob:
-                    try:
-                        d = json.loads(blob)
-                        d.setdefault("category", r.get("e.category", ""))
-                        details_by_eid[f"{method_val}:{path_val}"] = d
-                        continue
-                    except (json.JSONDecodeError, TypeError) as exc:
-                        logger.warning(
-                            "endpoint_detail_blob_invalid",
-                            view=view,
-                            method=method_val,
-                            path=path_val,
-                            error=str(exc),
-                        )
-
-            # ── view='full' (or fallback): assemble from legacy columns ──
-            d: dict[str, Any] = {
-                "method": method_val,
-                "path": path_val,
-                "summary": r.get("e.summary", ""),
-                "category": r.get("e.category", ""),
-                "operation_id": r.get("e.operationId", ""),
-                "view": "full",
-            }
-            if r.get("e.description"):
-                d["description"] = r["e.description"]
-            if r.get("e.tags"):
-                d["tags"] = r["e.tags"]
-            if r.get("e.deprecated"):
-                d["deprecated"] = True
-
-            params_raw = r.get("e.parameters", "")
-            if params_raw:
-                try:
-                    d["parameters"] = json.loads(params_raw)
-                except (json.JSONDecodeError, TypeError):
-                    d["parameters"] = []
-
-            body_raw = r.get("e.requestBody", "")
-            if body_raw:
-                try:
-                    d["request_body"] = json.loads(body_raw)
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-            responses_raw = r.get("e.responses", "")
-            if responses_raw:
-                try:
-                    d["responses"] = json.loads(responses_raw)
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-            # view='raw' is not supported via the precomputed columns;
-            # only the resolved 'full' shape is available from the cached DB.
-            if view == "raw":
-                d["view"] = "raw"
-                d["note"] = (
-                    "raw view is only available at build time; serving 'full' instead."
+            eid_key = f"{method_val}:{path_val}"
+            found_eids.add(eid_key)
+            blob = r.get("e.bodySkeletonJson") or ""
+            if not blob:
+                logger.warning(
+                    "endpoint_skeleton_blob_missing",
+                    method=method_val,
+                    path=path_val,
                 )
-            elif requested_view in {"compact", "request-only"}:
-                # Precomputed blob was missing/invalid for this row — make
-                # the shape change explicit so callers can detect it.
-                d["view"] = "full"
-                d["note"] = (
-                    f"requested view '{requested_view}' was unavailable for this "
-                    "endpoint (precomputed blob missing or invalid); served 'full' instead."
+                continue
+            try:
+                d = json.loads(blob)
+            except (json.JSONDecodeError, TypeError) as exc:
+                logger.warning(
+                    "endpoint_skeleton_blob_invalid",
+                    method=method_val,
+                    path=path_val,
+                    error=str(exc),
                 )
-            elif _view_fallback_note is not None:
-                d["note"] = _view_fallback_note
+                continue
+            d.setdefault("category", r.get("e.category", ""))
+            details_by_eid[eid_key] = d
 
-            details_by_eid[f"{method_val}:{path_val}"] = d
-
-        # ── Single-form response (preserve legacy shape) ─────────────
-        if endpoints is None:
+        if not is_bulk:
             eid = eids[0]
             if eid not in details_by_eid:
+                if eid in found_eids:
+                    return json.dumps({
+                        "error": (
+                            f"Endpoint {requested[0][0]} {requested[0][1]} exists "
+                            "but its skeleton blob is missing or corrupt."
+                        ),
+                        "hint": "Rebuild the knowledge DB to regenerate the skeleton data.",
+                    })
                 return json.dumps({
                     "error": f"No endpoint found for {requested[0][0]} {requested[0][1]}.",
                     "hint": "Scan the API Endpoint Catalog in the system instructions for the correct method/path.",
                 })
             return json.dumps(details_by_eid[eid], indent=2)
 
-        # ── Bulk-form response ───────────────────────────────────────
         ordered_details = []
         missing = []
+        broken = []
         for m, p in requested:
             eid = f"{m}:{p}"
             if eid in details_by_eid:
                 ordered_details.append(details_by_eid[eid])
+            elif eid in found_eids:
+                broken.append({"method": m, "path": p})
             else:
                 missing.append({"method": m, "path": p})
 
@@ -479,6 +309,152 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             "endpoints": ordered_details,
             "missing": missing,
         }
+        if broken:
+            response["blob_corrupt"] = broken
+            response["hint"] = "Rebuild the knowledge DB to regenerate skeleton data for blob_corrupt entries."
+        if skipped_read_only:
+            response["skipped_read_only"] = skipped_read_only
+        return json.dumps(response, indent=2)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+    def get_api_endpoint_glossary(
+        method: str | None = None,
+        path: str | None = None,
+        endpoints: list[dict] | None = None,
+        components: list[str] | None = None,
+    ) -> str:
+        """Get human-readable descriptions for the components of one or more endpoints.
+
+        Returns descriptions, enum value lists, and ``x-mutually-exclusive``
+        annotations for the schemas reachable from the endpoint(s) — the
+        prose that ``get_api_endpoint_detail`` strips.  Use this only when
+        a field name in the skeleton is ambiguous.  Most workflows do not
+        need to call it.
+
+        Two call forms (matching ``get_api_endpoint_detail``):
+
+        1. **Single**: pass ``method`` and ``path``.
+        2. **Bulk**: pass ``endpoints`` as a list of
+           ``{"method": "GET", "path": "/foo"}`` objects.
+
+        Args:
+            method: HTTP method. Single form.
+            path: Full API path. Single form.
+            endpoints: List of {"method", "path"} dicts. Bulk form.
+            components: Optional list of component names to restrict the
+                glossary to.  Names not present in the endpoint's reachable
+                components are silently ignored.
+
+        Returns:
+            JSON with per-component descriptions.
+        """
+        gm = _graph_manager
+        if gm is None or not gm.is_available:
+            return json.dumps({"error": "Graph database not available.",
+                               "hint": "The graph database may still be loading. Try again shortly."})
+
+        requested, err, is_bulk = _resolve_request(method, path, endpoints)
+        if err is not None:
+            return err
+        assert requested is not None
+
+        requested, skipped_read_only = _filter_read_only(requested)
+        if not requested:
+            if is_bulk:
+                return json.dumps({
+                    "endpoints": [],
+                    "missing": [],
+                    "skipped_read_only": skipped_read_only,
+                }, indent=2)
+            return json.dumps({
+                "error": (
+                    f"Endpoint {skipped_read_only[0]['method']} "
+                    f"{skipped_read_only[0]['path']} is hidden because the server "
+                    "is in READ_ONLY mode. Only GET endpoints are exposed."
+                ),
+            })
+
+        eids = [f"{m}:{p}" for m, p in requested]
+        rows = gm.query(
+            "MATCH (e:ApiEndpoint) WHERE e.endpoint_id IN $eids "
+            "RETURN e.method, e.path, e.bodyGlossaryJson",
+            {"eids": eids},
+            read_only=True,
+        )
+
+        wanted_components = set(components) if components is not None else None
+
+        details_by_eid: dict[str, dict] = {}
+        # Track every eid the DB returned a row for (even if the blob was
+        # broken) so we can distinguish "endpoint unknown" from "blob corrupt".
+        found_eids: set[str] = set()
+        for r in rows:
+            method_val = r.get("e.method", "")
+            path_val = r.get("e.path", "")
+            eid_key = f"{method_val}:{path_val}"
+            found_eids.add(eid_key)
+            blob = r.get("e.bodyGlossaryJson") or ""
+            if not blob:
+                logger.warning(
+                    "endpoint_glossary_blob_missing",
+                    method=method_val,
+                    path=path_val,
+                )
+                continue
+            try:
+                d = json.loads(blob)
+            except (json.JSONDecodeError, TypeError) as exc:
+                logger.warning(
+                    "endpoint_glossary_blob_invalid",
+                    method=method_val,
+                    path=path_val,
+                    error=str(exc),
+                )
+                continue
+            if wanted_components is not None and isinstance(d.get("components"), dict):
+                d["components"] = {
+                    name: entry
+                    for name, entry in d["components"].items()
+                    if name in wanted_components
+                }
+            details_by_eid[eid_key] = d
+
+        if not is_bulk:
+            eid = eids[0]
+            if eid not in details_by_eid:
+                if eid in found_eids:
+                    return json.dumps({
+                        "error": (
+                            f"Endpoint {requested[0][0]} {requested[0][1]} exists "
+                            "but its glossary blob is missing or corrupt."
+                        ),
+                        "hint": "Rebuild the knowledge DB to regenerate the glossary data.",
+                    })
+                return json.dumps({
+                    "error": f"No endpoint found for {requested[0][0]} {requested[0][1]}.",
+                    "hint": "Scan the API Endpoint Catalog in the system instructions for the correct method/path.",
+                })
+            return json.dumps(details_by_eid[eid], indent=2)
+
+        ordered_details = []
+        missing = []
+        broken = []
+        for m, p in requested:
+            eid = f"{m}:{p}"
+            if eid in details_by_eid:
+                ordered_details.append(details_by_eid[eid])
+            elif eid in found_eids:
+                broken.append({"method": m, "path": p})
+            else:
+                missing.append({"method": m, "path": p})
+
+        response: dict[str, Any] = {
+            "endpoints": ordered_details,
+            "missing": missing,
+        }
+        if broken:
+            response["blob_corrupt"] = broken
+            response["hint"] = "Rebuild the knowledge DB to regenerate glossary data for blob_corrupt entries."
         if skipped_read_only:
             response["skipped_read_only"] = skipped_read_only
         return json.dumps(response, indent=2)

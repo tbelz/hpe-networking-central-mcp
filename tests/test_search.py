@@ -135,10 +135,11 @@ class TestContainsSearch:
         assert any(r["type"] == "DocSection" for r in results)
 
     def test_search_all_scopes(self, gm):
+        # scope="all" covers docs + data only (ApiEndpoint excluded — callers use
+        # the embedded API Endpoint Catalog + get_api_endpoint_detail instead).
         results = contains_search(gm, "devices", scope="all", limit=20)
-        types = {r["type"] for r in results}
-        # Should find across multiple node types
-        assert len(results) >= 2
+        assert len(results) >= 1
+        assert all(r["type"] != "ApiEndpoint" for r in results)
 
     def test_limit_respected(self, gm):
         results = contains_search(gm, "devices", scope="all", limit=1)

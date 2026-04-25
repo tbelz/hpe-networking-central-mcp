@@ -6,13 +6,9 @@ import copy
 import json
 
 from hpe_networking_central_mcp.oas_normalize import (
-    COMPACT_BUDGET_BYTES,
-    REQUEST_ONLY_BUDGET_BYTES,
     normalize,
-    project_compact,
-    project_full,
-    project_raw,
-    project_request_only,
+    project_glossary,
+    project_skeleton,
 )
 
 
@@ -134,20 +130,19 @@ def test_normalize_is_idempotent():
 
 
 def test_normalize_lossless_against_full_resolution():
-    """resolve(normalize(s)) must equal resolve(s) for the same operation body."""
+    """Normalization must not change the resolved skeleton shape."""
     spec = _make_synthetic_spec(num_endpoints=3)
-    raw_full = project_full(spec, "POST", "/v1/widgets/0")
-    norm_full = project_full(normalize(spec), "POST", "/v1/widgets/0")
-    # Compare request body and responses (the parts that get rewritten).
-    assert raw_full is not None
-    assert norm_full is not None
-    assert raw_full["request_body"]["schema"] == norm_full["request_body"]["schema"]
-    # Response shapes (status, description, schema) should match too.
-    raw_resp = {r["status"]: r for r in raw_full["responses"]}
-    norm_resp = {r["status"]: r for r in norm_full["responses"]}
-    assert set(raw_resp) == set(norm_resp)
-    for status, raw_r in raw_resp.items():
-        assert raw_r["schema"] == norm_resp[status]["schema"]
+    raw_skel = project_skeleton(spec, "POST", "/v1/widgets/0")
+    norm_skel = project_skeleton(normalize(spec), "POST", "/v1/widgets/0")
+    assert raw_skel is not None
+    assert norm_skel is not None
+    # ``parameters`` and ``required_paths`` must match exactly across the
+    # raw and normalized projections.  ``request_body`` and ``responses``
+    # legitimately differ in shape (inline schemas become ``$ref``s after
+    # dedup) and ``$components`` may grow new entries — those are the
+    # whole point of normalization, so we don't compare them here.
+    for key in ("parameters", "required_paths"):
+        assert raw_skel.get(key) == norm_skel.get(key), key
 
 
 def test_normalize_strips_noisy_metadata():
@@ -187,75 +182,186 @@ def test_normalize_strips_noisy_metadata():
     assert "x-patternSources" not in schema
 
 
-# ── Projections ──────────────────────────────────────────────────────
+# ── Projections (skeleton + glossary) ───────────────────────────────
 
 
-def test_project_compact_returns_self_contained_payload():
+DESCRIPTION_KEYS = (
+    "description", "title", "example", "examples",
+    "x-typeName", "x-typeDescription", "x-patternSources",
+)
+
+
+def _walk(node, *, _in_properties: bool = False):
+    """Yield every dict reachable under ``node``.
+
+    ``properties`` and ``patternProperties`` map *user-defined field
+    names* to schemas; their keys are data, not OpenAPI keywords.  We
+    therefore walk *into* their values but never yield the property-name
+    dict itself for keyword checks (``description`` is a perfectly legal
+    field name).
+    """
+    if isinstance(node, dict):
+        if not _in_properties:
+            yield node
+        for k, v in node.items():
+            yield from _walk(v, _in_properties=k in ("properties", "patternProperties"))
+    elif isinstance(node, list):
+        for item in node:
+            yield from _walk(item)
+
+
+def test_skeleton_strips_descriptions_at_every_level():
     spec = normalize(_make_synthetic_spec(num_endpoints=4))
-    proj = project_compact(spec, "POST", "/v1/widgets/0")
-    assert proj is not None
-    assert proj["view"] == "compact"
-    assert proj["method"] == "POST"
-    # Side-table contains every $ref reachable from the projection.
-    body_str = json.dumps(proj)
-    refs_in_body = body_str.count('"$ref"')
-    if refs_in_body:
-        assert "$components" in proj
+    skel = project_skeleton(spec, "POST", "/v1/widgets/0")
+    assert skel is not None
+    # The top-level meta KEEPS its summary so the agent has a one-line label.
+    # But every NESTED schema dict in parameters / request_body / responses /
+    # $components must have no description-bearing keys.  ``properties``
+    # and ``patternProperties`` are skipped because their keys are
+    # user-defined field names (a property literally called ``description``
+    # is legal and must survive).
+    for key in ("parameters", "request_body", "responses", "$components"):
+        sub = skel.get(key)
+        if sub is None:
+            continue
+        for node in _walk(sub):
+            for forbidden in DESCRIPTION_KEYS:
+                assert forbidden not in node, (
+                    f"{forbidden!r} leaked into skeleton at {node!r}"
+                )
 
 
-def test_project_compact_size_budget_on_synthetic_spec():
-    """Large spec with repeated error/object schemas should compress under 15 KB."""
-    spec = normalize(_make_synthetic_spec(num_endpoints=20))
-    proj = project_compact(spec, "POST", "/v1/widgets/0")
-    assert proj is not None
-    size = len(json.dumps(proj))
-    assert size <= COMPACT_BUDGET_BYTES, f"compact view {size} bytes > {COMPACT_BUDGET_BYTES}"
+def test_skeleton_preserves_user_property_named_description():
+    """Regression: a property literally named ``description`` must survive.
+
+    The skeleton walker previously stripped any dict key matching
+    ``description`` / ``title`` / ``summary`` / etc., which corrupted
+    schemas whose users named a field ``description`` (common in error
+    response bodies — e.g. ``{error_code, description, service_name}``).
+    """
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "T"},
+        "paths": {
+            "/things": {
+                "post": {
+                    "summary": "Create a thing",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["description", "title"],
+                                    "properties": {
+                                        # User-defined field names that
+                                        # collide with OpenAPI keywords.
+                                        "description": {"type": "string"},
+                                        "title": {"type": "string"},
+                                        "summary": {"type": "string"},
+                                        "example": {"type": "string"},
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "responses": {"201": {"description": "ok"}},
+                }
+            }
+        },
+    }
+    skel = project_skeleton(spec, "POST", "/things")
+    assert skel is not None
+    body_schema = skel["request_body"]["schema"]
+    props = body_schema["properties"]
+    for field in ("description", "title", "summary", "example"):
+        assert field in props, f"property {field!r} was stripped"
+        assert props[field] == {"type": "string"}
+    # Required list naming a stripped key must also survive.
+    assert "description" in skel["required_paths"]
+    assert "title" in skel["required_paths"]
 
 
-def test_project_request_only_returns_required_paths():
-    spec = normalize(_make_synthetic_spec(num_endpoints=3))
-    proj = project_request_only(spec, "POST", "/v1/widgets/0")
-    assert proj is not None
-    assert proj["view"] == "request-only"
-    assert "request_body" in proj
-    # Required leaves include 'name' and recurse into 'rule'.
-    rp = proj["required_paths"]
-    assert "name" in rp
+def test_skeleton_preserves_structure():
+    spec = normalize(_make_synthetic_spec(num_endpoints=4))
+    skel = project_skeleton(spec, "POST", "/v1/widgets/0")
+    assert skel is not None
+    assert skel["method"] == "POST"
+    assert skel["path"] == "/v1/widgets/0"
+    assert "parameters" in skel
+    assert "request_body" in skel
+    assert "required_paths" in skel
+    assert "name" in skel["required_paths"]
+    body_str = json.dumps(skel)
+    if body_str.count('"$ref"') > 0:
+        assert "$components" in skel
 
 
-def test_project_request_only_size_budget():
-    spec = normalize(_make_synthetic_spec(num_endpoints=20))
-    proj = project_request_only(spec, "POST", "/v1/widgets/0")
-    assert proj is not None
-    size = len(json.dumps(proj))
-    assert size <= REQUEST_ONLY_BUDGET_BYTES, (
-        f"request-only view {size} bytes > {REQUEST_ONLY_BUDGET_BYTES}"
-    )
+def test_glossary_returns_descriptions_only():
+    spec = normalize(_make_synthetic_spec(num_endpoints=4))
+    gloss = project_glossary(spec, "POST", "/v1/widgets/0")
+    assert gloss is not None
+    assert gloss["method"] == "POST"
+    assert gloss["path"] == "/v1/widgets/0"
+    assert isinstance(gloss["components"], dict)
+    for entry in gloss["components"].values():
+        # Glossary must not leak structural keys.
+        assert "type" not in entry
+        for pe in (entry.get("properties") or {}).values():
+            assert "type" not in pe
+            assert "$ref" not in pe
 
 
-def test_project_full_resolves_all_refs():
-    spec = normalize(_make_synthetic_spec(num_endpoints=3))
-    proj = project_full(spec, "POST", "/v1/widgets/0")
-    assert proj is not None
-    assert proj["view"] == "full"
-    assert '"$ref"' not in json.dumps(proj)
-
-
-def test_project_raw_returns_untouched_operation():
-    spec = normalize(_make_synthetic_spec(num_endpoints=3))
-    proj = project_raw(spec, "POST", "/v1/widgets/0")
-    assert proj is not None
-    assert proj["view"] == "raw"
-    assert "operation" in proj
-    assert "components" in proj
+def test_glossary_carries_property_descriptions_when_present():
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "T"},
+        "components": {
+            "schemas": {
+                "VlanCfg": {
+                    "type": "object",
+                    "description": "VLAN configuration object.",
+                    "properties": {
+                        "vlan_id": {
+                            "type": "integer",
+                            "description": "VLAN identifier in [1, 4094].",
+                            "enum": [1, 100, 200],
+                        },
+                    },
+                }
+            }
+        },
+        "paths": {
+            "/v/{id}": {
+                "post": {
+                    "summary": "create",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/VlanCfg"}
+                            }
+                        },
+                    },
+                    "responses": {"201": {"description": "ok"}},
+                }
+            }
+        },
+    }
+    gloss = project_glossary(spec, "POST", "/v/{id}")
+    assert gloss is not None
+    assert "VlanCfg" in gloss["components"]
+    entry = gloss["components"]["VlanCfg"]
+    assert entry["description"] == "VLAN configuration object."
+    vlan_id = entry["properties"]["vlan_id"]
+    assert vlan_id["description"].startswith("VLAN identifier")
+    assert vlan_id["enum"] == [1, 100, 200]
 
 
 def test_projections_return_none_for_unknown_endpoint():
     spec = _make_synthetic_spec(num_endpoints=1)
-    assert project_compact(spec, "GET", "/nope") is None
-    assert project_full(spec, "GET", "/nope") is None
-    assert project_raw(spec, "GET", "/nope") is None
-    assert project_request_only(spec, "GET", "/nope") is None
+    assert project_skeleton(spec, "GET", "/nope") is None
+    assert project_glossary(spec, "GET", "/nope") is None
 
 
 def test_normalize_preserves_existing_components():

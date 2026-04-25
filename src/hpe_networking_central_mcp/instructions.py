@@ -30,21 +30,23 @@ direct API reads and reusable Python scripts.
    GreenLake endpoints available in this session. In READ_ONLY mode this
    catalog is filtered to GET endpoints only; otherwise every method
    (including DELETE) is listed and callable via `call_central_api`. Read
-   it directly to find the right `METHOD /path`. Then use
-   `get_api_endpoint_detail(method, path, view=...)` (or its bulk form)
-   for parameter and response schemas. Choose the smallest `view` that
-   answers your question:
+   it directly to find the right `METHOD /path`. Then use:
 
-     • `compact` *(default)* — meta + params + 2xx response + first error
-       `$ref`, with shared schemas in a `$components` side-table. ~5–15 KB.
-     • `request-only` — just the request body schema plus a flat
-       `required_paths` list. Use when constructing a POST/PUT/PATCH body.
-     • `full` — every `$ref` resolved inline. Can exceed 100 KB on heavy
-       endpoints; only use when you need a single self-contained schema.
-     • `raw` — diagnostic.
+     • `get_api_endpoint_detail(method, path)` *(or its bulk form)* —
+       returns the full structural **skeleton** of the endpoint:
+       parameters, request body schema, success and first-error response
+       shapes, and a transitive `$components` side-table. All
+       human-readable prose (descriptions, titles, examples) is stripped.
+       Field names + types + enums are usually enough to map a config
+       value onto the right field. This is what you call by default.
+     • `get_api_endpoint_glossary(method, path)` *(or its bulk form,
+       optionally filtered with `components=[...]`)* — returns the
+       human-readable descriptions for the same endpoint, organised
+       per-component. Call this **only** when a field name in the
+       skeleton is ambiguous; most workflows do not need it.
 
-   The legacy `unified_search(scope="api", …)` tool still works but is
-   deprecated — prefer the in-context catalog.
+   The two tools share the same `(method, path)` / `endpoints=[...]`
+   argument shape, so you can fan out either form in a single call.
 
 3. **Quick reads**: Use call_central_api(path, query_params) for GET requests - monitoring queries,
    config lookups, health checks. This is the fastest way to read live data.
@@ -93,8 +95,8 @@ Scripts use `from central_helpers import api, glp, graph` — no OAuth2 boilerpl
 
 - **API Endpoint Catalog (in-context, below)**: The authoritative list of every API
   endpoint. Scan it directly to find a `METHOD /path`, then call
-  `get_api_endpoint_detail(...)` for full schema. `unified_search(scope="api")` is
-  deprecated — prefer the catalog.
+  `get_api_endpoint_detail(...)` for the structural skeleton, and (rarely)
+  `get_api_endpoint_glossary(...)` if a field name is ambiguous.
 - **unified_search(query, scope="data")**: Quick keyword lookup in graph nodes (devices,
   sites, config profiles). Use when you know a name fragment but not the full identifier.
 - **unified_search(query, scope="docs")**: Search documentation sections.
@@ -121,7 +123,10 @@ Before writing ANY script you MUST complete these steps IN ORDER:
 1. `list_scripts()` — check if a seed or saved script already solves the task.
 2. **Scan the API Endpoint Catalog** (below) for the right `METHOD /path`.
    NEVER guess API paths.
-3. `get_api_endpoint_detail(method, path)` — get exact parameter schemas and response shapes.
+3. `get_api_endpoint_detail(method, path)` — get the structural skeleton
+   (parameters, request body, response shape, transitive `$components`).
+   Add `get_api_endpoint_glossary(method, path)` only if a field name is
+   ambiguous.
 4. Only THEN write the script using the discovered endpoints and schemas.
 
 Skipping these steps leads to wrong endpoints, wrong parameter names, and wasted iterations.
@@ -151,7 +156,8 @@ configuration changes are NOT permitted in this session:
   • The same restriction applies inside scripts you write or execute —
     `api.post(...)`, `api.delete(...)`, etc. will fail.
   • Mutating endpoints (POST/PUT/PATCH/DELETE) are hidden from
-    unified_search, list_api_categories, and get_api_endpoint_detail.
+    list_api_categories, get_api_endpoint_detail, and
+    get_api_endpoint_glossary.
 
 Local operations remain available for analysis: write_graph,
 save_script, and execute_script (as long as the script itself only
