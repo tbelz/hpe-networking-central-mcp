@@ -339,19 +339,30 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
     ) -> str:
         """Get human-readable descriptions for the parameters and components of one or more endpoints.
 
-        Returns:
-        - **parameters**: per-parameter prose — query/path/header/cookie
-          ``description`` text plus schema-level ``enum``, ``format``,
-          ``pattern``, ``default``, ``example``.  This is where upstream
-          specs encode rich semantics like OData filter syntax, allowed
-          values listed only in prose, and format constraints.
-        - **components**: descriptions, enum value lists, and
-          ``x-mutually-exclusive`` annotations for the schemas reachable
-          from the endpoint(s).
+        The glossary is the **literal complement of the skeleton**: every
+        prose key that ``get_api_endpoint_detail`` strips
+        (``description``, ``title``, ``example``, ``examples``,
+        ``summary``, ``x-typeName``, ``x-typeDescription``,
+        ``x-patternSources``) is surfaced here at every nesting level it
+        appears — and nothing else.  Structural fields (``type``,
+        ``enum``, ``format``, ``pattern``, ``default``, ``required``,
+        ``x-mutually-exclusive``, length / numeric constraints) are NOT
+        repeated; the skeleton already carries them.
 
-        Both surface prose that ``get_api_endpoint_detail`` strips.  Use
-        this whenever a parameter or field needs semantic context; the
-        skeleton alone is sufficient for purely structural mapping.
+        Returns:
+        - **parameters**: per-parameter prose for query/path/header/cookie
+          parameters.  Each entry contains an ``in`` scaffold plus
+          whichever prose keys the upstream spec attached at the
+          parameter or schema level.  This is where Central encodes
+          rich semantics like OData filter syntax, allowed values
+          listed only in prose, and format constraints.
+        - **components**: prose for the schemas reachable from the
+          endpoint(s), in the same shape as the schema itself
+          (``properties`` / ``items`` / ``allOf`` / … traversed only as
+          scaffolding to locate the prose).
+
+        Use this whenever a parameter or field needs semantic context;
+        the skeleton alone is sufficient for purely structural mapping.
 
         Note: the ``components`` filter argument applies to schema
         components only; the ``parameters`` block is always returned in

@@ -29,6 +29,11 @@ This module provides two responsibilities:
    endpoint, organised per-component, so an agent can fetch human help
    for ambiguous fields on demand.
 
+   The two projections are perfect complements driven by a single
+   constant, :data:`_SKELETON_STRIP_KEYS`: skeleton drops every key in
+   that tuple, glossary keeps *only* keys in that tuple.  Adding a key
+   moves it from skeleton to glossary atomically — no two-list drift.
+
    Together: 1 tool call for the common case (skeleton has enough),
    2 tool calls for the rare case where a field name is ambiguous.
 """
@@ -42,6 +47,9 @@ import re
 from typing import Any
 
 # Description-bearing keys that the skeleton strips at every nesting level.
+# This tuple is the SINGLE SOURCE OF TRUTH for the skeleton/glossary split:
+# the skeleton drops these keys, and the glossary surfaces ONLY these keys.
+# Adding a key here moves it from skeleton to glossary atomically.
 _SKELETON_STRIP_KEYS = (
     "description",
     "title",
@@ -51,6 +59,21 @@ _SKELETON_STRIP_KEYS = (
     "x-typeDescription",
     "x-patternSources",
     "summary",
+)
+
+# Structural keys that don't carry prose themselves but must be traversed
+# to find prose underneath when projecting the glossary.  Anything not in
+# _SKELETON_STRIP_KEYS and not in this set is ignored by the glossary
+# (it lives in the skeleton).
+_GLOSSARY_TRAVERSE_KEYS = (
+    "properties",
+    "patternProperties",
+    "items",
+    "additionalProperties",
+    "allOf",
+    "oneOf",
+    "anyOf",
+    "schema",
 )
 
 # Heuristics
@@ -480,49 +503,50 @@ def _strip_skeleton_keys(node: Any) -> Any:
     return _walk(node)
 
 
-def _collect_glossary_entries(name: str, schema: Any) -> dict[str, Any]:
-    """Return ``{description, properties: {field: {description, enum_descriptions, ...}}}``
-    for one component schema.  Empty fields are omitted.
+def _extract_prose(node: Any) -> Any:
+    """Return ``node`` filtered to the prose keys in :data:`_SKELETON_STRIP_KEYS`.
+
+    The walker keeps every occurrence of a strip-key (verbatim, at every
+    nesting level) and traverses the structural keys in
+    :data:`_GLOSSARY_TRAVERSE_KEYS` to reach prose nested deeper.  Every
+    other key (``type``, ``enum``, ``format``, ``pattern``, ``default``,
+    ``required``, ``$ref``, ``x-mutually-exclusive``, ``minLength`` …) is
+    ignored — those keys are preserved by the skeleton, so duplicating
+    them in the glossary would only bloat payloads.
+
+    Returns ``None`` when no prose is reachable, so callers can drop empty
+    entries (parameters, components, properties …) without an extra
+    emptiness check.
+
+    Property/parameter names inside ``properties`` / ``patternProperties``
+    are user-controlled keys, not OpenAPI keywords, so they are preserved
+    as map keys (a property literally named ``description`` survives).
     """
-    entry: dict[str, Any] = {}
-    if not isinstance(schema, dict):
-        return entry
-
-    desc = schema.get("description")
-    if isinstance(desc, str) and desc.strip():
-        entry["description"] = desc
-    title = schema.get("title")
-    if isinstance(title, str) and title.strip() and title != name:
-        entry["title"] = title
-    mutex = schema.get("x-mutually-exclusive")
-    if mutex:
-        entry["x-mutually-exclusive"] = mutex
-
-    props = schema.get("properties")
-    if isinstance(props, dict):
-        prop_entries: dict[str, dict] = {}
-        for pname, pval in props.items():
-            if not isinstance(pval, dict):
+    if isinstance(node, dict):
+        out: dict[str, Any] = {}
+        for k, v in node.items():
+            if k in _SKELETON_STRIP_KEYS:
+                out[k] = v
                 continue
-            pe: dict[str, Any] = {}
-            pdesc = pval.get("description")
-            if isinstance(pdesc, str) and pdesc.strip():
-                pe["description"] = pdesc
-            pex = pval.get("example")
-            if pex is not None:
-                pe["example"] = pex
-            penum = pval.get("enum")
-            if isinstance(penum, list) and penum:
-                pe["enum"] = penum
-            pmutex = pval.get("x-mutually-exclusive")
-            if pmutex:
-                pe["x-mutually-exclusive"] = pmutex
-            if pe:
-                prop_entries[pname] = pe
-        if prop_entries:
-            entry["properties"] = prop_entries
-
-    return entry
+            if k in ("properties", "patternProperties") and isinstance(v, dict):
+                nested: dict[str, Any] = {}
+                for pname, pval in v.items():
+                    pe = _extract_prose(pval)
+                    if pe:
+                        nested[pname] = pe
+                if nested:
+                    out[k] = nested
+                continue
+            if k in _GLOSSARY_TRAVERSE_KEYS:
+                sub = _extract_prose(v)
+                if sub:
+                    out[k] = sub
+        return out or None
+    if isinstance(node, list):
+        results = [_extract_prose(item) for item in node]
+        results = [r for r in results if r]
+        return results or None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +666,18 @@ def project_skeleton(spec: dict, method: str, path: str) -> dict | None:
 def project_glossary(spec: dict, method: str, path: str) -> dict | None:
     """Return the descriptive prose for an endpoint, organised per-component.
 
+    The glossary is the **literal complement of the skeleton**: every key
+    listed in :data:`_SKELETON_STRIP_KEYS` (``description``, ``title``,
+    ``example``, ``examples``, ``x-typeName``, ``x-typeDescription``,
+    ``x-patternSources``, ``summary``) is surfaced here at every nesting
+    level it appears — and nothing else.  Structural keys (``type``,
+    ``enum``, ``format``, ``pattern``, ``default``, ``required``,
+    ``$ref``, ``x-mutually-exclusive``, length / numeric constraints, …)
+    are NOT repeated because the skeleton preserves them; duplicating
+    them here would only bloat payloads.  Adding a key to
+    :data:`_SKELETON_STRIP_KEYS` automatically moves it from skeleton to
+    glossary on the next build.
+
     Output shape::
 
         {
@@ -653,15 +689,16 @@ def project_glossary(spec: dict, method: str, path: str) -> dict | None:
               "in": "query",
               "description": "... full prose, e.g. OData filter syntax ...",
               "example": "...",
-              "schema_description": "... if the schema itself adds prose ...",
+              "schema": {"description": "..."},
             },
             ...
           },
           "components": {
             "ArubaInterfaceCommon_SwitchportConfig": {
               "description": "...",
+              "title": "...",
               "properties": {
-                "vlan-mode": {"description": "...", "enum": ["access", "trunk"]},
+                "vlan-mode": {"description": "..."},
                 ...
               }
             },
@@ -670,15 +707,9 @@ def project_glossary(spec: dict, method: str, path: str) -> dict | None:
         }
 
     Parameters and components with no descriptive content are omitted.
-    The ``parameters`` block surfaces query/path/header/cookie parameter
-    descriptions (and any per-parameter ``example``) that the skeleton
-    intentionally strips — this is where upstream specs encode filter
-    syntax, allowed values listed only in prose, and format
-    constraints.  Structural fields (``enum``, ``format``, ``pattern``,
-    ``default``) are not repeated here because the skeleton already
-    preserves them.  Agents call this only when a field name in the
-    skeleton is ambiguous or when a parameter needs semantic context;
-    for many endpoints the skeleton is enough on its own.
+    Each parameter entry carries an ``in`` scaffold so an agent can tell
+    where the parameter is bound (``query`` / ``path`` / ``header`` /
+    ``cookie``); that single key is the only non-prose field present.
     """
     op = _find_operation(spec, method, path)
     if op is None:
@@ -702,17 +733,10 @@ def project_glossary(spec: dict, method: str, path: str) -> dict | None:
     if isinstance(op_desc, str) and op_desc.strip():
         payload["description"] = op_desc
 
-    # Parameter-level prose. The skeleton intentionally drops
-    # description-bearing keys (``description``, ``example``, ``title``,
-    # ``summary``) at every nesting level — but parameter descriptions
-    # are where the upstream specs encode rich semantics: OData filter
-    # syntax, allowed values listed only in prose, format constraints,
-    # cross-parameter dependencies, header/auth-scope notes.  Surface
-    # them here so an agent can recover them on demand.  Structural
-    # fields (``enum``, ``format``, ``pattern``, ``default``) are NOT
-    # repeated because the skeleton already preserves them.  Each entry
-    # is emitted only if it carries at least one prose-bearing field;
-    # parameters with nothing to say are omitted to keep payloads small.
+    # Parameters — _extract_prose walks each parameter (resolving one
+    # level of $ref so name/in scaffolding survives) and surfaces every
+    # prose key it finds.  The single non-prose scaffold we add back is
+    # ``in`` so the agent can tell query vs path vs header vs cookie.
     params_out: dict[str, dict[str, Any]] = {}
     for p in op.get("parameters", []) or []:
         if not isinstance(p, dict):
@@ -725,40 +749,29 @@ def project_glossary(spec: dict, method: str, path: str) -> dict | None:
         pname = resolved.get("name")
         if not isinstance(pname, str) or not pname:
             continue
-        pe: dict[str, Any] = {}
-        pdesc = resolved.get("description")
-        if isinstance(pdesc, str) and pdesc.strip():
-            pe["description"] = pdesc
-        schema = resolved.get("schema")
-        if isinstance(schema, dict):
-            sdesc = schema.get("description")
-            if isinstance(sdesc, str) and sdesc.strip() and sdesc != pdesc:
-                pe["schema_description"] = sdesc
-            if "example" in schema and "example" not in resolved:
-                pe["example"] = schema["example"]
-        if "example" in resolved:
-            pe["example"] = resolved["example"]
-        if pe:
-            pe["in"] = resolved.get("in", "") or ""
-            params_out[pname] = pe
+        prose = _extract_prose(resolved)
+        if prose:
+            prose["in"] = resolved.get("in", "") or ""
+            params_out[pname] = prose
     if params_out:
         payload["parameters"] = params_out
 
+    # Components reachable from this endpoint.
     components_out: dict[str, Any] = {}
     schemas = side.get("schemas", {}) if isinstance(side, dict) else {}
     for name, sch in schemas.items():
-        entry = _collect_glossary_entries(name, sch)
+        entry = _extract_prose(sch)
         if entry:
             components_out[name] = entry
 
-    # Inline request-body glossary too — the body schema itself may carry
-    # a description and properties even when no $ref is involved.
+    # Inline request-body schema (when the body isn't a $ref) — same
+    # treatment, surfaced under the synthetic ``requestBody`` key.
     rb = op.get("requestBody")
     if isinstance(rb, dict):
         content = (rb.get("content") or {})
         _, body_schema = _pick_media_schema(content)
         if isinstance(body_schema, dict) and "$ref" not in body_schema:
-            entry = _collect_glossary_entries("requestBody", body_schema)
+            entry = _extract_prose(body_schema)
             if entry:
                 components_out["requestBody"] = entry
 

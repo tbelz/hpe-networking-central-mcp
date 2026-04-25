@@ -10,6 +10,7 @@ from hpe_networking_central_mcp.oas_normalize import (
     project_glossary,
     project_skeleton,
 )
+from hpe_networking_central_mcp.oas_normalize import _SKELETON_STRIP_KEYS
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -355,7 +356,11 @@ def test_glossary_carries_property_descriptions_when_present():
     assert entry["description"] == "VLAN configuration object."
     vlan_id = entry["properties"]["vlan_id"]
     assert vlan_id["description"].startswith("VLAN identifier")
-    assert vlan_id["enum"] == [1, 100, 200]
+    # ``enum`` is a structural key — it lives in the skeleton, not the
+    # glossary.  The glossary surfaces ONLY prose keys (the complement
+    # of _SKELETON_STRIP_KEYS).
+    assert "enum" not in vlan_id
+    assert "type" not in vlan_id
 
 
 def test_glossary_carries_parameter_descriptions():
@@ -428,7 +433,10 @@ def test_glossary_carries_parameter_descriptions():
     f = params["filter"]
     assert f["in"] == "query"
     assert f["description"] == odata_prose
-    assert f["example"] == "status eq 'Active'"
+    # Schema-level ``example`` is reached by walking through the
+    # ``schema`` traversal key — it preserves the spec's nesting rather
+    # than flattening to a top-level field.
+    assert f["schema"]["example"] == "status eq 'Active'"
 
     # Schema-level enum + default are preserved by the SKELETON, not the
     # glossary, so they must NOT appear here — only the description text.
@@ -471,6 +479,194 @@ def test_glossary_omits_parameters_block_when_no_prose():
     gloss = project_glossary(spec, "GET", "/v1/x")
     assert gloss is not None
     assert "parameters" not in gloss
+
+
+def test_glossary_does_not_duplicate_keys_preserved_by_skeleton():
+    """Invariant: the glossary surfaces ONLY keys in
+    ``_SKELETON_STRIP_KEYS``.  Anything the skeleton preserves (``enum``,
+    ``format``, ``pattern``, ``default``, ``required``, ``type``,
+    ``$ref``, ``x-mutually-exclusive``, length / numeric constraints)
+    must NOT appear in glossary entries — duplicating them would only
+    bloat payloads.
+    """
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "T"},
+        "components": {
+            "schemas": {
+                "Cfg": {
+                    "type": "object",
+                    "description": "Cfg with structural noise.",
+                    "required": ["mode"],
+                    "x-mutually-exclusive": ["mode", "auto"],
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "description": "Mode of operation.",
+                            "enum": ["a", "b", "c"],
+                            "default": "a",
+                            "format": "lowercase",
+                            "pattern": "^[a-c]$",
+                            "minLength": 1,
+                            "maxLength": 1,
+                        }
+                    },
+                }
+            }
+        },
+        "paths": {
+            "/v/x": {
+                "post": {
+                    "summary": "x",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/Cfg"}
+                            }
+                        },
+                    },
+                    "responses": {"201": {"description": "ok"}},
+                }
+            }
+        },
+    }
+    gloss = project_glossary(spec, "POST", "/v/x")
+    assert gloss is not None
+    cfg = gloss["components"]["Cfg"]
+    assert cfg["description"] == "Cfg with structural noise."
+    for k in ("type", "required", "x-mutually-exclusive"):
+        assert k not in cfg, f"glossary leaked structural key {k!r} at component level"
+    mode = cfg["properties"]["mode"]
+    assert mode["description"] == "Mode of operation."
+    for k in (
+        "type", "enum", "default", "format", "pattern",
+        "minLength", "maxLength",
+    ):
+        assert k not in mode, f"glossary leaked structural key {k!r} at property level"
+
+
+def test_glossary_keys_form_complement_of_skeleton_strip_keys():
+    """Invariant: every key in a glossary payload is either a
+    ``_SKELETON_STRIP_KEYS`` member, a structural traversal key, or a
+    user-controlled field name nested inside ``properties`` /
+    ``patternProperties``.  Guards against silent reintroduction of
+    cherry-picking that re-emits structural keys.
+    """
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "T"},
+        "components": {
+            "schemas": {
+                "Outer": {
+                    "type": "object",
+                    "description": "Outer.",
+                    "properties": {
+                        "inner": {
+                            "type": "object",
+                            "description": "Inner.",
+                            "properties": {
+                                "leaf": {
+                                    "type": "string",
+                                    "description": "Leaf.",
+                                    "example": "x",
+                                }
+                            },
+                        }
+                    },
+                }
+            }
+        },
+        "paths": {
+            "/v/o": {
+                "post": {
+                    "summary": "o",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/Outer"}
+                            }
+                        },
+                    },
+                    "responses": {"201": {"description": "ok"}},
+                }
+            }
+        },
+    }
+    gloss = project_glossary(spec, "POST", "/v/o")
+    assert gloss is not None
+
+    allowed_struct = {
+        "method", "path", "components", "parameters",
+        "properties", "patternProperties", "items", "additionalProperties",
+        "allOf", "oneOf", "anyOf", "schema",
+        "in",  # parameter scaffold
+    }
+    user_keys = {"Outer", "inner", "leaf", "requestBody"}
+    allowed = allowed_struct | set(_SKELETON_STRIP_KEYS) | user_keys
+
+    def walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                assert k in allowed, (
+                    f"glossary contains unexpected key {k!r}; expected one of "
+                    "_SKELETON_STRIP_KEYS, traversal keys, or a user name"
+                )
+                walk(v)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(gloss)
+
+
+def test_glossary_captures_schema_title_and_x_type_metadata():
+    """The skeleton strips ``title``, ``examples``, ``x-typeName``,
+    ``x-typeDescription``, ``x-patternSources`` everywhere.  The glossary
+    must capture them — under the old cherry-picking design they were
+    lost from BOTH blobs.
+    """
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "T"},
+        "components": {
+            "schemas": {
+                "Widget": {
+                    "type": "string",
+                    "title": "Widget Identifier",
+                    "description": "A widget id.",
+                    "x-typeName": "WidgetId",
+                    "x-typeDescription": "RFC-9999 widget identifier.",
+                    "examples": ["w-1", "w-2"],
+                }
+            }
+        },
+        "paths": {
+            "/v/w": {
+                "post": {
+                    "summary": "w",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/Widget"}
+                            }
+                        },
+                    },
+                    "responses": {"201": {"description": "ok"}},
+                }
+            }
+        },
+    }
+    gloss = project_glossary(spec, "POST", "/v/w")
+    assert gloss is not None
+    w = gloss["components"]["Widget"]
+    assert w["title"] == "Widget Identifier"
+    assert w["description"] == "A widget id."
+    assert w["x-typeName"] == "WidgetId"
+    assert w["x-typeDescription"] == "RFC-9999 widget identifier."
+    assert w["examples"] == ["w-1", "w-2"]
 
 
 def test_projections_return_none_for_unknown_endpoint():
