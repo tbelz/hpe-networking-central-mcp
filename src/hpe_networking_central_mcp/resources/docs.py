@@ -41,14 +41,13 @@ def register_api_catalog_resource(mcp, settings: Settings, graph_manager: "Graph
         Guessing API paths without consulting the catalog has a near-zero
         chance of success.
         """
-        gm = graph_manager
-        if gm is None or not gm.is_available:
+        if graph_manager is None or not graph_manager.is_available:
             return (
                 "API endpoint catalog is currently unavailable — "
                 "graph database not initialized. Try again shortly."
             )
         try:
-            rows = gm.query(
+            rows = graph_manager.query(
                 "MATCH (e:ApiEndpoint) "
                 "RETURN e.method AS method, e.path AS path, "
                 "e.category AS category, e.deprecated AS deprecated",
