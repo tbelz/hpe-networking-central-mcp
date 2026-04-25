@@ -1,0 +1,185 @@
+"""Unit tests for ``hpe_networking_central_mcp.knowledge_db.download_knowledge_db``.
+
+Covers the extracted helper formerly inlined into ``server.py``. Uses
+``httpx.MockTransport`` (no new dep) to drive the GitHub release API and the
+asset download. No real network is touched.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import tarfile
+from pathlib import Path
+
+import httpx
+import pytest
+
+from hpe_networking_central_mcp import knowledge_db as kdb_mod
+from hpe_networking_central_mcp.knowledge_db import download_knowledge_db
+
+pytestmark = pytest.mark.unit
+
+
+# --- helpers ---------------------------------------------------------------
+
+
+def _make_tarball(members: dict[str, bytes] | None = None) -> bytes:
+    """Build an in-memory tar.gz with the given members.
+
+    Defaults to a tarball containing a ``knowledge_db/`` directory (one
+    placeholder file inside) and a ``manifest.json`` sibling.
+    """
+    if members is None:
+        members = {
+            "knowledge_db/db.kuzu": b"binary-db-bytes",
+            "manifest.json": json.dumps({"schema_version": 3}).encode(),
+        }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _release_payload(asset_url: str = "https://example.invalid/asset.tar.gz",
+                     tag: str = "knowledge-db-test") -> dict:
+    return {
+        "tag_name": tag,
+        "assets": [
+            {
+                "name": "knowledge_db.tar.gz",
+                "browser_download_url": asset_url,
+            }
+        ],
+    }
+
+
+def _install_transport(monkeypatch: pytest.MonkeyPatch, handler) -> None:
+    """Patch ``httpx.get`` and ``httpx.stream`` to use a MockTransport."""
+    transport = httpx.MockTransport(handler)
+    real_client_cls = httpx.Client
+
+    def _get(url, **kwargs):
+        with real_client_cls(transport=transport) as c:
+            return c.get(url, **kwargs)
+
+    def _stream(method, url, **kwargs):
+        # Mimic httpx.stream context manager
+        return real_client_cls(transport=transport).stream(method, url, **kwargs)
+
+    monkeypatch.setattr(kdb_mod.httpx, "get", _get)
+    monkeypatch.setattr(kdb_mod.httpx, "stream", _stream)
+
+
+# --- tests -----------------------------------------------------------------
+
+
+def test_returns_false_when_repo_empty(tmp_path):
+    assert download_knowledge_db("", tmp_path / "kdb") is False
+
+
+def test_returns_false_when_release_api_fails(tmp_path, monkeypatch):
+    def handler(request):
+        return httpx.Response(500, text="boom")
+
+    _install_transport(monkeypatch, handler)
+    assert download_knowledge_db("owner/repo", tmp_path / "kdb") is False
+
+
+def test_returns_false_when_no_matching_asset(tmp_path, monkeypatch):
+    def handler(request):
+        return httpx.Response(200, json={"tag_name": "x", "assets": [{"name": "other.zip"}]})
+
+    _install_transport(monkeypatch, handler)
+    assert download_knowledge_db("owner/repo", tmp_path / "kdb") is False
+
+
+def test_happy_path_extracts_db_and_manifest(tmp_path, monkeypatch):
+    tarball = _make_tarball()
+    asset_url = "https://example.invalid/knowledge_db.tar.gz"
+
+    def handler(request):
+        if "api.github.com" in str(request.url):
+            return httpx.Response(200, json=_release_payload(asset_url))
+        if str(request.url) == asset_url:
+            return httpx.Response(200, content=tarball)
+        return httpx.Response(404)
+
+    _install_transport(monkeypatch, handler)
+
+    db_path = tmp_path / "kdb"
+    assert download_knowledge_db("owner/repo", db_path) is True
+    assert db_path.exists() and db_path.is_dir()
+    assert (db_path / "db.kuzu").read_bytes() == b"binary-db-bytes"
+    # manifest must be copied next to the db
+    manifest = (tmp_path / "manifest.json")
+    assert manifest.exists()
+    assert json.loads(manifest.read_text())["schema_version"] == 3
+
+
+def test_happy_path_replaces_existing_db_dir(tmp_path, monkeypatch):
+    db_path = tmp_path / "kdb"
+    db_path.mkdir()
+    (db_path / "stale.txt").write_text("old")
+
+    tarball = _make_tarball()
+    asset_url = "https://example.invalid/knowledge_db.tar.gz"
+
+    def handler(request):
+        if "api.github.com" in str(request.url):
+            return httpx.Response(200, json=_release_payload(asset_url))
+        return httpx.Response(200, content=tarball)
+
+    _install_transport(monkeypatch, handler)
+    assert download_knowledge_db("owner/repo", db_path) is True
+    assert not (db_path / "stale.txt").exists(), "stale dir contents must be wiped"
+    assert (db_path / "db.kuzu").exists()
+
+
+def test_rejects_path_traversal_in_tar_member(tmp_path, monkeypatch):
+    """Security: tar member with `..` must be rejected without extraction."""
+    bad_tarball = _make_tarball({
+        "../etc/passwd": b"pwned",
+        "knowledge_db/db.kuzu": b"x",
+    })
+    asset_url = "https://example.invalid/bad.tar.gz"
+
+    def handler(request):
+        if "api.github.com" in str(request.url):
+            return httpx.Response(200, json=_release_payload(asset_url))
+        return httpx.Response(200, content=bad_tarball)
+
+    _install_transport(monkeypatch, handler)
+    db_path = tmp_path / "kdb"
+    # Should return False (caught + logged), not raise, not extract
+    assert download_knowledge_db("owner/repo", db_path) is False
+    assert not db_path.exists()
+
+
+def test_rejects_absolute_tar_member(tmp_path, monkeypatch):
+    bad_tarball = _make_tarball({"/abs/evil": b"x"})
+    asset_url = "https://example.invalid/bad.tar.gz"
+
+    def handler(request):
+        if "api.github.com" in str(request.url):
+            return httpx.Response(200, json=_release_payload(asset_url))
+        return httpx.Response(200, content=bad_tarball)
+
+    _install_transport(monkeypatch, handler)
+    assert download_knowledge_db("owner/repo", tmp_path / "kdb") is False
+
+
+def test_returns_false_when_archive_has_no_knowledge_db_dir(tmp_path, monkeypatch):
+    tarball = _make_tarball({"unrelated/file.txt": b"x"})
+    asset_url = "https://example.invalid/x.tar.gz"
+
+    def handler(request):
+        if "api.github.com" in str(request.url):
+            return httpx.Response(200, json=_release_payload(asset_url))
+        return httpx.Response(200, content=tarball)
+
+    _install_transport(monkeypatch, handler)
+    assert download_knowledge_db("owner/repo", tmp_path / "kdb") is False

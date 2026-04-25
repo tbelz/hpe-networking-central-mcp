@@ -377,7 +377,7 @@ else:
 
     # The MCP server initializes the catalog in a background thread.
     # With pre-populated cache it's fast, but the first tool call may still
-    # see an empty catalog. Test list_api_categories first to warm up the
+    # see an empty catalog. Test list_api first to warm up the
     # server, then retry if catalog was still loading.
 
     def test_mcp_initialize():
@@ -392,16 +392,15 @@ else:
         print(f"      Capabilities: {list(caps.keys())}")
 
     def test_mcp_categories():
-        resp = _tool_call("list_api_categories", {})
+        resp = _tool_call("list_api", {})
         assert resp, "No response"
         text = _get_text(resp)
-        data = json.loads(text)
-        # Background init may not have finished — accept either outcome
-        if "error" in data and "empty" in data["error"]:
+        # list_api now returns the rendered path tree as plain text
+        if "unavailable" in text.lower():
             print(f"    -> Catalog still loading (background init), acceptable")
             return
-        assert data["total_endpoints"] >= 200
-        print(f"    -> {data['total_endpoints']} endpoints, {len(data['categories'])} categories")
+        assert "API Endpoint Catalog" in text, f"Unexpected response: {text[:200]}"
+        print(f"    -> Catalog returned ({len(text)} chars)")
 
     def test_mcp_search():
         resp = _tool_call("unified_search", {"query": "vlan"})
@@ -471,7 +470,7 @@ else:
         print(f"    -> {len(text)} chars")
 
     run_test("MCP: initialize handshake", test_mcp_initialize)
-    run_test("MCP: list_api_categories", test_mcp_categories)
+    run_test("MCP: list_api", test_mcp_categories)
     run_test("MCP: unified_search('vlan')", test_mcp_search)
     run_test("MCP: get_api_endpoint_detail", test_mcp_detail)
     run_test("MCP: call_central_api (real API)", test_mcp_api_call)

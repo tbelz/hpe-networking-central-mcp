@@ -169,7 +169,8 @@ Before writing ANY code you MUST:
 1. Call `unified_search(query)` with keywords relevant to the task to find candidate endpoints.
 2. Call `get_api_endpoint_detail(method, path)` for each endpoint you plan to use — get exact
    parameter names, types, and request/response schemas.
-3. Call `list_api_categories()` if you need to explore what API areas exist.
+3. Call `list_api()` if your client doesn't show the catalog in the system
+   instructions or via `api://endpoint-catalog`.
 
 NEVER guess or hardcode API paths — always discover them first.
 

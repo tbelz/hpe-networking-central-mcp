@@ -598,7 +598,7 @@
       #text(fill: hpe-green, weight: "bold", size: 1.1em)[🔍 Discovery]
       #v(4pt)
       - `unified_search` — BM25 keyword search
-      - `list_api_categories` — Browse API areas
+      - `list_api` — Full API tree (fallback)
       - `get_api_endpoint_detail` — Full schema
     ],
   ),

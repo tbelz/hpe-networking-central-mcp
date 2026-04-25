@@ -231,22 +231,23 @@ class TestUnifiedSearch:
         assert result["scope"] == "docs"
 
 
-# ── list_api_categories ─────────────────────────────────────────────
+# ── list_api ─────────────────────────────────────────────────────────
 
 
-class TestListApiCategories:
+class TestListApi:
 
-    def test_returns_categories(self, tools):
-        result = json.loads(tools["list_api_categories"]())
-        cats = result["categories"]
-        assert "monitoring" in cats
-        assert "config" in cats
-        assert result["total_endpoints"] >= 4
+    def test_returns_path_tree_text(self, tools):
+        text = tools["list_api"]()
+        assert isinstance(text, str)
+        assert "API Endpoint Catalog" in text
+        # Categories from the conftest fixtures appear as headers
+        assert "## monitoring" in text.lower() or "## monitoring" in text
+        assert "## config" in text.lower() or "## config" in text
 
-    def test_counts_are_positive(self, tools):
-        result = json.loads(tools["list_api_categories"]())
-        for _cat, count in result["categories"].items():
-            assert count > 0
+    def test_lists_methods(self, tools):
+        text = tools["list_api"]()
+        # Real path-tree formatting puts methods in brackets
+        assert "[GET" in text or "[POST" in text
 
 
 # ── get_api_endpoint_detail (skeleton) ──────────────────────────────

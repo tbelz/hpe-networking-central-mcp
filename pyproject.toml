@@ -26,7 +26,11 @@ dependencies = [
 hpe-networking-central-mcp = "hpe_networking_central_mcp.server:main"
 
 [project.optional-dependencies]
-test = ["pytest>=8.0"]
+test = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-timeout>=2.3",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -51,6 +55,28 @@ line-length = 100
 select = ["E", "F", "I", "W"]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --timeout=120"
 markers = [
-    "integration: live API integration tests (require Central credentials in .env)",
+    "unit: fast in-process tests (no network, no credentials)",
+    "integration: integration tests; auto-skip when Central credentials are missing",
+    "live_api: tests that hit the live Central / GreenLake API (read-only); subset of integration",
+    "slow: tests that take more than a few seconds",
+]
+
+[tool.coverage.run]
+source = ["src/hpe_networking_central_mcp"]
+omit = [
+    "src/hpe_networking_central_mcp/seeds/*",
+    "src/hpe_networking_central_mcp/script_runtime/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
 ]

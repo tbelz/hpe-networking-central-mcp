@@ -5,14 +5,10 @@ from __future__ import annotations
 import atexit
 import graphlib
 import json
-import shutil
 import sys
-import tarfile
-import tempfile
 import threading
 from pathlib import Path
 
-import httpx
 from mcp.server.fastmcp import FastMCP
 
 from .api_tree import render_path_tree
@@ -21,6 +17,7 @@ from .config import load_settings
 from .graph import GraphManager
 from .graph.ipc_server import GraphIPCServer
 from .instructions import build_instructions
+from .knowledge_db import download_knowledge_db
 from .logging import setup_logging
 from .prompts.workflows import register_prompts
 from .resources.docs import register_api_catalog_resource, register_resources
@@ -61,83 +58,9 @@ except Exception as exc:
     sys.exit(1)
 
 # ── Download knowledge DB from GitHub release (if configured) ─────────
-def _download_knowledge_db(repo: str, db_path: Path) -> bool:
-    """Download the latest knowledge DB tar.gz from a GitHub release.
-
-    Returns True if a DB was downloaded and extracted, False otherwise.
-    """
-    if not repo:
-        logger.info("knowledge_db_skip", reason="KNOWLEDGE_RELEASE_REPO not set")
-        return False
-
-    api_url = f"https://api.github.com/repos/{repo}/releases/latest"
-    try:
-        resp = httpx.get(api_url, timeout=30, follow_redirects=True)
-        resp.raise_for_status()
-        release = resp.json()
-    except Exception as exc:
-        logger.warning("knowledge_db_fetch_failed", error=str(exc))
-        return False
-
-    # Find the knowledge_db.tar.gz asset
-    asset_url = None
-    for asset in release.get("assets", []):
-        if asset["name"] == "knowledge_db.tar.gz":
-            asset_url = asset["browser_download_url"]
-            break
-
-    if not asset_url:
-        logger.warning("knowledge_db_no_asset", release=release.get("tag_name"))
-        return False
-
-    logger.info("knowledge_db_downloading", url=asset_url)
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            tar_path = Path(tmp) / "knowledge_db.tar.gz"
-            with httpx.stream("GET", asset_url, timeout=120, follow_redirects=True) as r:
-                r.raise_for_status()
-                with open(tar_path, "wb") as f:
-                    for chunk in r.iter_bytes(chunk_size=65536):
-                        f.write(chunk)
-
-            with tarfile.open(tar_path, "r:gz") as tf:
-                # Security: validate member paths to prevent path traversal
-                for member in tf.getmembers():
-                    if member.name.startswith("/") or ".." in member.name:
-                        raise ValueError(f"Unsafe tar member: {member.name}")
-                tf.extractall(tmp)
-
-            extracted_db = Path(tmp) / "knowledge_db"
-            if not extracted_db.exists():
-                logger.warning("knowledge_db_extract_failed", reason="knowledge_db not found in archive")
-                return False
-
-            # Replace current DB (may be file or directory depending on LadybugDB version)
-            if db_path.exists():
-                if db_path.is_dir():
-                    shutil.rmtree(db_path)
-                else:
-                    db_path.unlink()
-            if extracted_db.is_dir():
-                shutil.copytree(extracted_db, db_path)
-            else:
-                shutil.copy2(extracted_db, db_path)
-
-            # Copy manifest.json if present in archive
-            extracted_manifest = Path(tmp) / "manifest.json"
-            if extracted_manifest.exists():
-                shutil.copy2(extracted_manifest, db_path.parent / "manifest.json")
-
-            logger.info("knowledge_db_installed", tag=release.get("tag_name"))
-            return True
-    except Exception as exc:
-        logger.warning("knowledge_db_download_failed", error=str(exc))
-        return False
-
-
 # Try to download knowledge DB before initializing graph
-knowledge_downloaded = _download_knowledge_db(
-    settings.knowledge_release_repo, settings.graph_db_path
+knowledge_downloaded = download_knowledge_db(
+    settings.knowledge_release_repo, settings.graph_db_path, logger=logger
 )
 
 # Initialize file-backed graph database

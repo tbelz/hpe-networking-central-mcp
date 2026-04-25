@@ -20,8 +20,13 @@ Required workflow for anything that may take >10s (test suites, builds,
    explicitly killed it with `kill_terminal`.
 3. If polling shows no progress for a long time, prefer `kill_terminal`
    followed by a fresh `mode="async"` start over piling on more invocations.
-4. use a background terminal with output redirected to a file! No pipes in WSL!
-5. reading from the terminal with cat/tail via a second sync shell results in failure
+4. Use a background terminal with output redirected to a file. No pipes in WSL!
+5. Reading from the terminal with cat/tail via a second sync shell results in failure.
+6. **Always write log/scratch files into the repo-local `tmp/` directory** (which
+   is gitignored). Do NOT redirect to `/tmp/...` or any other path outside the
+   project root — every such command requires manual user confirmation. Use
+   `tmp/<name>.log` for pytest output, build logs, etc. Create the directory if
+   missing (`mkdir -p tmp`).
 
 
 ## Python

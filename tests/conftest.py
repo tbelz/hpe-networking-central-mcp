@@ -115,9 +115,26 @@ class SeedInfra:
 
 # ── Fixtures ────────────────────────────────────────────────────────
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+# Map shell-script-style env var names to the canonical CENTRAL_* names so a
+# single .env works for both `pytest` and the test_*.sh scripts under tests/.
+_ENV_ALIASES: dict[str, str] = {
+    "BASE_URL": "CENTRAL_BASE_URL",
+    "CLIENT_ID": "CENTRAL_CLIENT_ID",
+    "CLIENT_SECRET": "CENTRAL_CLIENT_SECRET",
+}
+
+
 def _load_dotenv() -> None:
-    """Parse .env from repo root and inject into os.environ."""
-    env_file = Path(__file__).resolve().parent.parent / ".env"
+    """Parse .env from repo root and inject into os.environ.
+
+    Also normalises shell-style names (BASE_URL / CLIENT_ID / CLIENT_SECRET) to
+    the canonical CENTRAL_* names so the same .env works for the Python tests
+    and the existing Docker shell scripts.
+    """
+    env_file = _REPO_ROOT / ".env"
     if not env_file.exists():
         return
     for line in env_file.read_text(encoding="utf-8").splitlines():
@@ -131,6 +148,41 @@ def _load_dotenv() -> None:
         value = value.strip().strip('"').strip("'")
         if key:
             os.environ.setdefault(key, value)
+
+    # Backfill canonical names from shell-style aliases when only the alias is set.
+    for alias, canonical in _ENV_ALIASES.items():
+        if os.environ.get(alias) and not os.environ.get(canonical):
+            os.environ[canonical] = os.environ[alias]
+
+
+# Run once at import time so any module-level code that reads settings sees
+# the values from .env.
+_load_dotenv()
+
+
+def has_central_credentials() -> bool:
+    """True if Central API credentials are present in the environment."""
+    return bool(
+        os.environ.get("CENTRAL_BASE_URL")
+        and os.environ.get("CENTRAL_CLIENT_ID")
+        and os.environ.get("CENTRAL_CLIENT_SECRET")
+    )
+
+
+def pytest_collection_modifyitems(config, items):  # noqa: ARG001
+    """Auto-skip integration and live_api tests when credentials are missing.
+
+    Pytest still collects them (so they appear in `--collect-only` output) but
+    each is marked with a skip reason instead of erroring out at fixture time.
+    """
+    if has_central_credentials():
+        return
+    skip_marker = pytest.mark.skip(
+        reason="Central credentials not configured (CENTRAL_BASE_URL/CLIENT_ID/CLIENT_SECRET)"
+    )
+    for item in items:
+        if any(m.name in ("integration", "live_api") for m in item.iter_markers()):
+            item.add_marker(skip_marker)
 
 
 @pytest.fixture(scope="session")

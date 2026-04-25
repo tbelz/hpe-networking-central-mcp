@@ -26,6 +26,27 @@ def register_api_catalog_resource(mcp, settings: Settings, graph_manager: "Graph
     """
     from ..api_tree import render_path_tree
 
+    def _render_catalog() -> str:
+        if graph_manager is None or not graph_manager.is_available:
+            return (
+                "API endpoint catalog is currently unavailable — "
+                "graph database not initialized. Try again shortly."
+            )
+        try:
+            rows = graph_manager.query(
+                "MATCH (e:ApiEndpoint) "
+                "RETURN e.method AS method, e.path AS path, "
+                "e.category AS category, e.deprecated AS deprecated",
+                read_only=True,
+            )
+        except Exception:
+            logger.exception("api_endpoint_catalog_query_failed")
+            return (
+                "API endpoint catalog is currently unavailable. "
+                "Try again shortly; see server logs for details."
+            )
+        return render_path_tree(rows, read_only=settings.read_only)
+
     @mcp.resource("api://endpoint-catalog")
     def api_endpoint_catalog() -> str:
         """Full API Endpoint Catalog — every available METHOD /path for Central and GreenLake.
@@ -41,21 +62,22 @@ def register_api_catalog_resource(mcp, settings: Settings, graph_manager: "Graph
         Guessing API paths without consulting the catalog has a near-zero
         chance of success.
         """
-        if graph_manager is None or not graph_manager.is_available:
-            return (
-                "API endpoint catalog is currently unavailable — "
-                "graph database not initialized. Try again shortly."
-            )
-        try:
-            rows = graph_manager.query(
-                "MATCH (e:ApiEndpoint) "
-                "RETURN e.method AS method, e.path AS path, "
-                "e.category AS category, e.deprecated AS deprecated",
-                read_only=True,
-            )
-        except Exception as exc:
-            return f"API endpoint catalog unavailable: {exc}"
-        return render_path_tree(rows, read_only=settings.read_only)
+        return _render_catalog()
+
+    # Alias under the docs:// scheme used by every other documentation
+    # resource. Some MCP clients (notably Claude Code builds) hide
+    # resources whose URI scheme they don't recognise; exposing the same
+    # content under docs:// guarantees the catalog is reachable from any
+    # spec-compliant client.
+    @mcp.resource("docs://endpoint-catalog")
+    def docs_endpoint_catalog() -> str:
+        """Alias for ``api://endpoint-catalog`` — full API Endpoint Catalog.
+
+        Identical content to ``api://endpoint-catalog``; provided under the
+        ``docs://`` scheme for clients that filter unknown schemes from
+        their resource picker.
+        """
+        return _render_catalog()
 
 
 def register_resources(mcp, settings: Settings, graph_manager: GraphManager | None = None):
@@ -209,7 +231,9 @@ All endpoints from both platforms are indexed in a single unified catalog.
 
 1. `unified_search(query)` — search for endpoints by keyword. Returns compact results
    (method, path, summary). GreenLake categories appear as "HPE GreenLake APIs for ...".
-2. `list_api_categories()` — browse all API categories with endpoint counts.
+2. `list_api()` — return the full nested API tree (fallback for clients that
+   don't surface the catalog via instructions or the `api://endpoint-catalog`
+   resource).
 3. `get_api_endpoint_detail(method, path)` — full parameter schemas, request/response bodies.
 
 Always discover endpoints via search before writing scripts or making API calls.
