@@ -41,11 +41,12 @@ _FTS_INDEX_MAP: dict[str, tuple[str, list[str]]] = {
 }
 
 # Scope → FTS indexes to query
-# Note: "api" is intentionally absent from the scopes exposed by unified_search
-# (callers use the embedded API Endpoint Catalog + get_api_endpoint_detail instead).
-# "all" means docs + data only so ApiEndpoint rows do not appear in search results.
+# Note: "api" exists here for internal use only (e.g. direct calls from tests).
+# The unified_search tool rejects scope="api" at validation time (valid_scopes does
+# not include "api") — callers always use the embedded API Endpoint Catalog and
+# get_api_endpoint_detail instead.  "all" means docs + data only.
 _SCOPE_FTS: dict[str, list[str]] = {
-    "api": ["api_fts"],
+    "api": ["api_fts"],  # internal only — blocked by unified_search
     "docs": ["doc_fts"],
     "data": ["device_fts", "site_fts", "script_fts"],
     "all": ["doc_fts", "device_fts", "site_fts", "script_fts"],

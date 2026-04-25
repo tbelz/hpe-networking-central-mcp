@@ -21,6 +21,7 @@ Required workflow for anything that may take >10s (test suites, builds,
 3. If polling shows no progress for a long time, prefer `kill_terminal`
    followed by a fresh `mode="async"` start over piling on more invocations.
 4. use a background terminal with output redirected to a file! No pipes in WSL!
+5. reading from the terminal with cat/tail via a second sync shell results in failure
 
 
 ## Python
@@ -28,4 +29,4 @@ Required workflow for anything that may take >10s (test suites, builds,
 * Always use `uv run` (e.g. `uv run pytest`, `uv run python scripts/...`).
 * The repo's pytest config lives in `pyproject.toml`; do not pass `--rootdir`.
 
-  Dont add anything to Agents.md exept when i explicitly tell you!
+  Don't add anything to AGENTS.md except when I explicitly tell you!

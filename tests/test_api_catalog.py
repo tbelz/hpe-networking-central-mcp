@@ -22,12 +22,19 @@ from hpe_networking_central_mcp.config import Settings
 # ── Fixtures ────────────────────────────────────────────────────────
 
 
+# Fixtures mirror the real project_skeleton output shape:
+#   responses → dict keyed by status code + optional "error" sentinel
+#   $components → sectioned: {"schemas": {...}, "responses": {...}}
 _VLAN_SKELETON = {
     "method": "POST",
     "path": "/config/v1/vlans",
+    "summary": "Create a VLAN",
     "operation_id": "createVLAN",
+    "tags": [],
+    "deprecated": False,
     "parameters": [],
     "request_body": {
+        "content_type": "application/json",
         "required": True,
         "schema": {
             "type": "object",
@@ -39,11 +46,13 @@ _VLAN_SKELETON = {
         },
     },
     "required_paths": ["vlan_id"],
-    "responses": [
-        {"status": "201", "schema": {"type": "object"}},
-    ],
+    "responses": {
+        "201": {"schema": {"$ref": "#/components/schemas/VlanCfg"}},
+        "error": "#/components/responses/BadRequest",
+    },
     "$components": {
-        "VlanCfg": {"type": "object"},
+        "schemas": {"VlanCfg": {"type": "object"}},
+        "responses": {"BadRequest": {"type": "object"}},
     },
 }
 
@@ -64,11 +73,16 @@ _VLAN_GLOSSARY = {
 _APS_SKELETON = {
     "method": "GET",
     "path": "/monitoring/v2/aps",
+    "summary": "List all access points",
     "operation_id": "listAPs",
+    "tags": [],
+    "deprecated": False,
     "parameters": [{"name": "site", "in": "query"}],
     "request_body": None,
     "required_paths": [],
-    "responses": [{"status": "200", "schema": {"type": "object"}}],
+    "responses": {
+        "200": {"schema": {"type": "object"}},
+    },
 }
 
 _APS_GLOSSARY = {
@@ -125,9 +139,9 @@ def gm(tmp_path_factory):
     _create("GET", "/monitoring/v2/switches", "List all switches",
             "Paginated list of switches", "listSwitches", "monitoring",
             skeleton={"method": "GET", "path": "/monitoring/v2/switches",
-                      "operation_id": "listSwitches", "parameters": [],
-                      "request_body": None, "required_paths": [],
-                      "responses": []},
+                      "summary": "List all switches", "operation_id": "listSwitches",
+                      "tags": [], "deprecated": False, "parameters": [],
+                      "request_body": None, "required_paths": [], "responses": {}},
             glossary={"method": "GET", "path": "/monitoring/v2/switches",
                       "components": {}})
     _create("POST", "/config/v1/vlans", "Create a VLAN",
@@ -136,9 +150,9 @@ def gm(tmp_path_factory):
     _create("DELETE", "/config/v1/vlans/{id}", "Delete a VLAN",
             "Removes a VLAN", "deleteVLAN", "config",
             skeleton={"method": "DELETE", "path": "/config/v1/vlans/{id}",
-                      "operation_id": "deleteVLAN", "parameters": [],
-                      "request_body": None, "required_paths": [],
-                      "responses": []},
+                      "summary": "Delete a VLAN", "operation_id": "deleteVLAN",
+                      "tags": [], "deprecated": False, "parameters": [],
+                      "request_body": None, "required_paths": [], "responses": {}},
             glossary={"method": "DELETE", "path": "/config/v1/vlans/{id}",
                       "components": {}})
 
@@ -248,7 +262,10 @@ class TestGetApiEndpointDetail:
         assert result["operation_id"] == "createVLAN"
         assert result["request_body"]["schema"]["type"] == "object"
         assert "vlan_id" in result["request_body"]["schema"]["properties"]
+        assert isinstance(result["responses"], dict)
+        assert "201" in result["responses"]
         assert "$components" in result
+        assert "schemas" in result["$components"]
 
     def test_no_descriptions_in_skeleton(self, tools):
         # Skeleton fixture deliberately omits descriptions; the wire
