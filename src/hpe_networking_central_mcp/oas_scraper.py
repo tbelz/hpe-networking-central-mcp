@@ -170,7 +170,7 @@ def _extract_oas_from_markdown(text: str) -> dict | None:
     spec: dict | None = None
     example: Any | None = None
 
-    for idx, m in enumerate(_JSON_BLOCK_RE.finditer(text)):
+    for m in _JSON_BLOCK_RE.finditer(text):
         try:
             parsed = json.loads(m.group(1))
         except json.JSONDecodeError:

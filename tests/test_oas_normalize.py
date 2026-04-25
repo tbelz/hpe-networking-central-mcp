@@ -5,8 +5,6 @@ from __future__ import annotations
 import copy
 import json
 
-import pytest
-
 from hpe_networking_central_mcp.oas_normalize import (
     COMPACT_BUDGET_BYTES,
     REQUEST_ONLY_BUDGET_BYTES,

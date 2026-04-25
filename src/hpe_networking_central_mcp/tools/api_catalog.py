@@ -228,9 +228,12 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
           100 KB on heavy endpoints; use only when you need a single
           self-contained schema with no indirection.
         - ``"raw"`` — The untouched OpenAPI operation object plus the raw
-          ``components`` table.  Diagnostic.
+          ``components`` table.  Diagnostic.  Note: when served from the
+          cached knowledge DB this view degrades to ``"full"`` because
+          only the resolved shape is stored on disk; the response will
+          carry a ``"note"`` field explaining the fallback.
 
-        DELETE endpoints are catalogued and callable via ``central_api_call``
+        DELETE endpoints are catalogued and callable via ``call_central_api``
         when ``READ_ONLY=false``.  In ``READ_ONLY=true`` mode, non-GET
         endpoints are silently skipped (single form returns an error; bulk
         form lists them under ``skipped_read_only``).
@@ -320,7 +323,18 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                 read_only=True,
             )
         except Exception as exc:
-            # Older DBs lack the projection columns — degrade silently to "full".
+            # Only fall back when the failure is consistent with the projection
+            # columns being absent (older DBs predating schema_version 2).
+            # All other query errors must surface to the caller.
+            msg = str(exc).lower()
+            missing_columns = (
+                "bodycompactjson" in msg
+                or "bodyrequestonlyjson" in msg
+                or "no such column" in msg
+                or "unknown property" in msg
+            )
+            if not missing_columns:
+                raise
             logger.warning(
                 "endpoint_detail_view_fallback",
                 view=view,
@@ -335,7 +349,14 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                 {"eids": eids},
                 read_only=True,
             )
+            requested_view = view
             view = "full"  # serve the legacy resolved view
+            _view_fallback_note = (
+                f"requested view '{requested_view}' is unavailable in the cached "
+                "knowledge DB (schema_version < 2); served 'full' instead."
+            )
+        else:
+            _view_fallback_note = None
 
         details_by_eid: dict[str, dict] = {}
         for r in rows:
@@ -343,6 +364,7 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             path_val = r.get("e.path", "")
 
             # ── view='compact' / 'request-only': prefer precomputed JSON ──
+            requested_view = view
             if view == "compact":
                 blob = r.get("e.bodyCompactJson") or ""
                 if blob:
@@ -351,8 +373,14 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                         d.setdefault("category", r.get("e.category", ""))
                         details_by_eid[f"{method_val}:{path_val}"] = d
                         continue
-                    except (json.JSONDecodeError, TypeError):
-                        pass  # fall through to legacy assembly
+                    except (json.JSONDecodeError, TypeError) as exc:
+                        logger.warning(
+                            "endpoint_detail_blob_invalid",
+                            view=view,
+                            method=method_val,
+                            path=path_val,
+                            error=str(exc),
+                        )
             elif view == "request-only":
                 blob = r.get("e.bodyRequestOnlyJson") or ""
                 if blob:
@@ -361,8 +389,14 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                         d.setdefault("category", r.get("e.category", ""))
                         details_by_eid[f"{method_val}:{path_val}"] = d
                         continue
-                    except (json.JSONDecodeError, TypeError):
-                        pass  # fall through to legacy assembly
+                    except (json.JSONDecodeError, TypeError) as exc:
+                        logger.warning(
+                            "endpoint_detail_blob_invalid",
+                            view=view,
+                            method=method_val,
+                            path=path_val,
+                            error=str(exc),
+                        )
 
             # ── view='full' (or fallback): assemble from legacy columns ──
             d: dict[str, Any] = {
@@ -408,6 +442,16 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                 d["note"] = (
                     "raw view is only available at build time; serving 'full' instead."
                 )
+            elif requested_view in {"compact", "request-only"}:
+                # Precomputed blob was missing/invalid for this row — make
+                # the shape change explicit so callers can detect it.
+                d["view"] = "full"
+                d["note"] = (
+                    f"requested view '{requested_view}' was unavailable for this "
+                    "endpoint (precomputed blob missing or invalid); served 'full' instead."
+                )
+            elif _view_fallback_note is not None:
+                d["note"] = _view_fallback_note
 
             details_by_eid[f"{method_val}:{path_val}"] = d
 

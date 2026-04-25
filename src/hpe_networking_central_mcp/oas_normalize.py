@@ -69,9 +69,13 @@ def normalize(spec: dict) -> dict:
     out["components"].setdefault("responses", {})
 
     _strip_noise(out)
+    # Mutex hints are emitted before dedup so they annotate the inline
+    # shapes that dedup will later promote into ``components/schemas``.
+    # Running it after dedup would miss schemas that have already been
+    # replaced by ``$ref`` at their use sites.
+    _emit_mutex_hints(out)
     _dedup_error_responses(out)
     _dedup_nested_objects(out)
-    _emit_mutex_hints(out)
 
     return out
 
@@ -172,7 +176,7 @@ def _dedup_error_responses(spec: dict) -> None:
         majority_status = max(status_counts.items(), key=lambda kv: kv[1])[0]
 
         component_name = _unique_name(
-            f"Error{majority_status.replace('XX', 'XX')}_{h[:8]}",
+            f"Error{majority_status}_{h[:8]}",
             components,
         )
 
@@ -285,8 +289,12 @@ def _is_dedup_candidate(node: dict) -> bool:
 
 
 def _emit_mutex_hints(spec: dict) -> None:
-    """Annotate schemas whose description says 'either X or Y' with a hint."""
-    paths = spec.get("paths") or {}
+    """Annotate schemas whose description says 'either X or Y' with a hint.
+
+    Walks both ``paths`` (inline operation/schema bodies) and
+    ``components`` (already-promoted shapes) so hints survive even when
+    a later dedup pass moves the annotated schema into a component.
+    """
 
     def _walk(node: Any) -> None:
         if isinstance(node, dict):
@@ -304,8 +312,13 @@ def _emit_mutex_hints(spec: dict) -> None:
             for item in node:
                 _walk(item)
 
-    for _path, path_item in paths.items():
+    for _path, path_item in (spec.get("paths") or {}).items():
         _walk(path_item)
+    components = spec.get("components") or {}
+    for bucket_name in ("schemas", "responses"):
+        bucket = components.get(bucket_name) or {}
+        for _name, comp in bucket.items():
+            _walk(comp)
 
 
 # ---------------------------------------------------------------------------
