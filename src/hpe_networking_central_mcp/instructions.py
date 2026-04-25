@@ -25,12 +25,15 @@ direct API reads and reusable Python scripts.
    with `effective=true&detailed=true` — it returns provenance annotations showing
    exactly which scope each setting originates from.
 
-2. **Discover APIs**: The available endpoints are included below as the
+2. **Discover APIs**: The available endpoints are listed in the
    **API Endpoint Catalog** — a category-grouped path-tree of Central and
    GreenLake endpoints available in this session. In READ_ONLY mode this
    catalog is filtered to GET endpoints only; otherwise every method
-   (including DELETE) is listed and callable via `call_central_api`. Read
-   it directly to find the right `METHOD /path`. Then use:
+   (including DELETE) is listed and callable via `call_central_api`. The
+   catalog is embedded below in these instructions **and** is always
+   fetchable as the `api://endpoint-catalog` resource. If you cannot see
+   it in the instructions (some clients drop the instructions field), read
+   `api://endpoint-catalog` before looking up any endpoint. Then use:
 
      • `get_api_endpoint_detail(method, path)` *(or its bulk form)* —
        returns the full structural **skeleton** of the endpoint:
@@ -93,8 +96,9 @@ Scripts use `from central_helpers import api, glp, graph` — no OAuth2 boilerpl
 
 ## Choosing the right search tool
 
-- **API Endpoint Catalog (in-context, below)**: The authoritative list of every API
-  endpoint. Scan it directly to find a `METHOD /path`, then call
+- **API Endpoint Catalog (`api://endpoint-catalog` resource, or in-context below)**:
+  The authoritative list of every API endpoint. Read the resource or scan the
+  embedded catalog to find a `METHOD /path`, then call
   `get_api_endpoint_detail(...)` for the structural skeleton, and (rarely)
   `get_api_endpoint_glossary(...)` if a field name is ambiguous.
 - **unified_search(query, scope="data")**: Quick keyword lookup in graph nodes (devices,
@@ -110,6 +114,12 @@ for relationship traversals or property filters.
 ## MCP Resources
 
 Read these resources for context — they are always up to date:
+- `api://endpoint-catalog` — **Full API Endpoint Catalog**: every available
+  `METHOD /path` for Central and GreenLake, grouped by category. Read this
+  resource if the catalog is not visible in the system instructions below
+  (some MCP clients such as Claude Desktop drop the instructions field).
+  Guessing API paths without consulting the catalog has a near-zero chance
+  of success.
 - `graph://schema` — Full graph schema: node types, properties, relationships, row counts,
   and example Cypher queries. **Read this first** before writing any Cypher.
 - `graph://seed-status` — Startup seed execution results. Check this if graph data seems
@@ -121,8 +131,8 @@ Read these resources for context — they are always up to date:
 Before writing ANY script you MUST complete these steps IN ORDER:
 
 1. `list_scripts()` — check if a seed or saved script already solves the task.
-2. **Scan the API Endpoint Catalog** (below) for the right `METHOD /path`.
-   NEVER guess API paths.
+2. **Read the `api://endpoint-catalog` resource** (or scan it in the system
+   instructions below) for the right `METHOD /path`. NEVER guess API paths.
 3. `get_api_endpoint_detail(method, path)` — get the structural skeleton
    (parameters, request body, response shape, transitive `$components`).
    Add `get_api_endpoint_glossary(method, path)` only if a field name is

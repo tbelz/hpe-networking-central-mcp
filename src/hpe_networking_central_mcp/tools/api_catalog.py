@@ -41,9 +41,9 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
 
         Use this to find sections of the VSG documentation, or to look up
         devices / sites / config profiles / scripts in the graph by name.
-        For API endpoints, scan the **API Endpoint Catalog** embedded in
-        the system instructions instead — it lists every reachable
-        ``METHOD /path``.
+        For API endpoints, read the ``api://endpoint-catalog`` resource (or
+        scan the API Endpoint Catalog in the system instructions) — it lists
+        every reachable ``METHOD /path``.
 
         Args:
             query: Search term (e.g., "vlan", "switch", "Site-NYC").
@@ -72,8 +72,8 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                 "error": (
                     f"Invalid scope '{scope}'. Must be one of: "
                     f"{', '.join(sorted(valid_scopes))}. "
-                    "For API endpoints, scan the API Endpoint Catalog in the "
-                    "system instructions and call get_api_endpoint_detail()."
+                    "For API endpoints, read the api://endpoint-catalog resource "
+                    "and call get_api_endpoint_detail()."
                 ),
             })
 
@@ -101,9 +101,9 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         """List all API categories with their endpoint counts.
 
         Returns every category name and how many endpoints it contains.
-        Use this to discover what API areas are available; then scan the
-        API Endpoint Catalog in the system instructions for the exact
-        ``METHOD /path``.
+        Use this to discover what API areas are available; then read the
+        ``api://endpoint-catalog`` resource (or scan the API Endpoint
+        Catalog in the system instructions) for the exact ``METHOD /path``.
 
         Returns:
             JSON with categories and total endpoint count.
@@ -289,7 +289,10 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                     })
                 return json.dumps({
                     "error": f"No endpoint found for {requested[0][0]} {requested[0][1]}.",
-                    "hint": "Scan the API Endpoint Catalog in the system instructions for the correct method/path.",
+                    "hint": (
+                        "Read the api://endpoint-catalog resource for the correct method/path. "
+                        "Guessing paths without consulting the catalog has a near-zero chance of success."
+                    ),
                 })
             return json.dumps(details_by_eid[eid], indent=2)
 
@@ -432,7 +435,10 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                     })
                 return json.dumps({
                     "error": f"No endpoint found for {requested[0][0]} {requested[0][1]}.",
-                    "hint": "Scan the API Endpoint Catalog in the system instructions for the correct method/path.",
+                    "hint": (
+                        "Read the api://endpoint-catalog resource for the correct method/path. "
+                        "Guessing paths without consulting the catalog has a near-zero chance of success."
+                    ),
                 })
             return json.dumps(details_by_eid[eid], indent=2)
 
