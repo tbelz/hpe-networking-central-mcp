@@ -23,7 +23,7 @@ MOCK_DEVICES = [
 ]
 
 MOCK_SWITCH_PORTS = {
-    "ports": [
+    "items": [
         {
             "port_number": 1,
             "name": "1/1/1",
@@ -165,7 +165,7 @@ def seed_module():
     mock_ch.CentralAPIError.__init__ = _cae_init
 
     mock_api = _make_mock_api({
-        "SW001/ports": MOCK_SWITCH_PORTS,
+        "SW001/interfaces": MOCK_SWITCH_PORTS,
         "AP001/radios": MOCK_AP_RADIOS,
         "clients": MOCK_CLIENTS,
     })
@@ -178,7 +178,7 @@ def seed_module():
     sys.modules["central_helpers"] = mock_ch
 
     # Add seeds dir to path
-    seeds_dir = str(Path(__file__).parent / "src" / "hpe_networking_central_mcp" / "seeds")
+    seeds_dir = str(Path(__file__).parent.parent / "src" / "hpe_networking_central_mcp" / "seeds")
     sys.path.insert(0, seeds_dir)
 
     try:
@@ -260,7 +260,7 @@ class TestGraphPopulation:
 
     def test_upsert_ports_creates_merge_statements(self, seed_module):
         mod, _, mock_graph = seed_module
-        mod.upsert_ports("SW001", MOCK_SWITCH_PORTS["ports"])
+        mod.upsert_ports("SW001", MOCK_SWITCH_PORTS["items"])
         # Should MERGE Port nodes and HAS_PORT relationships
         calls = mock_graph.execute.call_args_list
         assert len(calls) >= 2, "Should create at least 2 port nodes"
@@ -271,7 +271,7 @@ class TestGraphPopulation:
 
     def test_upsert_ports_links_to_device(self, seed_module):
         mod, _, mock_graph = seed_module
-        mod.upsert_ports("SW001", MOCK_SWITCH_PORTS["ports"])
+        mod.upsert_ports("SW001", MOCK_SWITCH_PORTS["items"])
         calls = mock_graph.execute.call_args_list
         # At least one call should reference HAS_PORT or Device
         port_rels = [c for c in calls if "HAS_PORT" in c[0][0]]
@@ -401,7 +401,7 @@ class TestMainOrchestration:
         call_count = [0]
 
         def failing_get(path, params=None):
-            if "ports" in path:
+            if "interfaces" in path:
                 call_count[0] += 1
                 raise mod.CentralAPIError("timeout", status_code=504, message="timeout")
             return original_get(path, params)
@@ -423,7 +423,7 @@ class TestMetaJSON:
 
     def test_meta_json_exists(self):
         meta_path = (
-            Path(__file__).parent
+            Path(__file__).parent.parent
             / "src"
             / "hpe_networking_central_mcp"
             / "seeds"
@@ -433,7 +433,7 @@ class TestMetaJSON:
 
     def test_meta_json_auto_run_false(self):
         meta_path = (
-            Path(__file__).parent
+            Path(__file__).parent.parent
             / "src"
             / "hpe_networking_central_mcp"
             / "seeds"
@@ -444,7 +444,7 @@ class TestMetaJSON:
 
     def test_meta_json_has_monitoring_tag(self):
         meta_path = (
-            Path(__file__).parent
+            Path(__file__).parent.parent
             / "src"
             / "hpe_networking_central_mcp"
             / "seeds"

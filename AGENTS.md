@@ -21,7 +21,13 @@ Required workflow for anything that may take >10s (test suites, builds,
 3. If polling shows no progress for a long time, prefer `kill_terminal`
    followed by a fresh `mode="async"` start over piling on more invocations.
 4. Redirect output to a file when you need the result deterministically:
-   `... > /tmp/run.log 2>&1` and then `tail` the log.
+   `... > tmp/run.log 2>&1` and then `tail` the log.
+
+**Always write log/scratch files into the repo-local `tmp/` directory** (which
+is gitignored). Do NOT redirect to `/tmp/...` or any other path outside the
+project root — every such command requires manual user confirmation. Use
+`tmp/<name>.log` for pytest output, build logs, etc. Create the directory if
+missing (`mkdir -p tmp`).
 
 Symptom that you violated this rule: the terminal shows your second command
 typed at the prompt but never produces output, or earlier output disappears.
