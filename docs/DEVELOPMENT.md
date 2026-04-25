@@ -32,7 +32,55 @@ The graph schema uses a single bootstrap DDL layer:
 
 ## Testing
 
+The pytest suite is organised by **markers** (declared in
+[pyproject.toml](../pyproject.toml)):
+
+| Marker       | What it covers                                          | Credentials needed |
+|--------------|---------------------------------------------------------|--------------------|
+| `unit`       | Pure-Python logic, no network, no graph DB              | No                 |
+| `integration`| Local subprocess / IPC / seed startup against a temp DB | No (some)          |
+| `live_api`   | Real Central / GreenLake API calls                      | **Yes**            |
+| `slow`       | Anything that takes more than a few seconds             | n/a                |
+
+Tests marked `integration` or `live_api` are **auto-skipped** when
+`CENTRAL_BASE_URL`, `CENTRAL_CLIENT_ID`, and `CENTRAL_CLIENT_SECRET`
+are not set in the environment (see `pytest_collection_modifyitems` in
+[tests/conftest.py](../tests/conftest.py)). The shell-script aliases
+`BASE_URL` / `CLIENT_ID` / `CLIENT_SECRET` from older docs are also
+accepted and back-filled to the canonical names.
+
 ```bash
-# Run search + graph TDD tests
-python3.12 -m pytest test_search.py test_graph.py test_monitoring_seed.py -v
+# Install test extras
+uv sync --extra test
+
+# Fast feedback loop (no creds required)
+uv run pytest -m "unit and not slow"
+
+# Full suite (skips live_api without .env)
+uv run pytest
+
+# Live API contract / seed tests (requires .env with creds)
+uv run pytest -m live_api
+
+# With coverage
+uv run pytest --cov --cov-report=term-missing
 ```
+
+### Docker E2E layer
+
+The shell scripts at the repo root (`test_all.sh`, `test_mcp.sh`,
+`test_inventory.sh`, etc.) exercise the built Docker image end-to-end
+and are **not** invoked by `pytest`. Build the image first with
+`docker build -t hpe-networking-central-mcp:test .` and then run them
+manually.
+
+### Standalone smoke scripts
+
+Two former tests that were really utility runners now live in
+`scripts/`:
+
+- `scripts/smoke_oas_e2e.py` — scrapes the Central OAS docs end-to-end.
+- `scripts/smoke_graph_live.py` — drives the live populate-graph path.
+
+They are not collected by pytest.
+
