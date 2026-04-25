@@ -648,6 +648,15 @@ def project_glossary(spec: dict, method: str, path: str) -> dict | None:
           "method": "POST",
           "path": "/foo",
           "description": "... operation-level prose ...",
+          "parameters": {
+            "filter": {
+              "in": "query",
+              "description": "... full prose, e.g. OData filter syntax ...",
+              "example": "...",
+              "schema_description": "... if the schema itself adds prose ...",
+            },
+            ...
+          },
           "components": {
             "ArubaInterfaceCommon_SwitchportConfig": {
               "description": "...",
@@ -660,9 +669,16 @@ def project_glossary(spec: dict, method: str, path: str) -> dict | None:
           }
         }
 
-    Components with no descriptive content are omitted.  Agents call this
-    only when a field name in the skeleton is ambiguous; for many
-    endpoints the skeleton is enough on its own.
+    Parameters and components with no descriptive content are omitted.
+    The ``parameters`` block surfaces query/path/header/cookie parameter
+    descriptions (and any per-parameter ``example``) that the skeleton
+    intentionally strips — this is where upstream specs encode filter
+    syntax, allowed values listed only in prose, and format
+    constraints.  Structural fields (``enum``, ``format``, ``pattern``,
+    ``default``) are not repeated here because the skeleton already
+    preserves them.  Agents call this only when a field name in the
+    skeleton is ambiguous or when a parameter needs semantic context;
+    for many endpoints the skeleton is enough on its own.
     """
     op = _find_operation(spec, method, path)
     if op is None:
@@ -685,6 +701,48 @@ def project_glossary(spec: dict, method: str, path: str) -> dict | None:
     op_desc = op.get("description")
     if isinstance(op_desc, str) and op_desc.strip():
         payload["description"] = op_desc
+
+    # Parameter-level prose. The skeleton intentionally drops
+    # description-bearing keys (``description``, ``example``, ``title``,
+    # ``summary``) at every nesting level — but parameter descriptions
+    # are where the upstream specs encode rich semantics: OData filter
+    # syntax, allowed values listed only in prose, format constraints,
+    # cross-parameter dependencies, header/auth-scope notes.  Surface
+    # them here so an agent can recover them on demand.  Structural
+    # fields (``enum``, ``format``, ``pattern``, ``default``) are NOT
+    # repeated because the skeleton already preserves them.  Each entry
+    # is emitted only if it carries at least one prose-bearing field;
+    # parameters with nothing to say are omitted to keep payloads small.
+    params_out: dict[str, dict[str, Any]] = {}
+    for p in op.get("parameters", []) or []:
+        if not isinstance(p, dict):
+            continue
+        resolved = p
+        if "$ref" in p:
+            target = _follow_ref(p["$ref"], components)
+            if isinstance(target, dict):
+                resolved = target
+        pname = resolved.get("name")
+        if not isinstance(pname, str) or not pname:
+            continue
+        pe: dict[str, Any] = {}
+        pdesc = resolved.get("description")
+        if isinstance(pdesc, str) and pdesc.strip():
+            pe["description"] = pdesc
+        schema = resolved.get("schema")
+        if isinstance(schema, dict):
+            sdesc = schema.get("description")
+            if isinstance(sdesc, str) and sdesc.strip() and sdesc != pdesc:
+                pe["schema_description"] = sdesc
+            if "example" in schema and "example" not in resolved:
+                pe["example"] = schema["example"]
+        if "example" in resolved:
+            pe["example"] = resolved["example"]
+        if pe:
+            pe["in"] = resolved.get("in", "") or ""
+            params_out[pname] = pe
+    if params_out:
+        payload["parameters"] = params_out
 
     components_out: dict[str, Any] = {}
     schemas = side.get("schemas", {}) if isinstance(side, dict) else {}

@@ -196,7 +196,9 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         names + types + enums alone, which keeps the payload small enough
         to fit several endpoints into one prompt.
 
-        For ambiguous field names, follow up with
+        For ambiguous field names — and for parameter semantics that the
+        skeleton omits (e.g. OData filter syntax, allowed enum values
+        documented only in prose, format constraints) — follow up with
         ``get_api_endpoint_glossary(method, path)`` to fetch the
         descriptions on demand.  Most workflows do not need it.
 
@@ -335,13 +337,25 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         endpoints: list[dict] | None = None,
         components: list[str] | None = None,
     ) -> str:
-        """Get human-readable descriptions for the components of one or more endpoints.
+        """Get human-readable descriptions for the parameters and components of one or more endpoints.
 
-        Returns descriptions, enum value lists, and ``x-mutually-exclusive``
-        annotations for the schemas reachable from the endpoint(s) — the
-        prose that ``get_api_endpoint_detail`` strips.  Use this only when
-        a field name in the skeleton is ambiguous.  Most workflows do not
-        need to call it.
+        Returns:
+        - **parameters**: per-parameter prose — query/path/header/cookie
+          ``description`` text plus schema-level ``enum``, ``format``,
+          ``pattern``, ``default``, ``example``.  This is where upstream
+          specs encode rich semantics like OData filter syntax, allowed
+          values listed only in prose, and format constraints.
+        - **components**: descriptions, enum value lists, and
+          ``x-mutually-exclusive`` annotations for the schemas reachable
+          from the endpoint(s).
+
+        Both surface prose that ``get_api_endpoint_detail`` strips.  Use
+        this whenever a parameter or field needs semantic context; the
+        skeleton alone is sufficient for purely structural mapping.
+
+        Note: the ``components`` filter argument applies to schema
+        components only; the ``parameters`` block is always returned in
+        full because it is small and frequently needed.
 
         Two call forms (matching ``get_api_endpoint_detail``):
 

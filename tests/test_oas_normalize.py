@@ -358,6 +358,121 @@ def test_glossary_carries_property_descriptions_when_present():
     assert vlan_id["enum"] == [1, 100, 200]
 
 
+def test_glossary_carries_parameter_descriptions():
+    """Mirrors the getAlertListV1 case: a query parameter whose
+    ``description`` carries multi-line OData/filter prose plus per-field
+    enums.  The skeleton drops the prose; the glossary must surface it.
+    """
+    odata_prose = (
+        "OData Version 4.0 filter string (limited functionality). "
+        "Supports only 'and' conjunction ('or' and 'not' are NOT supported). "
+        "Supported fields: siteId, typeId, status, category, deviceType. "
+        "Operators: eq, in."
+    )
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "T"},
+        "components": {
+            "parameters": {
+                "SharedSiteId": {
+                    "name": "siteId",
+                    "in": "query",
+                    "description": "Restrict results to a single site.",
+                    "schema": {"type": "string", "format": "uuid"},
+                }
+            }
+        },
+        "paths": {
+            "/v1/alerts": {
+                "get": {
+                    "summary": "list alerts",
+                    "parameters": [
+                        {
+                            "name": "filter",
+                            "in": "query",
+                            "description": odata_prose,
+                            "schema": {
+                                "type": "string",
+                                "example": "status eq 'Active'",
+                            },
+                        },
+                        {
+                            "name": "status",
+                            "in": "query",
+                            "description": "Filter by alert status.",
+                            "schema": {
+                                "type": "string",
+                                "enum": ["Active", "Deferred", "Cleared"],
+                                "default": "Active",
+                            },
+                        },
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "schema": {"type": "integer", "default": 100},
+                        },
+                        {"$ref": "#/components/parameters/SharedSiteId"},
+                    ],
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    }
+
+    gloss = project_glossary(spec, "GET", "/v1/alerts")
+    assert gloss is not None
+    params = gloss.get("parameters")
+    assert isinstance(params, dict)
+
+    # OData prose survives verbatim.
+    f = params["filter"]
+    assert f["in"] == "query"
+    assert f["description"] == odata_prose
+    assert f["example"] == "status eq 'Active'"
+
+    # Schema-level enum + default are preserved by the SKELETON, not the
+    # glossary, so they must NOT appear here — only the description text.
+    s = params["status"]
+    assert s["description"] == "Filter by alert status."
+    assert "enum" not in s
+    assert "default" not in s
+
+    # Parameter with NO prose-bearing field (no description, no example)
+    # must be omitted to keep payloads small.
+    assert "limit" not in params
+
+    # $ref-style parameter must be resolved one level so its prose is
+    # captured under its real name.  Schema-level structural fields like
+    # ``format`` are not repeated here.
+    assert "siteId" in params
+    assert params["siteId"]["description"] == "Restrict results to a single site."
+    assert "format" not in params["siteId"]
+
+
+def test_glossary_omits_parameters_block_when_no_prose():
+    """If no parameter carries descriptive content, the ``parameters``
+    block is omitted entirely (keeps the payload minimal).
+    """
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "T"},
+        "paths": {
+            "/v1/x": {
+                "get": {
+                    "summary": "x",
+                    "parameters": [
+                        {"name": "page", "in": "query", "schema": {"type": "integer"}},
+                    ],
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    }
+    gloss = project_glossary(spec, "GET", "/v1/x")
+    assert gloss is not None
+    assert "parameters" not in gloss
+
+
 def test_projections_return_none_for_unknown_endpoint():
     spec = _make_synthetic_spec(num_endpoints=1)
     assert project_skeleton(spec, "GET", "/nope") is None
