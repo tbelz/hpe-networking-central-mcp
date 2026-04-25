@@ -357,8 +357,9 @@ def test_glossary_carries_property_descriptions_when_present():
     vlan_id = entry["properties"]["vlan_id"]
     assert vlan_id["description"].startswith("VLAN identifier")
     # ``enum`` is a structural key — it lives in the skeleton, not the
-    # glossary.  The glossary surfaces ONLY prose keys (the complement
-    # of _SKELETON_STRIP_KEYS).
+    # glossary.  The glossary surfaces only the prose keys that the
+    # skeleton strips via _SKELETON_STRIP_KEYS (plus the minimum
+    # traversal scaffolding to reach them).
     assert "enum" not in vlan_id
     assert "type" not in vlan_id
 
@@ -482,12 +483,14 @@ def test_glossary_omits_parameters_block_when_no_prose():
 
 
 def test_glossary_does_not_duplicate_keys_preserved_by_skeleton():
-    """Invariant: the glossary surfaces ONLY keys in
-    ``_SKELETON_STRIP_KEYS``.  Anything the skeleton preserves (``enum``,
-    ``format``, ``pattern``, ``default``, ``required``, ``type``,
-    ``$ref``, ``x-mutually-exclusive``, length / numeric constraints)
-    must NOT appear in glossary entries — duplicating them would only
-    bloat payloads.
+    """Invariant: the glossary surfaces the prose-bearing keys from
+    ``_SKELETON_STRIP_KEYS`` plus only the traversal / scaffolding keys
+    needed to reach them (e.g. ``properties``, ``items``, parameter
+    ``in``).  Anything else the skeleton preserves (``enum``, ``format``,
+    ``pattern``, ``default``, ``required``, ``type``, ``$ref``,
+    ``x-mutually-exclusive``, length / numeric constraints) must NOT
+    appear in glossary entries — duplicating them would only bloat
+    payloads.
     """
     spec = {
         "openapi": "3.0.0",

@@ -29,10 +29,18 @@ This module provides two responsibilities:
    endpoint, organised per-component, so an agent can fetch human help
    for ambiguous fields on demand.
 
-   The two projections are perfect complements driven by a single
-   constant, :data:`_SKELETON_STRIP_KEYS`: skeleton drops every key in
-   that tuple, glossary keeps *only* keys in that tuple.  Adding a key
-   moves it from skeleton to glossary atomically — no two-list drift.
+   The two projections are complements at the **nested schema /
+   parameter prose level**, driven by a single constant
+   :data:`_SKELETON_STRIP_KEYS`: the skeleton drops every key in that
+   tuple from nested content, and the glossary surfaces only those keys
+   wherever they appear.  Adding a key to the tuple moves its nested
+   occurrences from skeleton to glossary atomically — no two-list
+   drift.  The glossary additionally carries the minimum scaffolding
+   needed to reach the prose (``method``, ``path``, ``components``,
+   ``parameters``, the structural traversal keys ``properties`` /
+   ``items`` / ``allOf`` / …, and the parameter ``in`` field), and
+   operation-level ``summary`` is intentionally re-emitted in the
+   skeleton rather than duplicated in the glossary.
 
    Together: 1 tool call for the common case (skeleton has enough),
    2 tool calls for the rare case where a field name is ambiguous.
