@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import graphlib
 import json
+import shutil
 import sys
 import threading
 from pathlib import Path
