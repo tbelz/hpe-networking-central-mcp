@@ -124,7 +124,9 @@ def render_path_tree(
     if not eps:
         return (
             "_API endpoint catalog is currently unavailable._\n"
-            "Use `unified_search(scope='api', query=...)` as a fallback."
+            "Check the server startup logs for `api_tree_query_failed`. If you "
+            "already know a `METHOD /path`, you can still call "
+            "`get_api_endpoint_detail(method=..., path=...)` directly."
         )
 
     by_cat: dict[str, list[dict]] = defaultdict(list)

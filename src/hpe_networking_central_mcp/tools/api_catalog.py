@@ -25,6 +25,13 @@ logger = structlog.get_logger("tools.api_catalog")
 
 _graph_manager: GraphManager | None = None
 
+_API_SCOPE_DEPRECATION_WARNING = (
+    "unified_search(scope='api') is deprecated. The full API endpoint catalog "
+    "is now embedded in the system instructions as a category-grouped path-tree. "
+    "Scan it directly to find the right METHOD /path, then call "
+    "get_api_endpoint_detail(...) for the full schema."
+)
+
 
 def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: GraphManager):
     """Register API discovery tools with the MCP server."""
@@ -126,6 +133,7 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                 "returned_count": 0,
                 "endpoints": [],
                 "hint": "No matches. Try broader terms or use list_api_categories() to see available categories.",
+                "deprecation_warning": _API_SCOPE_DEPRECATION_WARNING,
             }, indent=2)
 
         # Group multiple methods on the same path into one entry
@@ -150,13 +158,7 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             "query": query,
             "returned_count": len(endpoints),
             "endpoints": endpoints,
-            "deprecation_warning": (
-                "unified_search(scope='api') is deprecated. The full API "
-                "endpoint catalog is now embedded in the system instructions "
-                "as a category-grouped path-tree. Scan it directly to find "
-                "the right METHOD /path, then call get_api_endpoint_detail(...) "
-                "for the full schema."
-            ),
+            "deprecation_warning": _API_SCOPE_DEPRECATION_WARNING,
         }, indent=2)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
@@ -320,7 +322,7 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                 try:
                     d["responses"] = json.loads(responses_raw)
                 except (json.JSONDecodeError, TypeError):
-                    d["responses"] = []
+                    pass
 
             details_by_eid[f"{d['method']}:{d['path']}"] = d
 

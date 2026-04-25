@@ -257,6 +257,12 @@ class TestUnifiedSearchDeprecation:
         assert "deprecated" in result["deprecation_warning"].lower()
         assert "get_api_endpoint_detail" in result["deprecation_warning"]
 
+    def test_api_scope_zero_results_still_includes_deprecation_warning(self, tools):
+        result = json.loads(tools["unified_search"](query="xyznonexistent999"))
+        assert result["returned_count"] == 0
+        assert "deprecation_warning" in result
+        assert "get_api_endpoint_detail" in result["deprecation_warning"]
+
     def test_data_scope_has_no_deprecation_warning(self, gm, tools):
         gm.execute(
             "CREATE (d:Device {"

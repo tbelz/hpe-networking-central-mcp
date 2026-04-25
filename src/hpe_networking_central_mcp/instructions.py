@@ -25,12 +25,14 @@ direct API reads and reusable Python scripts.
    with `effective=true&detailed=true` — it returns provenance annotations showing
    exactly which scope each setting originates from.
 
-2. **Discover APIs**: The full list of available endpoints is included below as the
-   **API Endpoint Catalog** — a category-grouped path-tree of every Central and
-   GreenLake endpoint. Read it directly to find the right `METHOD /path`. Then use
-   `get_api_endpoint_detail(method, path)` (or its bulk form) for full parameter
-   and response schemas. The legacy `unified_search(scope="api", …)` tool still
-   works but is deprecated — prefer the in-context catalog.
+2. **Discover APIs**: The available endpoints are included below as the
+   **API Endpoint Catalog** — a category-grouped path-tree of Central and
+   GreenLake endpoints available in this session. In READ_ONLY mode this
+   catalog is filtered to GET endpoints only. Read it directly to find the
+   right `METHOD /path`. Then use `get_api_endpoint_detail(method, path)`
+   (or its bulk form) for full parameter and response schemas. The legacy
+   `unified_search(scope="api", …)` tool still works but is deprecated —
+   prefer the in-context catalog.
 
 3. **Quick reads**: Use call_central_api(path, query_params) for GET requests - monitoring queries,
    config lookups, health checks. This is the fastest way to read live data.
