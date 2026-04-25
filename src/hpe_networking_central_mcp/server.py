@@ -15,6 +15,7 @@ from pathlib import Path
 import httpx
 from mcp.server.fastmcp import FastMCP
 
+from .api_tree import render_path_tree
 from .central_client import CentralClient, GreenLakeClient
 from .config import load_settings
 from .graph import GraphManager
@@ -33,11 +34,6 @@ from .tools.scripts import register_script_tools, sync_seeds_to_graph
 logger = setup_logging()
 
 settings = load_settings()
-
-mcp = FastMCP(
-    "hpe-networking-central-mcp",
-    instructions=build_instructions(read_only=settings.read_only),
-)
 
 # ── Validate Central credentials before accepting connections ──────────
 if not settings.has_credentials:
@@ -148,6 +144,46 @@ knowledge_downloaded = _download_knowledge_db(
 graph_manager = GraphManager(settings.graph_db_path)
 graph_manager.initialize()
 graph_manager.create_fts_indexes()
+
+
+# ── Render API endpoint catalog as a path-tree for the system instructions ──
+def _load_api_tree() -> str:
+    """Query all ApiEndpoint rows and render them as a category-grouped path-tree.
+
+    The result is embedded into the MCP server's system instructions so the
+    agent always sees the full set of available endpoints without needing
+    to call a search tool first.
+    """
+    try:
+        rows = graph_manager.query(
+            "MATCH (e:ApiEndpoint) "
+            "RETURN e.method AS method, e.path AS path, "
+            "e.category AS category, e.deprecated AS deprecated",
+            read_only=True,
+        )
+    except Exception as exc:
+        logger.warning("api_tree_query_failed", error=str(exc))
+        return render_path_tree([], read_only=settings.read_only)
+
+    text = render_path_tree(rows, read_only=settings.read_only)
+    logger.info(
+        "api_tree_rendered",
+        endpoint_count=len(rows),
+        chars=len(text),
+        approx_tokens=len(text) // 4,
+    )
+    return text
+
+
+_api_tree_text = _load_api_tree()
+
+mcp = FastMCP(
+    "hpe-networking-central-mcp",
+    instructions=build_instructions(
+        read_only=settings.read_only,
+        api_tree=_api_tree_text,
+    ),
+)
 
 # Start IPC server for script subprocesses
 ipc_server = GraphIPCServer(settings.graph_ipc_socket, graph_manager)

@@ -244,3 +244,148 @@ class TestGraphUnavailable:
             assert "error" in result
         finally:
             api_catalog._graph_manager = original
+
+
+# ── Deprecation warning on unified_search(scope="api") ──────────────
+
+
+class TestUnifiedSearchDeprecation:
+
+    def test_api_scope_returns_deprecation_warning(self, tools):
+        result = json.loads(tools["unified_search"](query="vlans"))
+        assert "deprecation_warning" in result
+        assert "deprecated" in result["deprecation_warning"].lower()
+        assert "get_api_endpoint_detail" in result["deprecation_warning"]
+
+    def test_api_scope_zero_results_still_includes_deprecation_warning(self, tools):
+        result = json.loads(tools["unified_search"](query="xyznonexistent999"))
+        assert result["returned_count"] == 0
+        assert "deprecation_warning" in result
+        assert "get_api_endpoint_detail" in result["deprecation_warning"]
+
+    def test_data_scope_has_no_deprecation_warning(self, gm, tools):
+        gm.execute(
+            "CREATE (d:Device {"
+            "  serial: 'DEPR-001', name: 'Depr-Switch', model: 'X',"
+            "  deviceType: 'SWITCH', status: 'Up'"
+            "})"
+        )
+        gm.create_fts_indexes()
+        result = json.loads(tools["unified_search"](query="Depr-Switch", scope="data"))
+        assert "deprecation_warning" not in result
+
+
+# ── Bulk get_api_endpoint_detail ────────────────────────────────────
+
+
+class TestBulkGetApiEndpointDetail:
+
+    def test_bulk_returns_multiple_endpoints(self, tools):
+        result = json.loads(tools["get_api_endpoint_detail"](
+            endpoints=[
+                {"method": "GET", "path": "/monitoring/v2/aps"},
+                {"method": "POST", "path": "/config/v1/vlans"},
+            ]
+        ))
+        assert "endpoints" in result
+        assert len(result["endpoints"]) == 2
+        paths = {ep["path"] for ep in result["endpoints"]}
+        assert paths == {"/monitoring/v2/aps", "/config/v1/vlans"}
+        assert result["missing"] == []
+
+    def test_bulk_reports_missing_endpoints(self, tools):
+        result = json.loads(tools["get_api_endpoint_detail"](
+            endpoints=[
+                {"method": "GET", "path": "/monitoring/v2/aps"},
+                {"method": "GET", "path": "/does/not/exist"},
+            ]
+        ))
+        assert len(result["endpoints"]) == 1
+        assert result["endpoints"][0]["path"] == "/monitoring/v2/aps"
+        assert result["missing"] == [{"method": "GET", "path": "/does/not/exist"}]
+
+    def test_bulk_preserves_request_order(self, tools):
+        result = json.loads(tools["get_api_endpoint_detail"](
+            endpoints=[
+                {"method": "POST", "path": "/config/v1/vlans"},
+                {"method": "GET", "path": "/monitoring/v2/aps"},
+                {"method": "GET", "path": "/monitoring/v2/switches"},
+            ]
+        ))
+        ordered_paths = [ep["path"] for ep in result["endpoints"]]
+        assert ordered_paths == [
+            "/config/v1/vlans",
+            "/monitoring/v2/aps",
+            "/monitoring/v2/switches",
+        ]
+
+    def test_bulk_empty_list_errors(self, tools):
+        result = json.loads(tools["get_api_endpoint_detail"](endpoints=[]))
+        assert "error" in result
+
+    def test_bulk_invalid_entry_errors(self, tools):
+        result = json.loads(tools["get_api_endpoint_detail"](
+            endpoints=[{"method": "GET"}]  # missing path
+        ))
+        assert "error" in result
+
+    def test_no_args_errors(self, tools):
+        result = json.loads(tools["get_api_endpoint_detail"]())
+        assert "error" in result
+
+    def test_single_form_still_works(self, tools):
+        # Phase 5 must preserve legacy single-call behavior
+        result = json.loads(tools["get_api_endpoint_detail"](
+            method="GET", path="/monitoring/v2/aps"
+        ))
+        assert result["method"] == "GET"
+        assert result["path"] == "/monitoring/v2/aps"
+        # Legacy shape — no top-level "endpoints" wrapper
+        assert "endpoints" not in result
+
+
+# ── Bulk + READ_ONLY interaction ────────────────────────────────────
+
+
+class TestBulkReadOnly:
+
+    def _make_tools_ro(self, gm, tmp_path_factory):
+        from mcp.server.fastmcp import FastMCP
+        from hpe_networking_central_mcp.tools.api_catalog import register_catalog_tools
+
+        s = Settings(
+            central_base_url="https://x",
+            central_client_id="cid",
+            central_client_secret="csec",
+            script_library_path=tmp_path_factory.mktemp("lib_ro"),
+            read_only=True,
+        )
+        mcp_ro = FastMCP("test-ro-bulk")
+        register_catalog_tools(mcp_ro, s, gm)
+        return {t.name: t.fn for t in mcp_ro._tool_manager._tools.values()}
+
+    def test_bulk_skips_non_get_in_readonly(self, gm, tmp_path_factory):
+        tools_ro = self._make_tools_ro(gm, tmp_path_factory)
+        result = json.loads(tools_ro["get_api_endpoint_detail"](
+            endpoints=[
+                {"method": "GET", "path": "/monitoring/v2/aps"},
+                {"method": "POST", "path": "/config/v1/vlans"},
+                {"method": "DELETE", "path": "/config/v1/vlans/{id}"},
+            ]
+        ))
+        # GET endpoint returned, others reported as skipped
+        assert len(result["endpoints"]) == 1
+        assert result["endpoints"][0]["method"] == "GET"
+        skipped = result.get("skipped_read_only", [])
+        assert {(s["method"], s["path"]) for s in skipped} == {
+            ("POST", "/config/v1/vlans"),
+            ("DELETE", "/config/v1/vlans/{id}"),
+        }
+
+    def test_bulk_all_blocked_returns_empty_with_skipped(self, gm, tmp_path_factory):
+        tools_ro = self._make_tools_ro(gm, tmp_path_factory)
+        result = json.loads(tools_ro["get_api_endpoint_detail"](
+            endpoints=[{"method": "POST", "path": "/config/v1/vlans"}]
+        ))
+        assert result["endpoints"] == []
+        assert len(result["skipped_read_only"]) == 1

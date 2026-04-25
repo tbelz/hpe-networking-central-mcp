@@ -25,9 +25,14 @@ direct API reads and reusable Python scripts.
    with `effective=true&detailed=true` — it returns provenance annotations showing
    exactly which scope each setting originates from.
 
-2. **Discover APIs**: Use unified_search(query) to find endpoints by keyword (e.g.,
-   "vlan", "switch", "dhcp"). Use list_api_categories() to see all API areas. Then use
-   get_api_endpoint_detail(method, path) for full parameter and schema details.
+2. **Discover APIs**: The available endpoints are included below as the
+   **API Endpoint Catalog** — a category-grouped path-tree of Central and
+   GreenLake endpoints available in this session. In READ_ONLY mode this
+   catalog is filtered to GET endpoints only. Read it directly to find the
+   right `METHOD /path`. Then use `get_api_endpoint_detail(method, path)`
+   (or its bulk form) for full parameter and response schemas. The legacy
+   `unified_search(scope="api", …)` tool still works but is deprecated —
+   prefer the in-context catalog.
 
 3. **Quick reads**: Use call_central_api(path, query_params) for GET requests - monitoring queries,
    config lookups, health checks. This is the fastest way to read live data.
@@ -74,7 +79,10 @@ Scripts use `from central_helpers import api, glp, graph` — no OAuth2 boilerpl
 
 ## Choosing the right search tool
 
-- **unified_search(query, scope="api")**: Find API endpoints by keyword. Default scope.
+- **API Endpoint Catalog (in-context, below)**: The authoritative list of every API
+  endpoint. Scan it directly to find a `METHOD /path`, then call
+  `get_api_endpoint_detail(...)` for full schema. `unified_search(scope="api")` is
+  deprecated — prefer the catalog.
 - **unified_search(query, scope="data")**: Quick keyword lookup in graph nodes (devices,
   sites, config profiles). Use when you know a name fragment but not the full identifier.
 - **unified_search(query, scope="docs")**: Search documentation sections.
@@ -99,7 +107,8 @@ Read these resources for context — they are always up to date:
 Before writing ANY script you MUST complete these steps IN ORDER:
 
 1. `list_scripts()` — check if a seed or saved script already solves the task.
-2. `unified_search(query)` — find relevant endpoints. NEVER guess API paths.
+2. **Scan the API Endpoint Catalog** (below) for the right `METHOD /path`.
+   NEVER guess API paths.
 3. `get_api_endpoint_detail(method, path)` — get exact parameter schemas and response shapes.
 4. Only THEN write the script using the discovered endpoints and schemas.
 
@@ -111,6 +120,13 @@ NEVER pass a `limit` parameter to `call_central_api()` for fetching collections.
 For any operation that lists multiple items, write a script using `api.paginate(path)`.
 The paginate helper auto-detects cursor vs offset pagination with safe page_size=100.
 `call_central_api()` is for single-item lookups and one-off mutations only."""
+
+
+_API_TREE_HEADER = """\
+
+────────────────────────────────────────────────────────────────────────
+
+"""
 
 
 _READONLY_BANNER = """⚠️ READ_ONLY MODE ACTIVE ⚠️
@@ -141,12 +157,20 @@ inspection and reporting are permitted.
 """
 
 
-def build_instructions(*, read_only: bool) -> str:
+def build_instructions(*, read_only: bool, api_tree: str | None = None) -> str:
     """Return the MCP server instructions string.
 
     When ``read_only`` is true, the READ_ONLY banner is prepended so the
     model is explicitly informed that mutating operations are not allowed.
+
+    When ``api_tree`` is provided, the rendered path-tree of all API
+    endpoints is appended so the agent can browse the catalog without
+    a search round-trip. ``read_only`` should already have been applied
+    to the tree (i.e. non-GET endpoints filtered out) by the caller.
     """
+    text = _BASE_INSTRUCTIONS
+    if api_tree:
+        text = text + _API_TREE_HEADER + api_tree
     if read_only:
-        return _READONLY_BANNER + _BASE_INSTRUCTIONS
-    return _BASE_INSTRUCTIONS
+        return _READONLY_BANNER + text
+    return text
