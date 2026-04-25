@@ -150,6 +150,13 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             "query": query,
             "returned_count": len(endpoints),
             "endpoints": endpoints,
+            "deprecation_warning": (
+                "unified_search(scope='api') is deprecated. The full API "
+                "endpoint catalog is now embedded in the system instructions "
+                "as a category-grouped path-tree. Scan it directly to find "
+                "the right METHOD /path, then call get_api_endpoint_detail(...) "
+                "for the full schema."
+            ),
         }, indent=2)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
@@ -185,84 +192,162 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
     def get_api_endpoint_detail(
-        method: str,
-        path: str,
+        method: str | None = None,
+        path: str | None = None,
+        endpoints: list[dict] | None = None,
     ) -> str:
-        """Get full details for a specific API endpoint.
+        """Get full details for one or more API endpoints.
 
         Returns the complete API specification including parameters (with types,
         location, required flags), request body schema, and response status
         codes with their schemas.
 
+        Two call forms are supported:
+
+        1. **Single**: pass ``method`` and ``path``.
+           Returns one JSON object with the endpoint detail.
+        2. **Bulk**: pass ``endpoints`` as a list of
+           ``{"method": "GET", "path": "/foo"}`` objects.
+           Returns ``{"endpoints": [...], "missing": [...]}`` with one detail
+           object per matched endpoint and a ``missing`` list naming any
+           endpoints that were not found in the catalog.
+
+        In READ_ONLY mode, non-GET endpoints are silently skipped (single form
+        returns an error; bulk form lists them under ``skipped_read_only``).
+
         Args:
-            method: HTTP method (GET, POST, PUT, PATCH, DELETE).
-            path: Full API path (e.g. "/monitoring/v2/aps").
+            method: HTTP method (GET, POST, PUT, PATCH, DELETE). Single form.
+            path: Full API path (e.g. "/monitoring/v2/aps"). Single form.
+            endpoints: List of {"method", "path"} dicts. Bulk form.
 
         Returns:
-            JSON with full endpoint specification.
+            JSON with full endpoint specification(s).
         """
         gm = _graph_manager
         if gm is None or not gm.is_available:
             return json.dumps({"error": "Graph database not available.",
                                "hint": "The graph database may still be loading. Try again shortly."})
 
-        if settings.read_only and method.upper() != "GET":
-            return json.dumps({
-                "error": (
-                    f"Endpoint {method.upper()} {path} is hidden because the server "
-                    "is in READ_ONLY mode. Only GET endpoints are exposed."
-                ),
-            })
+        # ── Resolve call form ─────────────────────────────────────────
+        if endpoints is not None:
+            if not isinstance(endpoints, list) or not endpoints:
+                return json.dumps({
+                    "error": "`endpoints` must be a non-empty list of {method, path} objects.",
+                })
+            requested: list[tuple[str, str]] = []
+            for item in endpoints:
+                if not isinstance(item, dict) or "method" not in item or "path" not in item:
+                    return json.dumps({
+                        "error": "Each entry in `endpoints` must be an object with 'method' and 'path' keys.",
+                    })
+                requested.append((str(item["method"]).upper(), str(item["path"])))
+        else:
+            if not method or not path:
+                return json.dumps({
+                    "error": "Provide either (method, path) or `endpoints=[...]`.",
+                })
+            requested = [(method.upper(), path)]
 
+        # ── READ_ONLY filter ──────────────────────────────────────────
+        skipped_read_only: list[dict] = []
+        if settings.read_only:
+            allowed = []
+            for m, p in requested:
+                if m == "GET":
+                    allowed.append((m, p))
+                else:
+                    skipped_read_only.append({"method": m, "path": p})
+            requested = allowed
+            if not requested:
+                # All requested endpoints are non-GET in read-only mode
+                if endpoints is not None:
+                    return json.dumps({
+                        "endpoints": [],
+                        "missing": [],
+                        "skipped_read_only": skipped_read_only,
+                    }, indent=2)
+                return json.dumps({
+                    "error": (
+                        f"Endpoint {skipped_read_only[0]['method']} "
+                        f"{skipped_read_only[0]['path']} is hidden because the server "
+                        "is in READ_ONLY mode. Only GET endpoints are exposed."
+                    ),
+                })
+
+        # ── Bulk Cypher fetch ─────────────────────────────────────────
+        eids = [f"{m}:{p}" for m, p in requested]
         rows = gm.query(
-            "MATCH (e:ApiEndpoint {endpoint_id: $eid}) "
+            "MATCH (e:ApiEndpoint) WHERE e.endpoint_id IN $eids "
             "RETURN e.method, e.path, e.summary, e.description, e.operationId, "
             "e.category, e.deprecated, e.tags, e.parameters, e.requestBody, "
             "e.responses",
-            {"eid": f"{method.upper()}:{path}"},
+            {"eids": eids},
             read_only=True,
         )
-        if not rows:
-            return json.dumps({
-                "error": f"No endpoint found for {method.upper()} {path}.",
-                "hint": "Use unified_search(query) to find the correct path.",
-            })
 
-        r = rows[0]
-        d: dict[str, Any] = {
-            "method": r.get("e.method", ""),
-            "path": r.get("e.path", ""),
-            "summary": r.get("e.summary", ""),
-            "category": r.get("e.category", ""),
-            "operation_id": r.get("e.operationId", ""),
+        details_by_eid: dict[str, dict] = {}
+        for r in rows:
+            d: dict[str, Any] = {
+                "method": r.get("e.method", ""),
+                "path": r.get("e.path", ""),
+                "summary": r.get("e.summary", ""),
+                "category": r.get("e.category", ""),
+                "operation_id": r.get("e.operationId", ""),
+            }
+            if r.get("e.description"):
+                d["description"] = r["e.description"]
+            if r.get("e.tags"):
+                d["tags"] = r["e.tags"]
+            if r.get("e.deprecated"):
+                d["deprecated"] = True
+
+            params_raw = r.get("e.parameters", "")
+            if params_raw:
+                try:
+                    d["parameters"] = json.loads(params_raw)
+                except (json.JSONDecodeError, TypeError):
+                    d["parameters"] = []
+
+            body_raw = r.get("e.requestBody", "")
+            if body_raw:
+                try:
+                    d["request_body"] = json.loads(body_raw)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            responses_raw = r.get("e.responses", "")
+            if responses_raw:
+                try:
+                    d["responses"] = json.loads(responses_raw)
+                except (json.JSONDecodeError, TypeError):
+                    d["responses"] = []
+
+            details_by_eid[f"{d['method']}:{d['path']}"] = d
+
+        # ── Single-form response (preserve legacy shape) ─────────────
+        if endpoints is None:
+            eid = eids[0]
+            if eid not in details_by_eid:
+                return json.dumps({
+                    "error": f"No endpoint found for {requested[0][0]} {requested[0][1]}.",
+                    "hint": "Scan the API Endpoint Catalog in the system instructions for the correct method/path.",
+                })
+            return json.dumps(details_by_eid[eid], indent=2)
+
+        # ── Bulk-form response ───────────────────────────────────────
+        ordered_details = []
+        missing = []
+        for m, p in requested:
+            eid = f"{m}:{p}"
+            if eid in details_by_eid:
+                ordered_details.append(details_by_eid[eid])
+            else:
+                missing.append({"method": m, "path": p})
+
+        response: dict[str, Any] = {
+            "endpoints": ordered_details,
+            "missing": missing,
         }
-        if r.get("e.description"):
-            d["description"] = r["e.description"]
-        if r.get("e.tags"):
-            d["tags"] = r["e.tags"]
-        if r.get("e.deprecated"):
-            d["deprecated"] = True
-
-        # Deserialize full schema JSON fields
-        params_raw = r.get("e.parameters", "")
-        if params_raw:
-            try:
-                d["parameters"] = json.loads(params_raw)
-            except (json.JSONDecodeError, TypeError):
-                d["parameters"] = []
-
-        body_raw = r.get("e.requestBody", "")
-        if body_raw:
-            try:
-                d["request_body"] = json.loads(body_raw)
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        responses_raw = r.get("e.responses", "")
-        if responses_raw:
-            try:
-                d["responses"] = json.loads(responses_raw)
-            except (json.JSONDecodeError, TypeError):
-                d["responses"] = []
-
-        return json.dumps(d, indent=2)
+        if skipped_read_only:
+            response["skipped_read_only"] = skipped_read_only
+        return json.dumps(response, indent=2)
