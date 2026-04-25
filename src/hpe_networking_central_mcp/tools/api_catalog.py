@@ -247,9 +247,14 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         )
 
         details_by_eid: dict[str, dict] = {}
+        # Track every eid the DB returned a row for (even if the blob was
+        # broken) so we can distinguish "endpoint unknown" from "blob corrupt".
+        found_eids: set[str] = set()
         for r in rows:
             method_val = r.get("e.method", "")
             path_val = r.get("e.path", "")
+            eid_key = f"{method_val}:{path_val}"
+            found_eids.add(eid_key)
             blob = r.get("e.bodySkeletonJson") or ""
             if not blob:
                 logger.warning(
@@ -269,11 +274,19 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                 )
                 continue
             d.setdefault("category", r.get("e.category", ""))
-            details_by_eid[f"{method_val}:{path_val}"] = d
+            details_by_eid[eid_key] = d
 
         if not is_bulk:
             eid = eids[0]
             if eid not in details_by_eid:
+                if eid in found_eids:
+                    return json.dumps({
+                        "error": (
+                            f"Endpoint {requested[0][0]} {requested[0][1]} exists "
+                            "but its skeleton blob is missing or corrupt."
+                        ),
+                        "hint": "Rebuild the knowledge DB to regenerate the skeleton data.",
+                    })
                 return json.dumps({
                     "error": f"No endpoint found for {requested[0][0]} {requested[0][1]}.",
                     "hint": "Scan the API Endpoint Catalog in the system instructions for the correct method/path.",
@@ -282,10 +295,13 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
 
         ordered_details = []
         missing = []
+        broken = []
         for m, p in requested:
             eid = f"{m}:{p}"
             if eid in details_by_eid:
                 ordered_details.append(details_by_eid[eid])
+            elif eid in found_eids:
+                broken.append({"method": m, "path": p})
             else:
                 missing.append({"method": m, "path": p})
 
@@ -293,6 +309,9 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             "endpoints": ordered_details,
             "missing": missing,
         }
+        if broken:
+            response["blob_corrupt"] = broken
+            response["hint"] = "Rebuild the knowledge DB to regenerate skeleton data for blob_corrupt entries."
         if skipped_read_only:
             response["skipped_read_only"] = skipped_read_only
         return json.dumps(response, indent=2)
@@ -366,9 +385,14 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         wanted_components = set(components) if components is not None else None
 
         details_by_eid: dict[str, dict] = {}
+        # Track every eid the DB returned a row for (even if the blob was
+        # broken) so we can distinguish "endpoint unknown" from "blob corrupt".
+        found_eids: set[str] = set()
         for r in rows:
             method_val = r.get("e.method", "")
             path_val = r.get("e.path", "")
+            eid_key = f"{method_val}:{path_val}"
+            found_eids.add(eid_key)
             blob = r.get("e.bodyGlossaryJson") or ""
             if not blob:
                 logger.warning(
@@ -393,11 +417,19 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                     for name, entry in d["components"].items()
                     if name in wanted_components
                 }
-            details_by_eid[f"{method_val}:{path_val}"] = d
+            details_by_eid[eid_key] = d
 
         if not is_bulk:
             eid = eids[0]
             if eid not in details_by_eid:
+                if eid in found_eids:
+                    return json.dumps({
+                        "error": (
+                            f"Endpoint {requested[0][0]} {requested[0][1]} exists "
+                            "but its glossary blob is missing or corrupt."
+                        ),
+                        "hint": "Rebuild the knowledge DB to regenerate the glossary data.",
+                    })
                 return json.dumps({
                     "error": f"No endpoint found for {requested[0][0]} {requested[0][1]}.",
                     "hint": "Scan the API Endpoint Catalog in the system instructions for the correct method/path.",
@@ -406,10 +438,13 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
 
         ordered_details = []
         missing = []
+        broken = []
         for m, p in requested:
             eid = f"{m}:{p}"
             if eid in details_by_eid:
                 ordered_details.append(details_by_eid[eid])
+            elif eid in found_eids:
+                broken.append({"method": m, "path": p})
             else:
                 missing.append({"method": m, "path": p})
 
@@ -417,6 +452,9 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             "endpoints": ordered_details,
             "missing": missing,
         }
+        if broken:
+            response["blob_corrupt"] = broken
+            response["hint"] = "Rebuild the knowledge DB to regenerate glossary data for blob_corrupt entries."
         if skipped_read_only:
             response["skipped_read_only"] = skipped_read_only
         return json.dumps(response, indent=2)

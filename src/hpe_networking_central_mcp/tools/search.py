@@ -41,11 +41,14 @@ _FTS_INDEX_MAP: dict[str, tuple[str, list[str]]] = {
 }
 
 # Scope → FTS indexes to query
+# Note: "api" is intentionally absent from the scopes exposed by unified_search
+# (callers use the embedded API Endpoint Catalog + get_api_endpoint_detail instead).
+# "all" means docs + data only so ApiEndpoint rows do not appear in search results.
 _SCOPE_FTS: dict[str, list[str]] = {
     "api": ["api_fts"],
     "docs": ["doc_fts"],
     "data": ["device_fts", "site_fts", "script_fts"],
-    "all": ["api_fts", "doc_fts", "device_fts", "site_fts", "script_fts"],
+    "all": ["doc_fts", "device_fts", "site_fts", "script_fts"],
 }
 
 
@@ -94,7 +97,8 @@ def contains_search(
 ) -> list[dict[str, Any]]:
     """Fallback CONTAINS-based search when FTS is unavailable."""
     if scope == "all":
-        tables = _SCOPE_CONFIG["api"] + _SCOPE_CONFIG["docs"] + _SCOPE_CONFIG["data"]
+        # "all" excludes ApiEndpoint — use the embedded catalog + get_api_endpoint_detail.
+        tables = _SCOPE_CONFIG["docs"] + _SCOPE_CONFIG["data"]
     else:
         tables = _SCOPE_CONFIG.get(scope, [])
 
