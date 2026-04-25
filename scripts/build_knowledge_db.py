@@ -35,8 +35,8 @@ from hpe_networking_central_mcp.graph.schema import (  # noqa: E402
 from hpe_networking_central_mcp.oas_index import OASIndex  # noqa: E402
 from hpe_networking_central_mcp.oas_normalize import (  # noqa: E402
     normalize as normalize_spec,
-    project_compact,
-    project_request_only,
+    project_glossary,
+    project_skeleton,
 )
 from hpe_networking_central_mcp.oas_scraper import ReadMeSpecProvider  # noqa: E402
 from hpe_networking_central_mcp.vsg_scraper import VsgDocProvider  # noqa: E402
@@ -174,12 +174,12 @@ def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> 
     """Insert ApiEndpoint and ApiCategory nodes from the OASIndex.
 
     ``specs`` should be the **normalized** spec list — projection columns
-    (``bodyCompactJson``, ``bodyRequestOnlyJson``) are computed from these.
+    (``bodySkeletonJson``, ``bodyGlossaryJson``) are computed from these.
     """
     conn = lb.Connection(db)
     count = 0
-    compact_ok = 0
-    request_only_ok = 0
+    skeleton_ok = 0
+    glossary_ok = 0
 
     # ReadMe.io serves one operation per .md file, so most providers ship
     # ~1600 individual specs that share only ~50 ``info.title`` values.
@@ -238,35 +238,35 @@ def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> 
         escaped_body = _cypher_escape(body_json)
         escaped_resps = _cypher_escape(responses_json)
 
-        # Compute compact + request-only projections from the normalized spec.
-        compact_json = ""
-        request_only_json = ""
+        # Compute skeleton + glossary projections from the normalized spec.
+        skeleton_json = ""
+        glossary_json = ""
         spec = specs_by_endpoint.get((entry.method, entry.path)) or specs_by_category.get(entry.category)
         if spec is not None:
             try:
-                compact_view = project_compact(spec, entry.method, entry.path)
-                if compact_view is not None:
-                    compact_json = json.dumps(compact_view)
+                skel_view = project_skeleton(spec, entry.method, entry.path)
+                if skel_view is not None:
+                    skeleton_json = json.dumps(skel_view)
             except Exception as exc:  # pragma: no cover — defensive
                 print(
-                    f"    ⚠ project_compact failed for {entry.method} {entry.path}: {exc}",
+                    f"    ⚠ project_skeleton failed for {entry.method} {entry.path}: {exc}",
                     file=sys.stderr,
                 )
             try:
-                req_only_view = project_request_only(spec, entry.method, entry.path)
-                if req_only_view is not None:
-                    request_only_json = json.dumps(req_only_view)
+                gloss_view = project_glossary(spec, entry.method, entry.path)
+                if gloss_view is not None:
+                    glossary_json = json.dumps(gloss_view)
             except Exception as exc:  # pragma: no cover — defensive
                 print(
-                    f"    ⚠ project_request_only failed for {entry.method} {entry.path}: {exc}",
+                    f"    ⚠ project_glossary failed for {entry.method} {entry.path}: {exc}",
                     file=sys.stderr,
                 )
-        if compact_json:
-            compact_ok += 1
-        if request_only_json:
-            request_only_ok += 1
-        escaped_compact = _cypher_escape(compact_json)
-        escaped_req_only = _cypher_escape(request_only_json)
+        if skeleton_json:
+            skeleton_ok += 1
+        if glossary_json:
+            glossary_ok += 1
+        escaped_skeleton = _cypher_escape(skeleton_json)
+        escaped_glossary = _cypher_escape(glossary_json)
 
         conn.execute(
             "CREATE (e:ApiEndpoint {"
@@ -275,8 +275,8 @@ def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> 
             f"  category: $cat, deprecated: $dep, {tags_clause}"
             f"  parameters: '{escaped_params}', requestBody: '{escaped_body}',"
             f"  responses: '{escaped_resps}',"
-            f"  bodyCompactJson: '{escaped_compact}',"
-            f"  bodyRequestOnlyJson: '{escaped_req_only}'"
+            f"  bodySkeletonJson: '{escaped_skeleton}',"
+            f"  bodyGlossaryJson: '{escaped_glossary}'"
             "})",
             parameters={
                 "eid": endpoint_id,
@@ -307,16 +307,16 @@ def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> 
 
     print(f"  Inserted {count} endpoints in {len(index.categories)} categories")
     if count:
-        compact_pct = 100 * compact_ok // count
-        ro_pct = 100 * request_only_ok // count
+        skel_pct = 100 * skeleton_ok // count
+        gloss_pct = 100 * glossary_ok // count
         print(
-            f"  Projection coverage: compact={compact_ok}/{count} ({compact_pct}%), "
-            f"request-only={request_only_ok}/{count} ({ro_pct}%)"
+            f"  Projection coverage: skeleton={skeleton_ok}/{count} ({skel_pct}%), "
+            f"glossary={glossary_ok}/{count} ({gloss_pct}%)"
         )
         # Hard fail if coverage collapses — silently empty blobs degrade
-        # the MCP tool surface back to the un-normalized 'full' shape.
+        # the MCP tool surface to a useless shell.
         min_pct = 90
-        if compact_pct < min_pct or ro_pct < min_pct:
+        if skel_pct < min_pct or gloss_pct < min_pct:
             print(
                 f"  ✖ Projection coverage below {min_pct}% — refusing to ship a "
                 "degraded knowledge DB.",
@@ -334,9 +334,20 @@ def _sync_docs(cache_dir: Path) -> tuple[list, dict]:
     the daily build can still publish a fresh API catalog.
     """
     print("  Refreshing VSG Central documentation...")
+    vsg_cache_dir = cache_dir / "vsg"
+    cache_primed = vsg_cache_dir.is_dir() and any(vsg_cache_dir.iterdir())
+    cache_age_days: float | None = None
+    if cache_primed:
+        try:
+            mtimes = [p.stat().st_mtime for p in vsg_cache_dir.rglob("*") if p.is_file()]
+            if mtimes:
+                import time as _time
+                cache_age_days = round((_time.time() - max(mtimes)) / 86400, 2)
+        except Exception:  # pragma: no cover — stat failures non-fatal
+            pass
     try:
         provider = VsgDocProvider()
-        entries = provider.fetch_docs(cache_dir=cache_dir / "vsg", ttl=0)
+        entries = provider.fetch_docs(cache_dir=vsg_cache_dir, ttl=0)
         report = provider.last_report
         if report is None:
             health = {"status": "ok", "section_count": len(entries)}
@@ -370,9 +381,19 @@ def _sync_docs(cache_dir: Path) -> tuple[list, dict]:
                 f"    ⚠ VSG: {report.pages_failed}/{report.pages_total} pages "
                 f"unavailable (failures={dict(report.failure_reasons)})"
             )
+        health["cache_primed"] = cache_primed
+        if cache_age_days is not None:
+            health["cache_age_days"] = cache_age_days
         return entries, health
     except Exception as e:
-        health = {"status": "error", "section_count": 0, "error": str(e)}
+        health = {
+            "status": "error",
+            "section_count": 0,
+            "error": str(e),
+            "cache_primed": cache_primed,
+        }
+        if cache_age_days is not None:
+            health["cache_age_days"] = cache_age_days
         print(f"    ⚠ VSG refresh failed: {e}", file=sys.stderr)
         return [], health
 
@@ -548,7 +569,7 @@ def main() -> None:
     import time
     manifest = {
         "version": time.strftime("knowledge-db-%Y%m%d-%H%M%S", time.gmtime()),
-        "schema_version": 2,
+        "schema_version": 3,
         "endpoint_count": endpoint_count,
         "category_count": len(index.categories),
         "doc_count": doc_count,

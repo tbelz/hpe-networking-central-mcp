@@ -23,7 +23,7 @@ from .graph.ipc_server import GraphIPCServer
 from .instructions import build_instructions
 from .logging import setup_logging
 from .prompts.workflows import register_prompts
-from .resources.docs import register_resources
+from .resources.docs import register_api_catalog_resource, register_resources
 from .resources.graph import register_graph_resources
 from .tools.api_call import register_api_call_tools, register_greenlake_api_call_tools
 from .tools.api_catalog import register_catalog_tools
@@ -147,11 +147,13 @@ graph_manager.create_fts_indexes()
 
 
 # ── Knowledge DB schema-version check ────────────────────────────────
-# Version 2 introduces normalized OAS specs and the bodyCompactJson /
-# bodyRequestOnlyJson columns required by get_api_endpoint_detail(view=...).
-# An older DB will lack those columns and the per-view tools will fail at
-# query time — surface that early with an actionable message.
-_KNOWLEDGE_SCHEMA_VERSION = 2
+# Version 3 introduces normalized OAS specs and the bodySkeletonJson /
+# bodyGlossaryJson columns required by get_api_endpoint_detail and
+# get_api_endpoint_glossary.  An older DB will lack those columns and
+# the per-endpoint detail tools will fail at query time — refuse to
+# start so the operator notices immediately rather than seeing
+# silent fallbacks for weeks.
+_KNOWLEDGE_SCHEMA_VERSION = 3
 
 
 def _check_knowledge_schema_version() -> None:
@@ -166,17 +168,16 @@ def _check_knowledge_schema_version() -> None:
         return
     found = manifest.get("schema_version")
     if found != _KNOWLEDGE_SCHEMA_VERSION:
-        logger.warning(
-            "knowledge_schema_version_mismatch",
-            expected=_KNOWLEDGE_SCHEMA_VERSION,
-            found=found,
-            hint=(
-                "Knowledge DB was built by an older version of this server. "
-                "Re-run scripts/build_knowledge_db.py or wait for the next "
-                "knowledge-db release. The compact / request-only views of "
-                "get_api_endpoint_detail will fall back to the full view."
-            ),
+        msg = (
+            f"Knowledge DB schema_version={found!r} does not match "
+            f"server-required version {_KNOWLEDGE_SCHEMA_VERSION}. "
+            "Re-run scripts/build_knowledge_db.py or wait for the next "
+            "knowledge-db release. Refusing to start to avoid serving "
+            "broken get_api_endpoint_detail / get_api_endpoint_glossary "
+            "responses."
         )
+        logger.error("knowledge_schema_version_mismatch", expected=_KNOWLEDGE_SCHEMA_VERSION, found=found)
+        raise SystemExit(msg)
 
 
 _check_knowledge_schema_version()
@@ -305,7 +306,9 @@ def _get_auto_run_seeds() -> list[str]:
 def _update_script_node(script_name: str, finished: str, exit_code: int):
     """Update the Script graph node's last_run/last_exit_code after seed execution."""
     try:
-        graph_manager.query(
+        # `query()` defaults to read_only=True and rejects SET; use execute()
+        # for the write path.
+        graph_manager.execute(
             "MATCH (s:Script {filename: $fn}) SET s.last_run = $lr, s.last_exit_code = $ec",
             {"fn": script_name, "lr": finished, "ec": exit_code},
         )
@@ -385,6 +388,7 @@ if glp_client is not None:
 else:
     logger.info("greenlake_tools_disabled", reason="GreenLake credentials not configured")
 register_resources(mcp, settings, graph_manager)
+register_api_catalog_resource(mcp, settings, graph_manager)
 register_graph_resources(mcp, graph_manager, lambda: _seed_status)
 register_prompts(mcp, graph_manager)
 

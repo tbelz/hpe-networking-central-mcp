@@ -20,52 +20,18 @@ Required workflow for anything that may take >10s (test suites, builds,
    explicitly killed it with `kill_terminal`.
 3. If polling shows no progress for a long time, prefer `kill_terminal`
    followed by a fresh `mode="async"` start over piling on more invocations.
-4. Redirect output to a file when you need the result deterministically:
-   `... > tmp/run.log 2>&1` and then `tail` the log.
+4. Use a background terminal with output redirected to a file. No pipes in WSL!
+5. Reading from the terminal with cat/tail via a second sync shell results in failure.
+6. **Always write log/scratch files into the repo-local `tmp/` directory** (which
+   is gitignored). Do NOT redirect to `/tmp/...` or any other path outside the
+   project root — every such command requires manual user confirmation. Use
+   `tmp/<name>.log` for pytest output, build logs, etc. Create the directory if
+   missing (`mkdir -p tmp`).
 
-**Always write log/scratch files into the repo-local `tmp/` directory** (which
-is gitignored). Do NOT redirect to `/tmp/...` or any other path outside the
-project root — every such command requires manual user confirmation. Use
-`tmp/<name>.log` for pytest output, build logs, etc. Create the directory if
-missing (`mkdir -p tmp`).
-
-Symptom that you violated this rule: the terminal shows your second command
-typed at the prompt but never produces output, or earlier output disappears.
-Stop, kill the terminal, and start over cleanly.
 
 ## Python
 
 * Always use `uv run` (e.g. `uv run pytest`, `uv run python scripts/...`).
 * The repo's pytest config lives in `pyproject.toml`; do not pass `--rootdir`.
-* `tests/test_graph.py` may `sys.exit(1)` at import time when its prerequisites
-  aren't met — exclude it with `--ignore=tests/test_graph.py` for quick runs.
-* `tests/test_e2e.py` hits the live network; skip for fast iterations.
 
-## Knowledge sync (formerly "scrape") pipeline
-
-* Provider modules live in `src/hpe_networking_central_mcp/`:
-  `oas_scraper.py` (ReadMe.io / Central + GreenLake) and `vsg_scraper.py` (VSG).
-  File names are intentionally not renamed — backward-compat matters more than
-  cosmetic consistency.
-* Public terminology in user-facing strings, manifest keys, workflow step names,
-  release bodies, and issue labels is **"sync"** (not "scrape"). Keep it that
-  way.
-* Both providers expose `last_reports` / `last_report` after a run; the build
-  script consumes those to populate `manifest.json["sync_health"]`.
-* The VSG host (`arubanetworking.hpe.com`) is fronted by an Akamai WAF that
-  blocks GitHub Actions runner IPs with HTTP 403. This is **expected**; the
-  provider degrades gracefully and emits one aggregated `vsg_access_denied`
-  warning instead of per-page failures. Do not treat 403 as a hard error.
-* The ReadMe.io host throttles aggressively. The OAS provider sends a real
-  browser User-Agent, paces requests per-host (~4 req/s), and retries 429/5xx
-  with exponential backoff + `Retry-After`. Don't raise the parallelism above
-  3 workers.
-
-## GitHub Actions workflow
-
-* `.github/workflows/update-knowledge-db.yml` opens a `knowledge-sync-alert`
-  issue when the build is unhealthy. The label is created idempotently in an
-  earlier step — never remove that step or the alert step will fail with
-  `could not add label: 'knowledge-sync-alert' not found`.
-* Health policy: provider `status: "error"` is fatal; `status: "degraded"`
-  (e.g. WAF-blocked VSG) is allowed and still publishes a release.
+  Don't add anything to AGENTS.md except when I explicitly tell you!

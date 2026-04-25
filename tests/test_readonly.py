@@ -152,19 +152,28 @@ class TestApiCallToolsReadOnly:
 # ── api_catalog filtering ───────────────────────────────────────────
 
 
+def _esc(s: str) -> str:
+    return s.replace("\\", "\\\\").replace("'", "\\'")
+
+
 @pytest.fixture(scope="module")
 def gm_catalog(tmp_path_factory):
     db_path = tmp_path_factory.mktemp("ro_catalog") / "test.db"
     gm = GraphManager(db_path)
     gm.initialize()
+    skel_get = json.dumps({"method": "GET", "path": "/c/v1/things"})
+    skel_post = json.dumps({"method": "POST", "path": "/c/v1/things"})
+    skel_del = json.dumps({"method": "DELETE", "path": "/c/v1/things/{id}"})
     gm.execute(
         "CREATE (e:ApiEndpoint {"
         "  endpoint_id: 'GET:/c/v1/things',"
         "  method: 'GET', path: '/c/v1/things',"
         "  summary: 'List things', description: 'd',"
         "  operationId: 'listThings', category: 'cfg',"
-        "  deprecated: false, tags: ['t'],"
-        "  parameters: '[]', requestBody: '', responses: ''"
+        "  deprecated: false,"
+        "  parameters: '[]', requestBody: '', responses: '',"
+        f"  bodySkeletonJson: '{_esc(skel_get)}',"
+        "  bodyGlossaryJson: ''"
         "})"
     )
     gm.execute(
@@ -173,8 +182,10 @@ def gm_catalog(tmp_path_factory):
         "  method: 'POST', path: '/c/v1/things',"
         "  summary: 'Create a thing', description: 'd',"
         "  operationId: 'createThing', category: 'cfg',"
-        "  deprecated: false, tags: ['t'],"
-        "  parameters: '[]', requestBody: '{}', responses: '{}'"
+        "  deprecated: false,"
+        "  parameters: '[]', requestBody: '{}', responses: '{}',"
+        f"  bodySkeletonJson: '{_esc(skel_post)}',"
+        "  bodyGlossaryJson: ''"
         "})"
     )
     gm.execute(
@@ -183,8 +194,10 @@ def gm_catalog(tmp_path_factory):
         "  method: 'DELETE', path: '/c/v1/things/{id}',"
         "  summary: 'Delete a thing', description: 'd',"
         "  operationId: 'deleteThing', category: 'cfg',"
-        "  deprecated: false, tags: ['t'],"
-        "  parameters: '[]', requestBody: '', responses: ''"
+        "  deprecated: false,"
+        "  parameters: '[]', requestBody: '', responses: '',"
+        f"  bodySkeletonJson: '{_esc(skel_del)}',"
+        "  bodyGlossaryJson: ''"
         "})"
     )
     gm.create_fts_indexes()
@@ -206,19 +219,6 @@ def _make_tools(gm, *, read_only: bool):
 
 
 class TestApiCatalogReadOnly:
-
-    def test_unified_search_hides_non_get_endpoints(self, gm_catalog):
-        tools = _make_tools(gm_catalog, read_only=True)
-        result = json.loads(tools["unified_search"](query="thing"))
-        for ep in result["endpoints"]:
-            assert all(m == "GET" for m in ep["methods"]), \
-                f"Non-GET method exposed in read-only mode: {ep}"
-
-    def test_unified_search_shows_all_when_not_readonly(self, gm_catalog):
-        tools = _make_tools(gm_catalog, read_only=False)
-        result = json.loads(tools["unified_search"](query="thing"))
-        all_methods = {m for ep in result["endpoints"] for m in ep["methods"]}
-        assert {"GET", "POST", "DELETE"}.issubset(all_methods)
 
     def test_get_endpoint_detail_blocks_non_get_in_readonly(self, gm_catalog):
         tools = _make_tools(gm_catalog, read_only=True)

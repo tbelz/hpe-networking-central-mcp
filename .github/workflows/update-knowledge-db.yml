@@ -32,8 +32,42 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
 
+      - name: Prime VSG cache from previous release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The VSG host (arubanetworking.hpe.com) is fronted by an Akamai
+          # WAF that blocks GitHub Actions runner IPs with HTTP 403.  Seed
+          # the on-disk cache from the previous release so the VSG
+          # provider's stale-cache fallback can serve last-good content
+          # when today's fetch is blocked.
+          mkdir -p build/spec_cache
+          PREV=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)
+          if [ -z "$PREV" ]; then
+            echo "No previous release — starting with empty VSG cache."
+            exit 0
+          fi
+          gh release download "$PREV" --pattern vsg-cache.tar.gz --dir build 2>/dev/null || {
+            echo "Previous release has no vsg-cache.tar.gz — starting empty."
+            exit 0
+          }
+          tar xzf build/vsg-cache.tar.gz -C build/spec_cache
+          echo "Primed VSG cache from $PREV:"
+          find build/spec_cache/vsg -maxdepth 2 -type f | head -20
+          echo "  ($(find build/spec_cache/vsg -type f | wc -l) files total)"
+
       - name: Build knowledge database
         run: python scripts/build_knowledge_db.py --output-dir build --tar
+
+      - name: Re-tar VSG cache for next run
+        if: always()
+        run: |
+          if [ -d build/spec_cache/vsg ] && [ -n "$(ls -A build/spec_cache/vsg 2>/dev/null)" ]; then
+            tar czf build/vsg-cache.tar.gz -C build/spec_cache vsg
+            echo "Packed VSG cache: $(stat -c%s build/vsg-cache.tar.gz) bytes"
+          else
+            echo "No VSG cache to pack."
+          fi
 
       - name: Ensure alert label exists
         env:
@@ -205,6 +239,7 @@ jobs:
           files: |
             build/knowledge_db.tar.gz
             build/manifest.json
+            build/vsg-cache.tar.gz
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

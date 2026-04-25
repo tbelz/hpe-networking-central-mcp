@@ -31,7 +31,12 @@ def _api_error_hint(exc: CentralAPIError, path: str, method: str) -> str:
 
     # 404 — wrong path
     if exc.status_code == 404:
-        return "\n\nHint: Endpoint not found. Use unified_search(query) to find the correct path."
+        return (
+            "\n\nHint: Endpoint not found. Read the api://endpoint-catalog resource "
+            "for the full list of valid METHOD /path combinations, then use "
+            "get_api_endpoint_detail() to verify the exact path and parameters. "
+            "Guessing paths without consulting the catalog has a near-zero chance of success."
+        )
 
     # 400 — bad request
     if exc.status_code == 400:
@@ -93,7 +98,11 @@ def register_api_call_tools(mcp, settings: Settings, client: CentralClient):
         To fetch all items from a collection endpoint (list devices, list sites, etc.),
         write a script using ``api.paginate()`` instead — never pass ``limit`` to this tool.
 
-        Always use get_api_endpoint_detail() first to verify path and parameters.
+        **Before calling this tool**, read the ``api://endpoint-catalog`` resource (or
+        scan the API Endpoint Catalog in the system instructions) to find the correct
+        ``METHOD /path``. Then call ``get_api_endpoint_detail()`` to verify parameters.
+        Guessing paths without consulting the catalog has a near-zero chance of success.
+
         For config APIs (network-config/), you need a scopeId — find it via
         query_graph on the relevant Site, SiteCollection, or Device node.
 
@@ -146,8 +155,11 @@ def register_greenlake_api_call_tools(mcp, settings: Settings, glp_client: Green
         subscription/license management, service catalog, locations, etc.
         The base URL is https://global.api.greenlake.hpe.com.
 
-        Use unified_search(query) to discover available GreenLake endpoints — they
-        appear in the catalog under categories starting with "HPE GreenLake APIs for ...".
+        **Before calling this tool**, read the ``api://endpoint-catalog`` resource (or
+        scan the API Endpoint Catalog in the system instructions) to find the correct
+        ``METHOD /path`` — GreenLake endpoints appear under categories starting with
+        "HPE GreenLake APIs for ...". Guessing paths without consulting the catalog
+        has a near-zero chance of success.
 
         Args:
             path: API path (e.g., "devices/v1/devices").
