@@ -166,7 +166,7 @@ configuration changes are NOT permitted in this session:
   • The same restriction applies inside scripts you write or execute —
     `api.post(...)`, `api.delete(...)`, etc. will fail.
   • Mutating endpoints (POST/PUT/PATCH/DELETE) are hidden from
-    list_api_categories, get_api_endpoint_detail, and
+    list_api, get_api_endpoint_detail, and
     get_api_endpoint_glossary.
 
 Local operations remain available for analysis: write_graph,

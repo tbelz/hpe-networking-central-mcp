@@ -24,7 +24,7 @@ The agent manages network devices through a combination of direct API calls and 
 │  ├─ call_central_api    │──► Central REST API (monitoring, config, etc.)
 │  ├─ call_greenlake_api  │──► GreenLake Platform API (devices, subscriptions)
 │  ├─ unified_search      │──► Search APIs, docs, and data by keyword (BM25/FTS)
-│  ├─ list_api_categories │──► Browse all API categories with counts
+│  ├─ list_api            │──► Return the full nested API tree (fallback)
 │  ├─ get_api_endpoint_detail ──► Full parameter/schema detail for any endpoint
 │  ├─ query_graph         │──► Cypher queries against the configuration graph
 │  ├─ write_graph         │──► Write Cypher to enrich the graph (CREATE, MERGE, SET)
@@ -197,7 +197,7 @@ GREENLAKE_CLIENT_SECRET=your_glp_client_secret
 | `GREENLAKE_CLIENT_SECRET` | No | Central client secret | GreenLake Platform client secret |
 | `GLP_BASE_URL` | No | `https://global.api.greenlake.hpe.com` | GreenLake API base URL |
 | `GLP_INCLUDED_SLUGS` | No | — | Comma-separated service slugs to include (or empty for default set) |
-| `READ_ONLY` | No | `false` | When set to `true`/`1`/`yes`/`on` (case-insensitive), the server refuses any non-GET Central / GreenLake API call (both via tools and from inside scripts) and hides mutating endpoints from `unified_search`, `list_api_categories`, and `get_api_endpoint_detail`. Local operations (`write_graph`, `save_script`, `execute_script`) remain available. |
+| `READ_ONLY` | No | `false` | When set to `true`/`1`/`yes`/`on` (case-insensitive), the server refuses any non-GET Central / GreenLake API call (both via tools and from inside scripts) and hides mutating endpoints from `unified_search`, `list_api`, and `get_api_endpoint_detail`. Local operations (`write_graph`, `save_script`, `execute_script`) remain available. |
 
 ### Read-Only Mode
 
@@ -209,7 +209,7 @@ Start the container with `READ_ONLY=true` to lock the server into a
 - The same restriction is enforced inside scripts — `api.post(...)` and
   friends fail with `CentralAPIError(403, "READ_ONLY", ...)`.
 - Mutating endpoints are filtered out of `unified_search`,
-  `list_api_categories`, and `get_api_endpoint_detail` so the model never
+  `list_api`, and `get_api_endpoint_detail` so the model never
   sees them.
 - A banner is prepended to the MCP system prompt so the assistant knows it
   must not attempt configuration changes.
@@ -301,7 +301,7 @@ the `GREENLAKE_*` lines if you're only using Central APIs.
 | `call_central_api` | Make authenticated requests to any Central API endpoint |
 | `call_greenlake_api` | Make authenticated requests to any GreenLake Platform API endpoint (only available when GreenLake credentials are configured) |
 | `unified_search` | Search APIs, docs, and graph data by keyword (BM25/FTS with scope filtering) |
-| `list_api_categories` | List all API categories with endpoint counts |
+| `list_api` | Return the full nested API tree (fallback for clients that don't surface the catalog via instructions or the `api://endpoint-catalog` resource) |
 | `get_api_endpoint_detail` | Get full parameter and schema details for a specific endpoint |
 | `query_graph` | Execute read-only Cypher queries against the configuration graph |
 | `write_graph` | Execute write Cypher to enrich the graph (CREATE, MERGE, SET, DELETE) |

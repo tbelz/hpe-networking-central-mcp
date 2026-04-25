@@ -231,12 +231,16 @@ class TestApiCatalogReadOnly:
         result = json.loads(tools["get_api_endpoint_detail"](method="GET", path="/c/v1/things"))
         assert result.get("method") == "GET"
 
-    def test_list_categories_count_excludes_non_get_in_readonly(self, gm_catalog):
+    def test_list_api_excludes_mutating_methods_in_readonly(self, gm_catalog):
         tools_ro = _make_tools(gm_catalog, read_only=True)
         tools_rw = _make_tools(gm_catalog, read_only=False)
-        ro = json.loads(tools_ro["list_api_categories"]())
-        rw = json.loads(tools_rw["list_api_categories"]())
-        assert ro["total_endpoints"] < rw["total_endpoints"]
+        ro = tools_ro["list_api"]()
+        rw = tools_rw["list_api"]()
+        # Read-only renders fewer endpoints than read-write
+        assert "POST" not in ro
+        assert "DELETE" not in ro
+        # Read-write retains them somewhere in the rendered tree
+        assert "POST" in rw or "DELETE" in rw
 
 
 # ── _build_env propagation ──────────────────────────────────────────

@@ -97,36 +97,41 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         }, indent=2)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
-    def list_api_categories() -> str:
-        """List all API categories with their endpoint counts.
+    def list_api() -> str:
+        """Return the full API Endpoint Catalog as a nested path tree.
 
-        Returns every category name and how many endpoints it contains.
-        Use this to discover what API areas are available; then read the
-        ``api://endpoint-catalog`` resource (or scan the API Endpoint
-        Catalog in the system instructions) for the exact ``METHOD /path``.
+        **Fallback for agents that cannot see the API Endpoint Catalog
+        embedded in the server instructions or via the
+        ``api://endpoint-catalog`` / ``docs://endpoint-catalog`` resource.**
+        Most clients receive the catalog automatically through one of those
+        channels and do not need to call this tool.
+
+        The returned text is grouped by API category with nested path
+        indentation. A trailing ``!`` after the method list marks
+        deprecated endpoints. When ``READ_ONLY`` is enabled, mutating
+        methods (POST/PUT/PATCH/DELETE) are filtered out.
 
         Returns:
-            JSON with categories and total endpoint count.
+            Plain-text catalog rendered by ``render_path_tree``.
         """
+        from ..api_tree import render_path_tree
+
         gm = _graph_manager
         if gm is None or not gm.is_available:
-            return json.dumps({"error": "API catalog not available — graph database not initialized.",
-                               "hint": "The graph database may still be loading. Try again shortly."})
-
-        rows = gm.query(
-            "MATCH (e:ApiEndpoint) "
-            + ("WHERE e.method = 'GET' " if settings.read_only else "")
-            + "RETURN e.category AS category, count(e) AS cnt "
-            "ORDER BY category",
-            read_only=True,
-        )
-
-        categories = {r["category"]: r["cnt"] for r in rows}
-        total = sum(categories.values())
-        return json.dumps({
-            "categories": categories,
-            "total_endpoints": total,
-        }, indent=2)
+            return (
+                "API endpoint catalog is currently unavailable — "
+                "graph database not initialized. Try again shortly."
+            )
+        try:
+            rows = gm.query(
+                "MATCH (e:ApiEndpoint) "
+                "RETURN e.method AS method, e.path AS path, "
+                "e.category AS category, e.deprecated AS deprecated",
+                read_only=True,
+            )
+        except Exception as exc:
+            return f"API endpoint catalog unavailable: {exc}"
+        return render_path_tree(rows, read_only=settings.read_only)
 
     # ── Shared resolver for the (method, path) / endpoints argument shape ──
 

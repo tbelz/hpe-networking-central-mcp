@@ -227,7 +227,9 @@ All endpoints from both platforms are indexed in a single unified catalog.
 
 1. `unified_search(query)` — search for endpoints by keyword. Returns compact results
    (method, path, summary). GreenLake categories appear as "HPE GreenLake APIs for ...".
-2. `list_api_categories()` — browse all API categories with endpoint counts.
+2. `list_api()` — return the full nested API tree (fallback for clients that
+   don't surface the catalog via instructions or the `api://endpoint-catalog`
+   resource).
 3. `get_api_endpoint_detail(method, path)` — full parameter schemas, request/response bodies.
 
 Always discover endpoints via search before writing scripts or making API calls.
