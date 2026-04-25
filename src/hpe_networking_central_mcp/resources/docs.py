@@ -26,21 +26,7 @@ def register_api_catalog_resource(mcp, settings: Settings, graph_manager: "Graph
     """
     from ..api_tree import render_path_tree
 
-    @mcp.resource("api://endpoint-catalog")
-    def api_endpoint_catalog() -> str:
-        """Full API Endpoint Catalog — every available METHOD /path for Central and GreenLake.
-
-        Read this resource **before** calling get_api_endpoint_detail(),
-        call_central_api(), or call_greenlake_api() to find the correct
-        METHOD and exact path. The catalog is grouped by API category with
-        nested path-tree indentation. A trailing ``!`` marks deprecated
-        endpoints.
-
-        If you cannot see the API Endpoint Catalog in the system
-        instructions, reading this resource is the authoritative fallback.
-        Guessing API paths without consulting the catalog has a near-zero
-        chance of success.
-        """
+    def _render_catalog() -> str:
         if graph_manager is None or not graph_manager.is_available:
             return (
                 "API endpoint catalog is currently unavailable — "
@@ -56,6 +42,38 @@ def register_api_catalog_resource(mcp, settings: Settings, graph_manager: "Graph
         except Exception as exc:
             return f"API endpoint catalog unavailable: {exc}"
         return render_path_tree(rows, read_only=settings.read_only)
+
+    @mcp.resource("api://endpoint-catalog")
+    def api_endpoint_catalog() -> str:
+        """Full API Endpoint Catalog — every available METHOD /path for Central and GreenLake.
+
+        Read this resource **before** calling get_api_endpoint_detail(),
+        call_central_api(), or call_greenlake_api() to find the correct
+        METHOD and exact path. The catalog is grouped by API category with
+        nested path-tree indentation. A trailing ``!`` marks deprecated
+        endpoints.
+
+        If you cannot see the API Endpoint Catalog in the system
+        instructions, reading this resource is the authoritative fallback.
+        Guessing API paths without consulting the catalog has a near-zero
+        chance of success.
+        """
+        return _render_catalog()
+
+    # Alias under the docs:// scheme used by every other documentation
+    # resource. Some MCP clients (notably Claude Code builds) hide
+    # resources whose URI scheme they don't recognise; exposing the same
+    # content under docs:// guarantees the catalog is reachable from any
+    # spec-compliant client.
+    @mcp.resource("docs://endpoint-catalog")
+    def docs_endpoint_catalog() -> str:
+        """Alias for ``api://endpoint-catalog`` — full API Endpoint Catalog.
+
+        Identical content to ``api://endpoint-catalog``; provided under the
+        ``docs://`` scheme for clients that filter unknown schemes from
+        their resource picker.
+        """
+        return _render_catalog()
 
 
 def register_resources(mcp, settings: Settings, graph_manager: GraphManager | None = None):
