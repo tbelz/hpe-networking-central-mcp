@@ -30,6 +30,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
@@ -161,18 +162,51 @@ def _extract_oas_from_markdown(text: str) -> dict | None:
     """Extract an OpenAPI spec from a ReadMe ``.md`` response.
 
     The ``.md`` endpoint returns markdown containing a JSON code block
-    with the full OpenAPI 3.x specification for that endpoint.
+    with the full OpenAPI 3.x specification for that endpoint.  When a
+    second JSON block follows the spec we treat it as a best-effort
+    example request body and attach it to the relevant operation under
+    the ``x-example-request`` extension key.
     """
-    m = _JSON_BLOCK_RE.search(text)
-    if not m:
+    spec: dict | None = None
+    example: Any | None = None
+
+    for idx, m in enumerate(_JSON_BLOCK_RE.finditer(text)):
+        try:
+            parsed = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            continue
+        if spec is None and isinstance(parsed, dict) and "paths" in parsed:
+            spec = parsed
+            continue
+        # First non-spec JSON block: treat as the example body.
+        if spec is not None and example is None:
+            example = parsed
+            break
+
+    if spec is None:
         return None
-    try:
-        spec = json.loads(m.group(1))
-    except json.JSONDecodeError:
-        return None
-    if isinstance(spec, dict) and "paths" in spec:
-        return spec
-    return None
+
+    if example is not None:
+        _attach_example_to_first_operation(spec, example)
+    return spec
+
+
+def _attach_example_to_first_operation(spec: dict, example: Any) -> None:
+    """Attach an example body to the spec's first defined operation.
+
+    ReadMe ``.md`` payloads cover one endpoint at a time, so the spec
+    almost always has exactly one operation — but defensively pick the
+    first ``(method, path)`` we find.
+    """
+    paths = spec.get("paths") or {}
+    for _path, item in paths.items():
+        if not isinstance(item, dict):
+            continue
+        for method in ("post", "put", "patch", "delete", "get"):
+            op = item.get(method)
+            if isinstance(op, dict):
+                op["x-example-request"] = example
+                return
 
 
 # ----- Caching ----------------------------------------------------------------

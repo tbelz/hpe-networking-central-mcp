@@ -146,6 +146,42 @@ graph_manager.initialize()
 graph_manager.create_fts_indexes()
 
 
+# ── Knowledge DB schema-version check ────────────────────────────────
+# Version 2 introduces normalized OAS specs and the bodyCompactJson /
+# bodyRequestOnlyJson columns required by get_api_endpoint_detail(view=...).
+# An older DB will lack those columns and the per-view tools will fail at
+# query time — surface that early with an actionable message.
+_KNOWLEDGE_SCHEMA_VERSION = 2
+
+
+def _check_knowledge_schema_version() -> None:
+    manifest_path = settings.graph_db_path.parent / "manifest.json"
+    if not manifest_path.exists():
+        logger.info("knowledge_manifest_missing", path=str(manifest_path))
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("knowledge_manifest_unreadable", error=str(exc))
+        return
+    found = manifest.get("schema_version")
+    if found != _KNOWLEDGE_SCHEMA_VERSION:
+        logger.warning(
+            "knowledge_schema_version_mismatch",
+            expected=_KNOWLEDGE_SCHEMA_VERSION,
+            found=found,
+            hint=(
+                "Knowledge DB was built by an older version of this server. "
+                "Re-run scripts/build_knowledge_db.py or wait for the next "
+                "knowledge-db release. The compact / request-only views of "
+                "get_api_endpoint_detail will fall back to the full view."
+            ),
+        )
+
+
+_check_knowledge_schema_version()
+
+
 # ── Render API endpoint catalog as a path-tree for the system instructions ──
 def _load_api_tree() -> str:
     """Query all ApiEndpoint rows and render them as a category-grouped path-tree.
