@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2025-XX-XX, supersedes the four-view detail surface introduced
+Accepted (2026-04-25, supersedes the four-view detail surface introduced
 informally in 2024).
 
 ## Context

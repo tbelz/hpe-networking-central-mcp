@@ -136,9 +136,11 @@ def test_normalize_lossless_against_full_resolution():
     norm_skel = project_skeleton(normalize(spec), "POST", "/v1/widgets/0")
     assert raw_skel is not None
     assert norm_skel is not None
-    # The structural keys must match (parameters, request_body, responses,
-    # required_paths). $components keys may differ in name because dedup
-    # may promote a schema only post-normalization.
+    # ``parameters`` and ``required_paths`` must match exactly across the
+    # raw and normalized projections.  ``request_body`` and ``responses``
+    # legitimately differ in shape (inline schemas become ``$ref``s after
+    # dedup) and ``$components`` may grow new entries — those are the
+    # whole point of normalization, so we don't compare them here.
     for key in ("parameters", "required_paths"):
         assert raw_skel.get(key) == norm_skel.get(key), key
 
@@ -189,11 +191,20 @@ DESCRIPTION_KEYS = (
 )
 
 
-def _walk(node):
+def _walk(node, *, _in_properties: bool = False):
+    """Yield every dict reachable under ``node``.
+
+    ``properties`` and ``patternProperties`` map *user-defined field
+    names* to schemas; their keys are data, not OpenAPI keywords.  We
+    therefore walk *into* their values but never yield the property-name
+    dict itself for keyword checks (``description`` is a perfectly legal
+    field name).
+    """
     if isinstance(node, dict):
-        yield node
-        for v in node.values():
-            yield from _walk(v)
+        if not _in_properties:
+            yield node
+        for k, v in node.items():
+            yield from _walk(v, _in_properties=k in ("properties", "patternProperties"))
     elif isinstance(node, list):
         for item in node:
             yield from _walk(item)
@@ -204,8 +215,11 @@ def test_skeleton_strips_descriptions_at_every_level():
     skel = project_skeleton(spec, "POST", "/v1/widgets/0")
     assert skel is not None
     # The top-level meta KEEPS its summary so the agent has a one-line label.
-    # But every NESTED dict in parameters / request_body / responses /
-    # $components must have no description-bearing keys.
+    # But every NESTED schema dict in parameters / request_body / responses /
+    # $components must have no description-bearing keys.  ``properties``
+    # and ``patternProperties`` are skipped because their keys are
+    # user-defined field names (a property literally called ``description``
+    # is legal and must survive).
     for key in ("parameters", "request_body", "responses", "$components"):
         sub = skel.get(key)
         if sub is None:
@@ -215,6 +229,57 @@ def test_skeleton_strips_descriptions_at_every_level():
                 assert forbidden not in node, (
                     f"{forbidden!r} leaked into skeleton at {node!r}"
                 )
+
+
+def test_skeleton_preserves_user_property_named_description():
+    """Regression: a property literally named ``description`` must survive.
+
+    The skeleton walker previously stripped any dict key matching
+    ``description`` / ``title`` / ``summary`` / etc., which corrupted
+    schemas whose users named a field ``description`` (common in error
+    response bodies — e.g. ``{error_code, description, service_name}``).
+    """
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "T"},
+        "paths": {
+            "/things": {
+                "post": {
+                    "summary": "Create a thing",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["description", "title"],
+                                    "properties": {
+                                        # User-defined field names that
+                                        # collide with OpenAPI keywords.
+                                        "description": {"type": "string"},
+                                        "title": {"type": "string"},
+                                        "summary": {"type": "string"},
+                                        "example": {"type": "string"},
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "responses": {"201": {"description": "ok"}},
+                }
+            }
+        },
+    }
+    skel = project_skeleton(spec, "POST", "/things")
+    assert skel is not None
+    body_schema = skel["request_body"]["schema"]
+    props = body_schema["properties"]
+    for field in ("description", "title", "summary", "example"):
+        assert field in props, f"property {field!r} was stripped"
+        assert props[field] == {"type": "string"}
+    # Required list naming a stripped key must also survive.
+    assert "description" in skel["required_paths"]
+    assert "title" in skel["required_paths"]
 
 
 def test_skeleton_preserves_structure():

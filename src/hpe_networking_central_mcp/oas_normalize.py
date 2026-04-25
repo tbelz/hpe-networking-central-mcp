@@ -459,11 +459,20 @@ def _strip_skeleton_keys(node: Any) -> Any:
 
     def _walk(n: Any) -> Any:
         if isinstance(n, dict):
-            return {
-                k: _walk(v)
-                for k, v in n.items()
-                if k not in _SKELETON_STRIP_KEYS
-            }
+            out: dict[str, Any] = {}
+            for k, v in n.items():
+                if k in _SKELETON_STRIP_KEYS:
+                    continue
+                # `properties` / `patternProperties` keys are user-defined
+                # field names, not OpenAPI schema keywords.  Never filter
+                # them by name (a property literally called `description`
+                # is legal and must survive); only recurse into the
+                # *values* so nested schemas still get their prose stripped.
+                if k in ("properties", "patternProperties") and isinstance(v, dict):
+                    out[k] = {pname: _walk(pval) for pname, pval in v.items()}
+                else:
+                    out[k] = _walk(v)
+            return out
         if isinstance(n, list):
             return [_walk(item) for item in n]
         return n
@@ -609,9 +618,11 @@ def project_skeleton(spec: dict, method: str, path: str) -> dict | None:
         "deprecated": bool(op.get("deprecated", False)),
     }
     payload["parameters"] = params_out
-    if rb_out is not None:
-        payload["request_body"] = rb_out
-        payload["required_paths"] = required_paths
+    # Always emit request_body / required_paths so the response shape is
+    # stable across GET (no body) and write endpoints.  GET endpoints get
+    # ``request_body: null`` and ``required_paths: []``.
+    payload["request_body"] = rb_out
+    payload["required_paths"] = required_paths
     payload["responses"] = responses_out
 
     # Side-table: transitively-needed components, also stripped of prose.

@@ -306,7 +306,9 @@ def _get_auto_run_seeds() -> list[str]:
 def _update_script_node(script_name: str, finished: str, exit_code: int):
     """Update the Script graph node's last_run/last_exit_code after seed execution."""
     try:
-        graph_manager.query(
+        # `query()` defaults to read_only=True and rejects SET; use execute()
+        # for the write path.
+        graph_manager.execute(
             "MATCH (s:Script {filename: $fn}) SET s.last_run = $lr, s.last_exit_code = $ec",
             {"fn": script_name, "lr": finished, "ec": exit_code},
         )

@@ -180,9 +180,12 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         Returns parameters, request body schema, success and first-error
         response shapes, and a transitive ``$components`` side-table —
         with all human-readable prose (descriptions, titles, examples)
-        stripped.  An agent can map configuration values onto field names
-        directly from names + types + enums alone, which keeps the payload
-        small enough to fit several endpoints into one prompt.
+        stripped at every nested level.  The operation-level ``summary``
+        is intentionally preserved as a one-line label so an agent can
+        recognise the endpoint without a second tool call.  An agent can
+        map configuration values onto field names directly from
+        names + types + enums alone, which keeps the payload small enough
+        to fit several endpoints into one prompt.
 
         For ambiguous field names, follow up with
         ``get_api_endpoint_glossary(method, path)`` to fetch the
@@ -360,7 +363,7 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             read_only=True,
         )
 
-        wanted_components = set(components) if components else None
+        wanted_components = set(components) if components is not None else None
 
         details_by_eid: dict[str, dict] = {}
         for r in rows:
