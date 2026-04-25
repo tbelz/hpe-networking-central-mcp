@@ -526,6 +526,13 @@ def _extract_prose(node: Any) -> Any:
         out: dict[str, Any] = {}
         for k, v in node.items():
             if k in _SKELETON_STRIP_KEYS:
+                # Drop content-free prose so a node with only an empty
+                # ``description: ""`` still collapses to ``None`` and the
+                # caller can prune the whole entry.
+                if isinstance(v, str) and not v.strip():
+                    continue
+                if isinstance(v, (list, tuple, dict)) and not v:
+                    continue
                 out[k] = v
                 continue
             if k in ("properties", "patternProperties") and isinstance(v, dict):
@@ -543,9 +550,16 @@ def _extract_prose(node: Any) -> Any:
                     out[k] = sub
         return out or None
     if isinstance(node, list):
+        # Preserve list length and item ordering for ``allOf`` / ``oneOf``
+        # / ``anyOf`` so glossary indices line up with the skeleton's
+        # — clients can correlate ``glossary["allOf"][i]`` with
+        # ``skeleton["allOf"][i]`` without remapping.  Items with no
+        # prose become ``None`` placeholders; if every item is empty the
+        # whole list collapses to ``None``.
         results = [_extract_prose(item) for item in node]
-        results = [r for r in results if r]
-        return results or None
+        if any(r is not None for r in results):
+            return results
+        return None
     return None
 
 
@@ -666,17 +680,21 @@ def project_skeleton(spec: dict, method: str, path: str) -> dict | None:
 def project_glossary(spec: dict, method: str, path: str) -> dict | None:
     """Return the descriptive prose for an endpoint, organised per-component.
 
-    The glossary is the **literal complement of the skeleton**: every key
-    listed in :data:`_SKELETON_STRIP_KEYS` (``description``, ``title``,
-    ``example``, ``examples``, ``x-typeName``, ``x-typeDescription``,
-    ``x-patternSources``, ``summary``) is surfaced here at every nesting
-    level it appears — and nothing else.  Structural keys (``type``,
-    ``enum``, ``format``, ``pattern``, ``default``, ``required``,
-    ``$ref``, ``x-mutually-exclusive``, length / numeric constraints, …)
-    are NOT repeated because the skeleton preserves them; duplicating
-    them here would only bloat payloads.  Adding a key to
-    :data:`_SKELETON_STRIP_KEYS` automatically moves it from skeleton to
-    glossary on the next build.
+    The glossary carries the prose-bearing keys that the skeleton strips
+    from nested parameter and schema content: ``description``, ``title``,
+    ``example``, ``examples``, ``x-typeName``, ``x-typeDescription``, and
+    ``x-patternSources`` wherever they appear.  Operation-level
+    ``summary`` is the one intentional exception: although it is listed
+    in :data:`_SKELETON_STRIP_KEYS` (so the recursive stripper drops it
+    from nested schemas), :func:`project_skeleton` re-emits it at the
+    top level as a one-line endpoint label, and the glossary therefore
+    does not duplicate it.  Structural keys (``type``, ``enum``,
+    ``format``, ``pattern``, ``default``, ``required``, ``$ref``,
+    ``x-mutually-exclusive``, length / numeric constraints, …) are NOT
+    repeated because the skeleton preserves them; duplicating them here
+    would only bloat payloads.  Adding a key to
+    :data:`_SKELETON_STRIP_KEYS` automatically moves it from nested
+    skeleton output to glossary on the next build.
 
     Output shape::
 
