@@ -196,7 +196,11 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         names + types + enums alone, which keeps the payload small enough
         to fit several endpoints into one prompt.
 
-        For ambiguous field names, follow up with
+        For ambiguous field names — and for parameter semantics the
+        skeleton omits because they are documented only in prose (e.g.
+        OData filter syntax, the meaning of enum values, or constraints
+        described in text rather than encoded as ``format`` / ``pattern``
+        / numeric bounds) — follow up with
         ``get_api_endpoint_glossary(method, path)`` to fetch the
         descriptions on demand.  Most workflows do not need it.
 
@@ -335,13 +339,40 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         endpoints: list[dict] | None = None,
         components: list[str] | None = None,
     ) -> str:
-        """Get human-readable descriptions for the components of one or more endpoints.
+        """Get human-readable descriptions for the parameters and components of one or more endpoints.
 
-        Returns descriptions, enum value lists, and ``x-mutually-exclusive``
-        annotations for the schemas reachable from the endpoint(s) — the
-        prose that ``get_api_endpoint_detail`` strips.  Use this only when
-        a field name in the skeleton is ambiguous.  Most workflows do not
-        need to call it.
+        The glossary is the complement of the **nested** structural
+        skeleton: every prose key that ``get_api_endpoint_detail`` strips
+        from nested parameter and schema content (``description``,
+        ``title``, ``example``, ``examples``, ``x-typeName``,
+        ``x-typeDescription``, ``x-patternSources``) is surfaced here at
+        every nesting level it appears — and nothing else.  Structural
+        fields (``type``, ``enum``, ``format``, ``pattern``, ``default``,
+        ``required``, ``x-mutually-exclusive``, length / numeric
+        constraints) are NOT repeated; the skeleton already carries them.
+
+        Operation-level ``summary`` is the one intentional exception to
+        the strip-keys rule: it stays on the top-level skeleton output as
+        a one-line endpoint label and is not duplicated into the glossary.
+
+        Returns:
+        - **parameters**: per-parameter prose for query/path/header/cookie
+          parameters.  Each entry contains an ``in`` scaffold plus
+          whichever prose keys the upstream spec attached at the
+          parameter or schema level.  This is where Central encodes
+          rich semantics like OData filter syntax, allowed values
+          listed only in prose, and format constraints.
+        - **components**: prose for the schemas reachable from the
+          endpoint(s), in the same shape as the schema itself
+          (``properties`` / ``items`` / ``allOf`` / … traversed only as
+          scaffolding to locate the prose).
+
+        Use this whenever a parameter or field needs semantic context;
+        the skeleton alone is sufficient for purely structural mapping.
+
+        Note: the ``components`` filter argument applies to schema
+        components only; the ``parameters`` block is always returned in
+        full because it is small and frequently needed.
 
         Two call forms (matching ``get_api_endpoint_detail``):
 
