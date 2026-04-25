@@ -64,9 +64,10 @@ def download_knowledge_db(
     log = logger or _DEFAULT_LOGGER
     _info = getattr(log, "info", None) or _stdlib_log(logging.INFO)
     _warn = getattr(log, "warning", None) or _stdlib_log(logging.WARNING)
-    # Sanity: if the caller passes a stdlib logger, its info/warning won't
-    # accept arbitrary kwargs. Detect and wrap.
-    if log is _DEFAULT_LOGGER:
+    # Stdlib loggers (logging.Logger) expose info/warning that do not accept
+    # arbitrary kwargs, so wrap them to honour the documented kwargs contract.
+    # The module-level default is also a stdlib logger.
+    if isinstance(log, logging.Logger):
         _info = _stdlib_log(logging.INFO)
         _warn = _stdlib_log(logging.WARNING)
 

@@ -129,8 +129,12 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                 "e.category AS category, e.deprecated AS deprecated",
                 read_only=True,
             )
-        except Exception as exc:
-            return f"API endpoint catalog unavailable: {exc}"
+        except Exception:
+            logger.exception("api_endpoint_catalog_query_failed")
+            return (
+                "API endpoint catalog is currently unavailable. "
+                "Try again shortly; see server logs for details."
+            )
         return render_path_tree(rows, read_only=settings.read_only)
 
     # ── Shared resolver for the (method, path) / endpoints argument shape ──

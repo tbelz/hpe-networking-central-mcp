@@ -168,7 +168,8 @@ def test_reading_resource_when_query_raises_returns_error_message():
     text = _read(mcp, "api://endpoint-catalog")
 
     assert "unavailable" in text.lower()
-    assert "kuzu connection lost" in text
+    # Internal exception text must NOT leak to the resource consumer.
+    assert "kuzu connection lost" not in text
 
 
 def test_read_only_filters_mutating_methods_from_catalog():
