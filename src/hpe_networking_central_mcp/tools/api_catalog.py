@@ -197,12 +197,13 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         method: str | None = None,
         path: str | None = None,
         endpoints: list[dict] | None = None,
+        view: str = "compact",
     ) -> str:
         """Get full details for one or more API endpoints.
 
-        Returns the complete API specification including parameters (with types,
-        location, required flags), request body schema, and response status
-        codes with their schemas.
+        Returns the API specification: parameters (with types, location,
+        required flags), request body schema, and response status codes
+        with their schemas.
 
         Two call forms are supported:
 
@@ -214,21 +215,48 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
            object per matched endpoint and a ``missing`` list naming any
            endpoints that were not found in the catalog.
 
-        In READ_ONLY mode, non-GET endpoints are silently skipped (single form
-        returns an error; bulk form lists them under ``skipped_read_only``).
+        ``view`` selects how much detail to return:
+
+        - ``"compact"`` *(default)* — Repeated error responses and nested
+          object schemas are kept as ``$ref`` and bundled in a
+          ``$components`` side-table.  ~5–15 KB per endpoint, suitable for
+          most workflows.
+        - ``"request-only"`` — Just the request-body schema plus a flat
+          ``required_paths`` list.  Use when you only need to construct a
+          POST/PUT/PATCH payload.
+        - ``"full"`` — Every ``$ref`` is fully resolved inline.  May exceed
+          100 KB on heavy endpoints; use only when you need a single
+          self-contained schema with no indirection.
+        - ``"raw"`` — The untouched OpenAPI operation object plus the raw
+          ``components`` table.  Diagnostic.  Note: when served from the
+          cached knowledge DB this view degrades to ``"full"`` because
+          only the resolved shape is stored on disk; the response will
+          carry a ``"note"`` field explaining the fallback.
+
+        DELETE endpoints are catalogued and callable via ``call_central_api``
+        when ``READ_ONLY=false``.  In ``READ_ONLY=true`` mode, non-GET
+        endpoints are silently skipped (single form returns an error; bulk
+        form lists them under ``skipped_read_only``).
 
         Args:
             method: HTTP method (GET, POST, PUT, PATCH, DELETE). Single form.
             path: Full API path (e.g. "/monitoring/v2/aps"). Single form.
             endpoints: List of {"method", "path"} dicts. Bulk form.
+            view: One of "compact" (default), "request-only", "full", "raw".
 
         Returns:
-            JSON with full endpoint specification(s).
+            JSON with endpoint specification(s) under the chosen view.
         """
         gm = _graph_manager
         if gm is None or not gm.is_available:
             return json.dumps({"error": "Graph database not available.",
                                "hint": "The graph database may still be loading. Try again shortly."})
+
+        valid_views = {"compact", "request-only", "full", "raw"}
+        if view not in valid_views:
+            return json.dumps({
+                "error": f"Invalid view '{view}'. Must be one of: {', '.join(sorted(valid_views))}.",
+            })
 
         # ── Resolve call form ─────────────────────────────────────────
         if endpoints is not None:
@@ -278,23 +306,106 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
 
         # ── Bulk Cypher fetch ─────────────────────────────────────────
         eids = [f"{m}:{p}" for m, p in requested]
-        rows = gm.query(
-            "MATCH (e:ApiEndpoint) WHERE e.endpoint_id IN $eids "
-            "RETURN e.method, e.path, e.summary, e.description, e.operationId, "
-            "e.category, e.deprecated, e.tags, e.parameters, e.requestBody, "
-            "e.responses",
-            {"eids": eids},
-            read_only=True,
-        )
+
+        # Try to read the projection columns introduced in schema_version 2;
+        # fall back gracefully when running against an older DB.
+        select_extra = ""
+        if view in {"compact", "request-only"}:
+            select_extra = ", e.bodyCompactJson, e.bodyRequestOnlyJson"
+
+        try:
+            rows = gm.query(
+                "MATCH (e:ApiEndpoint) WHERE e.endpoint_id IN $eids "
+                "RETURN e.method, e.path, e.summary, e.description, e.operationId, "
+                "e.category, e.deprecated, e.tags, e.parameters, e.requestBody, "
+                f"e.responses{select_extra}",
+                {"eids": eids},
+                read_only=True,
+            )
+        except Exception as exc:
+            # Only fall back when the failure is consistent with the projection
+            # columns being absent (older DBs predating schema_version 2).
+            # All other query errors must surface to the caller.
+            msg = str(exc).lower()
+            missing_columns = (
+                "bodycompactjson" in msg
+                or "bodyrequestonlyjson" in msg
+                or "no such column" in msg
+                or "unknown property" in msg
+            )
+            if not missing_columns:
+                raise
+            logger.warning(
+                "endpoint_detail_view_fallback",
+                view=view,
+                error=str(exc),
+                hint="Projection columns missing — knowledge DB predates schema_version 2.",
+            )
+            rows = gm.query(
+                "MATCH (e:ApiEndpoint) WHERE e.endpoint_id IN $eids "
+                "RETURN e.method, e.path, e.summary, e.description, e.operationId, "
+                "e.category, e.deprecated, e.tags, e.parameters, e.requestBody, "
+                "e.responses",
+                {"eids": eids},
+                read_only=True,
+            )
+            requested_view = view
+            view = "full"  # serve the legacy resolved view
+            _view_fallback_note = (
+                f"requested view '{requested_view}' is unavailable in the cached "
+                "knowledge DB (schema_version < 2); served 'full' instead."
+            )
+        else:
+            _view_fallback_note = None
 
         details_by_eid: dict[str, dict] = {}
         for r in rows:
+            method_val = r.get("e.method", "")
+            path_val = r.get("e.path", "")
+
+            # ── view='compact' / 'request-only': prefer precomputed JSON ──
+            requested_view = view
+            if view == "compact":
+                blob = r.get("e.bodyCompactJson") or ""
+                if blob:
+                    try:
+                        d = json.loads(blob)
+                        d.setdefault("category", r.get("e.category", ""))
+                        details_by_eid[f"{method_val}:{path_val}"] = d
+                        continue
+                    except (json.JSONDecodeError, TypeError) as exc:
+                        logger.warning(
+                            "endpoint_detail_blob_invalid",
+                            view=view,
+                            method=method_val,
+                            path=path_val,
+                            error=str(exc),
+                        )
+            elif view == "request-only":
+                blob = r.get("e.bodyRequestOnlyJson") or ""
+                if blob:
+                    try:
+                        d = json.loads(blob)
+                        d.setdefault("category", r.get("e.category", ""))
+                        details_by_eid[f"{method_val}:{path_val}"] = d
+                        continue
+                    except (json.JSONDecodeError, TypeError) as exc:
+                        logger.warning(
+                            "endpoint_detail_blob_invalid",
+                            view=view,
+                            method=method_val,
+                            path=path_val,
+                            error=str(exc),
+                        )
+
+            # ── view='full' (or fallback): assemble from legacy columns ──
             d: dict[str, Any] = {
-                "method": r.get("e.method", ""),
-                "path": r.get("e.path", ""),
+                "method": method_val,
+                "path": path_val,
                 "summary": r.get("e.summary", ""),
                 "category": r.get("e.category", ""),
                 "operation_id": r.get("e.operationId", ""),
+                "view": "full",
             }
             if r.get("e.description"):
                 d["description"] = r["e.description"]
@@ -324,7 +435,25 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-            details_by_eid[f"{d['method']}:{d['path']}"] = d
+            # view='raw' is not supported via the precomputed columns;
+            # only the resolved 'full' shape is available from the cached DB.
+            if view == "raw":
+                d["view"] = "raw"
+                d["note"] = (
+                    "raw view is only available at build time; serving 'full' instead."
+                )
+            elif requested_view in {"compact", "request-only"}:
+                # Precomputed blob was missing/invalid for this row — make
+                # the shape change explicit so callers can detect it.
+                d["view"] = "full"
+                d["note"] = (
+                    f"requested view '{requested_view}' was unavailable for this "
+                    "endpoint (precomputed blob missing or invalid); served 'full' instead."
+                )
+            elif _view_fallback_note is not None:
+                d["note"] = _view_fallback_note
+
+            details_by_eid[f"{method_val}:{path_val}"] = d
 
         # ── Single-form response (preserve legacy shape) ─────────────
         if endpoints is None:

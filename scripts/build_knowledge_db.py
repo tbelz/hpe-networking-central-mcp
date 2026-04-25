@@ -33,6 +33,11 @@ from hpe_networking_central_mcp.graph.schema import (  # noqa: E402
     TOPOLOGY_REL_TABLES,
 )
 from hpe_networking_central_mcp.oas_index import OASIndex  # noqa: E402
+from hpe_networking_central_mcp.oas_normalize import (  # noqa: E402
+    normalize as normalize_spec,
+    project_compact,
+    project_request_only,
+)
 from hpe_networking_central_mcp.oas_scraper import ReadMeSpecProvider  # noqa: E402
 from hpe_networking_central_mcp.vsg_scraper import VsgDocProvider  # noqa: E402
 
@@ -165,10 +170,22 @@ def _cypher_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
-    """Insert ApiEndpoint and ApiCategory nodes from the OASIndex."""
+def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> int:
+    """Insert ApiEndpoint and ApiCategory nodes from the OASIndex.
+
+    ``specs`` should be the **normalized** spec list — projection columns
+    (``bodyCompactJson``, ``bodyRequestOnlyJson``) are computed from these.
+    """
     conn = lb.Connection(db)
     count = 0
+
+    # Build a (category_title) -> spec lookup so we can compute projections
+    # without re-parsing per endpoint.
+    specs_by_category: dict[str, dict] = {}
+    for spec in specs:
+        title = (spec.get("info") or {}).get("title", "Unknown")
+        # If two specs share a title the later one wins; matches OASIndex.build.
+        specs_by_category[title] = spec
 
     for entry in index._entries:  # noqa: SLF001 — accessing internal for bulk insert
         endpoint_id = f"{entry.method}:{entry.path}"
@@ -209,13 +226,41 @@ def _populate_endpoints(db: lb.Database, index: OASIndex) -> int:
         escaped_body = _cypher_escape(body_json)
         escaped_resps = _cypher_escape(responses_json)
 
+        # Compute compact + request-only projections from the normalized spec.
+        compact_json = ""
+        request_only_json = ""
+        spec = specs_by_category.get(entry.category)
+        if spec is not None:
+            try:
+                compact_view = project_compact(spec, entry.method, entry.path)
+                if compact_view is not None:
+                    compact_json = json.dumps(compact_view)
+            except Exception as exc:  # pragma: no cover — defensive
+                print(
+                    f"    ⚠ project_compact failed for {entry.method} {entry.path}: {exc}",
+                    file=sys.stderr,
+                )
+            try:
+                req_only_view = project_request_only(spec, entry.method, entry.path)
+                if req_only_view is not None:
+                    request_only_json = json.dumps(req_only_view)
+            except Exception as exc:  # pragma: no cover — defensive
+                print(
+                    f"    ⚠ project_request_only failed for {entry.method} {entry.path}: {exc}",
+                    file=sys.stderr,
+                )
+        escaped_compact = _cypher_escape(compact_json)
+        escaped_req_only = _cypher_escape(request_only_json)
+
         conn.execute(
             "CREATE (e:ApiEndpoint {"
             "  endpoint_id: $eid, method: $method, path: $path,"
             "  summary: $summary, description: $descr, operationId: $opid,"
             f"  category: $cat, deprecated: $dep, {tags_clause}"
             f"  parameters: '{escaped_params}', requestBody: '{escaped_body}',"
-            f"  responses: '{escaped_resps}'"
+            f"  responses: '{escaped_resps}',"
+            f"  bodyCompactJson: '{escaped_compact}',"
+            f"  bodyRequestOnlyJson: '{escaped_req_only}'"
             "})",
             parameters={
                 "eid": endpoint_id,
@@ -437,9 +482,12 @@ def main() -> None:
 
     # 3. Build index and populate
     print("\n[3/6] Populating API endpoints...")
+    if specs:
+        print(f"  Normalizing {len(specs)} specs (dedup error/object schemas)...")
+        specs = [normalize_spec(s) for s in specs]
     index = OASIndex()
     index.build(specs)
-    endpoint_count = _populate_endpoints(db, index)
+    endpoint_count = _populate_endpoints(db, index, specs)
 
     # 4. Sync and populate VSG documentation
     print("\n[4/6] Refreshing and populating VSG documentation...")
@@ -467,6 +515,7 @@ def main() -> None:
     import time
     manifest = {
         "version": time.strftime("knowledge-db-%Y%m%d-%H%M%S", time.gmtime()),
+        "schema_version": 2,
         "endpoint_count": endpoint_count,
         "category_count": len(index.categories),
         "doc_count": doc_count,

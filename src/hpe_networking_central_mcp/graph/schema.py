@@ -109,6 +109,8 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         parameters     STRING,
         requestBody    STRING,
         responses      STRING,
+        bodyCompactJson      STRING,
+        bodyRequestOnlyJson  STRING,
         embedding      FLOAT[384],
         PRIMARY KEY (endpoint_id)
     )

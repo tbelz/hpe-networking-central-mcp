@@ -28,11 +28,23 @@ direct API reads and reusable Python scripts.
 2. **Discover APIs**: The available endpoints are included below as the
    **API Endpoint Catalog** — a category-grouped path-tree of Central and
    GreenLake endpoints available in this session. In READ_ONLY mode this
-   catalog is filtered to GET endpoints only. Read it directly to find the
-   right `METHOD /path`. Then use `get_api_endpoint_detail(method, path)`
-   (or its bulk form) for full parameter and response schemas. The legacy
-   `unified_search(scope="api", …)` tool still works but is deprecated —
-   prefer the in-context catalog.
+   catalog is filtered to GET endpoints only; otherwise every method
+   (including DELETE) is listed and callable via `call_central_api`. Read
+   it directly to find the right `METHOD /path`. Then use
+   `get_api_endpoint_detail(method, path, view=...)` (or its bulk form)
+   for parameter and response schemas. Choose the smallest `view` that
+   answers your question:
+
+     • `compact` *(default)* — meta + params + 2xx response + first error
+       `$ref`, with shared schemas in a `$components` side-table. ~5–15 KB.
+     • `request-only` — just the request body schema plus a flat
+       `required_paths` list. Use when constructing a POST/PUT/PATCH body.
+     • `full` — every `$ref` resolved inline. Can exceed 100 KB on heavy
+       endpoints; only use when you need a single self-contained schema.
+     • `raw` — diagnostic.
+
+   The legacy `unified_search(scope="api", …)` tool still works but is
+   deprecated — prefer the in-context catalog.
 
 3. **Quick reads**: Use call_central_api(path, query_params) for GET requests - monitoring queries,
    config lookups, health checks. This is the fastest way to read live data.
