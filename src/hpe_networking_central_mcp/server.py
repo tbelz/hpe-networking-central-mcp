@@ -147,11 +147,13 @@ graph_manager.create_fts_indexes()
 
 
 # ── Knowledge DB schema-version check ────────────────────────────────
-# Version 2 introduces normalized OAS specs and the bodyCompactJson /
-# bodyRequestOnlyJson columns required by get_api_endpoint_detail(view=...).
-# An older DB will lack those columns and the per-view tools will fail at
-# query time — surface that early with an actionable message.
-_KNOWLEDGE_SCHEMA_VERSION = 2
+# Version 3 introduces normalized OAS specs and the bodySkeletonJson /
+# bodyGlossaryJson columns required by get_api_endpoint_detail and
+# get_api_endpoint_glossary.  An older DB will lack those columns and
+# the per-endpoint detail tools will fail at query time — refuse to
+# start so the operator notices immediately rather than seeing
+# silent fallbacks for weeks.
+_KNOWLEDGE_SCHEMA_VERSION = 3
 
 
 def _check_knowledge_schema_version() -> None:
@@ -166,17 +168,16 @@ def _check_knowledge_schema_version() -> None:
         return
     found = manifest.get("schema_version")
     if found != _KNOWLEDGE_SCHEMA_VERSION:
-        logger.warning(
-            "knowledge_schema_version_mismatch",
-            expected=_KNOWLEDGE_SCHEMA_VERSION,
-            found=found,
-            hint=(
-                "Knowledge DB was built by an older version of this server. "
-                "Re-run scripts/build_knowledge_db.py or wait for the next "
-                "knowledge-db release. The compact / request-only views of "
-                "get_api_endpoint_detail will fall back to the full view."
-            ),
+        msg = (
+            f"Knowledge DB schema_version={found!r} does not match "
+            f"server-required version {_KNOWLEDGE_SCHEMA_VERSION}. "
+            "Re-run scripts/build_knowledge_db.py or wait for the next "
+            "knowledge-db release. Refusing to start to avoid serving "
+            "broken get_api_endpoint_detail / get_api_endpoint_glossary "
+            "responses."
         )
+        logger.error("knowledge_schema_version_mismatch", expected=_KNOWLEDGE_SCHEMA_VERSION, found=found)
+        raise SystemExit(msg)
 
 
 _check_knowledge_schema_version()

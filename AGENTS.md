@@ -50,10 +50,25 @@ Stop, kill the terminal, and start over cleanly.
   blocks GitHub Actions runner IPs with HTTP 403. This is **expected**; the
   provider degrades gracefully and emits one aggregated `vsg_access_denied`
   warning instead of per-page failures. Do not treat 403 as a hard error.
+  The workflow primes the on-disk VSG cache from the previous release's
+  `vsg-cache.tar.gz` asset before each run, so even fully-blocked runs still
+  serve last-good content via the provider's stale-cache fallback.
 * The ReadMe.io host throttles aggressively. The OAS provider sends a real
   browser User-Agent, paces requests per-host (~4 req/s), and retries 429/5xx
   with exponential backoff + `Retry-After`. Don't raise the parallelism above
   3 workers.
+
+## API endpoint discovery
+
+* The MCP exposes one **structural** detail tool, `get_api_endpoint_detail`,
+  and one **prose** tool, `get_api_endpoint_glossary`. There is no `view`
+  parameter. The skeleton has every description-bearing key stripped; the
+  glossary is the prose-only counterpart and should only be called when a
+  field name in the skeleton is ambiguous. See ADR 007.
+* The knowledge DB schema version is **3**. The server refuses to start
+  against an older snapshot (hard `SystemExit`); rebuild via
+  `python scripts/build_knowledge_db.py --output-dir build` or wait for the
+  daily workflow to publish a fresh release.
 
 ## GitHub Actions workflow
 

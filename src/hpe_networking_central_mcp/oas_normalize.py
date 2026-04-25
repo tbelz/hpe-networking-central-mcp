@@ -1,11 +1,14 @@
-"""OpenAPI spec normalization + view projections.
+"""OpenAPI spec normalization + skeleton/glossary projections.
 
 The raw OpenAPI specs published by Aruba Central's documentation portal
 contain massive amounts of repetition.  A handful of error responses
 (400/401/403/404/500) and a small number of nested object shapes
 (``rule``, ``rule_action``, ``trunk_group_member``, …) are inlined into
 every operation, blowing up endpoints like ``sw-port-profiles`` to 354 KB
-of JSON.
+of JSON.  Even after dedup the descriptive prose dominates the payload
+budget — for ``sw-port-profiles`` that's 35+ KB of human-readable
+descriptions that an LLM rarely needs to map a configuration value onto a
+field name.
 
 This module provides two responsibilities:
 
@@ -14,13 +17,20 @@ This module provides two responsibilities:
    rewrite their use sites to ``$ref``.  The resulting spec is still a
    valid OpenAPI 3.x document.
 
-2. **Projection functions** — ``project_compact``, ``project_request_only``,
-   ``project_full``, and ``project_raw`` — which take a normalized spec
-   plus a ``(method, path)`` and return a self-contained dict suitable
-   for serving via the MCP ``get_api_endpoint_detail`` tool.  Each
-   projection bundles only the components it references in a
-   ``$components`` side-table so consumers do not need access to the
-   whole spec.
+2. **Skeleton + Glossary projections** — ``project_skeleton`` returns the
+   full *structure* of an endpoint (parameters, request body, success and
+   error response shells, transitively-referenced ``$components``) with
+   every human-readable string (``description``, ``title``, ``example``,
+   ``x-typeName``, ``x-typeDescription``) stripped at every level.  An
+   agent can map file-config values to field names directly from
+   names+types+enums without paying the description tax.
+
+   ``project_glossary`` returns ONLY the descriptive prose for the same
+   endpoint, organised per-component, so an agent can fetch human help
+   for ambiguous fields on demand.
+
+   Together: 1 tool call for the common case (skeleton has enough),
+   2 tool calls for the rare case where a field name is ambiguous.
 """
 
 from __future__ import annotations
@@ -31,9 +41,17 @@ import json
 import re
 from typing import Any
 
-# Size budgets the projections target.  Used by tests; not enforced at runtime.
-COMPACT_BUDGET_BYTES = 15 * 1024
-REQUEST_ONLY_BUDGET_BYTES = 5 * 1024
+# Description-bearing keys that the skeleton strips at every nesting level.
+_SKELETON_STRIP_KEYS = (
+    "description",
+    "title",
+    "example",
+    "examples",
+    "x-typeName",
+    "x-typeDescription",
+    "x-patternSources",
+    "summary",
+)
 
 # Heuristics
 _MIN_DEDUP_OCCURRENCES = 2          # inline shape must appear ≥ this many times
@@ -356,27 +374,6 @@ def _find_operation(spec: dict, method: str, path: str) -> dict | None:
     return op if isinstance(op, dict) else None
 
 
-def _resolve_one(node: Any, components: dict, *, depth: int = 0, max_depth: int = 1) -> Any:
-    """One-level $ref resolution helper for lightweight projections.
-
-    Unlike ``oas_index._resolve_refs`` this does not recursively expand
-    every nested ref — it inlines the immediate target only.
-    """
-    if depth > max_depth:
-        return node
-    if isinstance(node, dict):
-        ref = node.get("$ref")
-        if isinstance(ref, str) and ref.startswith("#/components/"):
-            target = _follow_ref(ref, components)
-            if target is not None:
-                return _resolve_one(target, components, depth=depth + 1, max_depth=max_depth)
-            return node
-        return {k: _resolve_one(v, components, depth=depth, max_depth=max_depth) for k, v in node.items()}
-    if isinstance(node, list):
-        return [_resolve_one(i, components, depth=depth, max_depth=max_depth) for i in node]
-    return node
-
-
 def _follow_ref(ref: str, components: dict) -> Any | None:
     if not ref.startswith("#/components/"):
         return None
@@ -450,187 +447,255 @@ def _operation_meta(operation: dict, method: str, path: str) -> dict:
     }
 
 
+def _strip_skeleton_keys(node: Any) -> Any:
+    """Recursively drop description-bearing keys from a schema fragment.
+
+    Non-destructive — operates on a deep copy.  Preserves all structural
+    keys (``type``, ``properties``, ``items``, ``required``, ``enum``,
+    ``default``, ``format``, ``$ref``, ``allOf``/``oneOf``/``anyOf``,
+    ``x-mutually-exclusive``) so an agent retains everything it needs to
+    construct a valid request body.
+    """
+
+    def _walk(n: Any) -> Any:
+        if isinstance(n, dict):
+            return {
+                k: _walk(v)
+                for k, v in n.items()
+                if k not in _SKELETON_STRIP_KEYS
+            }
+        if isinstance(n, list):
+            return [_walk(item) for item in n]
+        return n
+
+    return _walk(node)
+
+
+def _collect_glossary_entries(name: str, schema: Any) -> dict[str, Any]:
+    """Return ``{description, properties: {field: {description, enum_descriptions, ...}}}``
+    for one component schema.  Empty fields are omitted.
+    """
+    entry: dict[str, Any] = {}
+    if not isinstance(schema, dict):
+        return entry
+
+    desc = schema.get("description")
+    if isinstance(desc, str) and desc.strip():
+        entry["description"] = desc
+    title = schema.get("title")
+    if isinstance(title, str) and title.strip() and title != name:
+        entry["title"] = title
+    mutex = schema.get("x-mutually-exclusive")
+    if mutex:
+        entry["x-mutually-exclusive"] = mutex
+
+    props = schema.get("properties")
+    if isinstance(props, dict):
+        prop_entries: dict[str, dict] = {}
+        for pname, pval in props.items():
+            if not isinstance(pval, dict):
+                continue
+            pe: dict[str, Any] = {}
+            pdesc = pval.get("description")
+            if isinstance(pdesc, str) and pdesc.strip():
+                pe["description"] = pdesc
+            pex = pval.get("example")
+            if pex is not None:
+                pe["example"] = pex
+            penum = pval.get("enum")
+            if isinstance(penum, list) and penum:
+                pe["enum"] = penum
+            pmutex = pval.get("x-mutually-exclusive")
+            if pmutex:
+                pe["x-mutually-exclusive"] = pmutex
+            if pe:
+                prop_entries[pname] = pe
+        if prop_entries:
+            entry["properties"] = prop_entries
+
+    return entry
+
+
 # ---------------------------------------------------------------------------
 # Projections
 # ---------------------------------------------------------------------------
 
 
-def project_compact(spec: dict, method: str, path: str) -> dict | None:
-    """Return a compact, ref-preserving view of one endpoint.
+def project_skeleton(spec: dict, method: str, path: str) -> dict | None:
+    """Return the full structural shape of an endpoint, descriptions stripped.
 
-    Parameter and response schemas are inlined exactly **one level** so
-    obvious primitives are visible without a roundtrip; deeper structure
-    stays as ``$ref`` and is included via ``$components``.
+    Includes parameters, request body, success response, first error
+    response (as ``$ref``), the transitively-referenced ``$components``
+    side-table, and a flat ``required_paths`` list computed from the
+    fully-resolved request body.  Every ``description`` / ``title`` /
+    ``example`` / ``x-typeName`` / ``x-typeDescription`` /
+    ``x-patternSources`` / ``summary`` field inside ``parameters``,
+    ``request_body``, ``responses``, and ``$components`` is removed.
+    Operation-level ``summary`` is preserved at the top level so the agent
+    keeps a one-line label for the endpoint.
     """
     op = _find_operation(spec, method, path)
     if op is None:
         return None
     components = spec.get("components") or {}
 
-    # Parameters — one-level inlined (params themselves rarely chain refs).
+    # Parameters — preserve structure, strip description fields.
     params_out: list[dict] = []
     for p in op.get("parameters", []) or []:
-        resolved = _resolve_one(p, components, max_depth=1)
-        if not isinstance(resolved, dict):
+        if not isinstance(p, dict):
             continue
+        # Resolve one level so a $ref-only parameter still carries name/in/schema.
+        resolved = p
+        if "$ref" in p:
+            target = _follow_ref(p["$ref"], components)
+            if isinstance(target, dict):
+                resolved = target
         schema = resolved.get("schema") or {}
-        params_out.append({
+        params_out.append(_strip_skeleton_keys({
             "name": resolved.get("name", ""),
             "in": resolved.get("in", ""),
             "required": resolved.get("required", False),
-            "description": resolved.get("description", ""),
-            "schema": _resolve_one(schema, components, max_depth=1),
-        })
+            "schema": schema,
+        }))
 
-    # Request body — keep top-level ref structure, inline only one level.
+    # Request body — keep $refs as-is so the side-table reuse is preserved.
     rb_out = None
+    required_paths: list[str] = []
     rb = op.get("requestBody")
     if isinstance(rb, dict):
-        rb_resolved = _resolve_one(rb, components, max_depth=1)
-        content = (rb_resolved or {}).get("content") or {}
+        # Resolve the requestBody object itself one level (it may be a $ref).
+        rb_resolved = rb
+        if "$ref" in rb:
+            target = _follow_ref(rb["$ref"], components)
+            if isinstance(target, dict):
+                rb_resolved = target
+        content = rb_resolved.get("content") or {}
         media, schema = _pick_media_schema(content)
         if schema is not None:
-            rb_out = {
+            rb_out = _strip_skeleton_keys({
                 "content_type": media,
-                "schema": schema,  # may contain $ref
+                "schema": schema,
                 "required": rb_resolved.get("required", False),
-            }
+            })
+            # Required leaves come from the FULLY resolved body so deeply
+            # nested required fields surface; the schema itself stays
+            # ref-shaped so the side-table can dedupe.
+            fully_resolved = _resolve_full(schema, components)
+            required_paths = _collect_required_paths(fully_resolved)
 
-    # Responses — keep only success + first error class as $ref.
+    # Responses — keep success body shape (refs preserved) + first error ref.
     responses_out: dict[str, Any] = {}
     success_status, success_resp = _pick_success_response(op.get("responses") or {})
     if success_resp is not None:
-        success_resolved = _resolve_one(success_resp, components, max_depth=1)
+        success_resolved = success_resp
+        if isinstance(success_resp, dict) and "$ref" in success_resp:
+            target = _follow_ref(success_resp["$ref"], components)
+            if isinstance(target, dict):
+                success_resolved = target
         content = (success_resolved or {}).get("content") or {}
         _, schema = _pick_media_schema(content)
-        responses_out[success_status] = {
-            "description": success_resolved.get("description", ""),
-            "schema": schema,
-        }
+        responses_out[success_status] = _strip_skeleton_keys({"schema": schema})
 
     error_ref = _pick_first_error_ref(op.get("responses") or {})
     if error_ref is not None:
         responses_out["error"] = error_ref
 
-    payload: dict[str, Any] = _operation_meta(op, method, path)
-    payload["view"] = "compact"
-    payload["parameters"] = params_out
-    if rb_out is not None:
-        payload["request_body"] = rb_out
-    payload["responses"] = responses_out
-
-    side = _extract_referenced_components(payload, components)
-    if side:
-        payload["$components"] = side
-
-    return payload
-
-
-def project_request_only(spec: dict, method: str, path: str) -> dict | None:
-    """Return just the request body schema + flat ``required_paths`` list."""
-    op = _find_operation(spec, method, path)
-    if op is None:
-        return None
-    components = spec.get("components") or {}
-
-    rb_out = None
-    required_paths: list[str] = []
-    rb = op.get("requestBody")
-    if isinstance(rb, dict):
-        rb_resolved = _resolve_one(rb, components, max_depth=1)
-        content = (rb_resolved or {}).get("content") or {}
-        media, schema = _pick_media_schema(content)
-        if schema is not None:
-            rb_out = {"content_type": media, "schema": schema}
-            # Compute required leaf paths from the FULLY resolved schema so
-            # nested required fields surface; the projection itself stays
-            # ref-shaped to keep size down.
-            fully_resolved = _resolve_full(schema, components)
-            required_paths = _collect_required_paths(fully_resolved)
-
-    payload: dict[str, Any] = _operation_meta(op, method, path)
-    payload["view"] = "request-only"
-    if rb_out is not None:
-        payload["request_body"] = rb_out
-    payload["required_paths"] = required_paths
-
-    # Optional: surface a best-effort example pulled out by the scraper.
-    example = op.get("x-example-request")
-    if example is not None:
-        payload["example_request"] = example
-
-    side = _extract_referenced_components(payload, components)
-    if side:
-        payload["$components"] = side
-
-    return payload
-
-
-def project_full(spec: dict, method: str, path: str) -> dict | None:
-    """Return the fully-resolved view (parity with the legacy detail tool)."""
-    op = _find_operation(spec, method, path)
-    if op is None:
-        return None
-    components = spec.get("components") or {}
-
-    params_out: list[dict] = []
-    for p in op.get("parameters", []) or []:
-        resolved = _resolve_full(p, components)
-        if not isinstance(resolved, dict):
-            continue
-        params_out.append({
-            "name": resolved.get("name", ""),
-            "in": resolved.get("in", ""),
-            "required": resolved.get("required", False),
-            "description": resolved.get("description", ""),
-            "schema": resolved.get("schema") or {},
-        })
-
-    rb_out = None
-    rb = op.get("requestBody")
-    if isinstance(rb, dict):
-        rb_resolved = _resolve_full(rb, components)
-        content = (rb_resolved or {}).get("content") or {}
-        media, schema = _pick_media_schema(content)
-        if schema is not None:
-            rb_out = {
-                "content_type": media,
-                "schema": schema,
-                "required": rb_resolved.get("required", False),
-            }
-
-    responses_out: list[dict] = []
-    for status, resp in (op.get("responses") or {}).items():
-        resp_resolved = _resolve_full(resp, components)
-        content = (resp_resolved or {}).get("content") or {}
-        _, schema = _pick_media_schema(content)
-        responses_out.append({
-            "status": str(status),
-            "description": resp_resolved.get("description", ""),
-            "schema": schema,
-        })
-
-    payload: dict[str, Any] = _operation_meta(op, method, path)
-    payload["view"] = "full"
-    payload["parameters"] = params_out
-    if rb_out is not None:
-        payload["request_body"] = rb_out
-    payload["responses"] = responses_out
-    return payload
-
-
-def project_raw(spec: dict, method: str, path: str) -> dict | None:
-    """Return the raw operation object plus untouched ``components``."""
-    op = _find_operation(spec, method, path)
-    if op is None:
-        return None
-    return {
-        "view": "raw",
+    payload: dict[str, Any] = {
         "method": method.upper(),
         "path": path,
-        "operation": copy.deepcopy(op),
-        "components": copy.deepcopy(spec.get("components") or {}),
+        "summary": op.get("summary", "") or "",
+        "operation_id": op.get("operationId", "") or "",
+        "tags": op.get("tags", []) or [],
+        "deprecated": bool(op.get("deprecated", False)),
     }
+    payload["parameters"] = params_out
+    if rb_out is not None:
+        payload["request_body"] = rb_out
+        payload["required_paths"] = required_paths
+    payload["responses"] = responses_out
+
+    # Side-table: transitively-needed components, also stripped of prose.
+    side = _extract_referenced_components(payload, components)
+    if side:
+        stripped_side: dict[str, dict] = {}
+        for section, entries in side.items():
+            stripped_section: dict[str, Any] = {}
+            for name, sch in entries.items():
+                stripped_section[name] = _strip_skeleton_keys(sch)
+            stripped_side[section] = stripped_section
+        payload["$components"] = stripped_side
+
+    return payload
+
+
+def project_glossary(spec: dict, method: str, path: str) -> dict | None:
+    """Return the descriptive prose for an endpoint, organised per-component.
+
+    Output shape::
+
+        {
+          "method": "POST",
+          "path": "/foo",
+          "description": "... operation-level prose ...",
+          "components": {
+            "ArubaInterfaceCommon_SwitchportConfig": {
+              "description": "...",
+              "properties": {
+                "vlan-mode": {"description": "...", "enum": ["access", "trunk"]},
+                ...
+              }
+            },
+            ...
+          }
+        }
+
+    Components with no descriptive content are omitted.  Agents call this
+    only when a field name in the skeleton is ambiguous; for many
+    endpoints the skeleton is enough on its own.
+    """
+    op = _find_operation(spec, method, path)
+    if op is None:
+        return None
+    components = spec.get("components") or {}
+
+    # Build a transient skeleton-shaped payload to discover which components
+    # are reachable from THIS endpoint, so the glossary stays endpoint-scoped.
+    refs_root: dict[str, Any] = {
+        "parameters": op.get("parameters") or [],
+        "requestBody": op.get("requestBody"),
+        "responses": op.get("responses") or {},
+    }
+    side = _extract_referenced_components(refs_root, components)
+
+    payload: dict[str, Any] = {
+        "method": method.upper(),
+        "path": path,
+    }
+    op_desc = op.get("description")
+    if isinstance(op_desc, str) and op_desc.strip():
+        payload["description"] = op_desc
+
+    components_out: dict[str, Any] = {}
+    schemas = side.get("schemas", {}) if isinstance(side, dict) else {}
+    for name, sch in schemas.items():
+        entry = _collect_glossary_entries(name, sch)
+        if entry:
+            components_out[name] = entry
+
+    # Inline request-body glossary too — the body schema itself may carry
+    # a description and properties even when no $ref is involved.
+    rb = op.get("requestBody")
+    if isinstance(rb, dict):
+        content = (rb.get("content") or {})
+        _, body_schema = _pick_media_schema(content)
+        if isinstance(body_schema, dict) and "$ref" not in body_schema:
+            entry = _collect_glossary_entries("requestBody", body_schema)
+            if entry:
+                components_out["requestBody"] = entry
+
+    payload["components"] = components_out
+    return payload
+
 
 
 # ---------------------------------------------------------------------------
