@@ -178,14 +178,26 @@ def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> 
     """
     conn = lb.Connection(db)
     count = 0
+    compact_ok = 0
+    request_only_ok = 0
 
-    # Build a (category_title) -> spec lookup so we can compute projections
-    # without re-parsing per endpoint.
+    # ReadMe.io serves one operation per .md file, so most providers ship
+    # ~1600 individual specs that share only ~50 ``info.title`` values.
+    # Keying by category would discard all but the last spec per title and
+    # silently produce empty projection blobs.  Index by (method, path) so
+    # every endpoint can find its source spec.
+    specs_by_endpoint: dict[tuple[str, str], dict] = {}
     specs_by_category: dict[str, dict] = {}
     for spec in specs:
         title = (spec.get("info") or {}).get("title", "Unknown")
-        # If two specs share a title the later one wins; matches OASIndex.build.
+        # Keep the last spec per title for the (rare) all-in-one provider case.
         specs_by_category[title] = spec
+        for path, path_item in (spec.get("paths") or {}).items():
+            if not isinstance(path_item, dict):
+                continue
+            for method in ("get", "post", "put", "patch", "delete", "head", "options"):
+                if isinstance(path_item.get(method), dict):
+                    specs_by_endpoint[(method.upper(), path)] = spec
 
     for entry in index._entries:  # noqa: SLF001 — accessing internal for bulk insert
         endpoint_id = f"{entry.method}:{entry.path}"
@@ -229,7 +241,7 @@ def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> 
         # Compute compact + request-only projections from the normalized spec.
         compact_json = ""
         request_only_json = ""
-        spec = specs_by_category.get(entry.category)
+        spec = specs_by_endpoint.get((entry.method, entry.path)) or specs_by_category.get(entry.category)
         if spec is not None:
             try:
                 compact_view = project_compact(spec, entry.method, entry.path)
@@ -249,6 +261,10 @@ def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> 
                     f"    ⚠ project_request_only failed for {entry.method} {entry.path}: {exc}",
                     file=sys.stderr,
                 )
+        if compact_json:
+            compact_ok += 1
+        if request_only_json:
+            request_only_ok += 1
         escaped_compact = _cypher_escape(compact_json)
         escaped_req_only = _cypher_escape(request_only_json)
 
@@ -290,6 +306,23 @@ def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> 
     )
 
     print(f"  Inserted {count} endpoints in {len(index.categories)} categories")
+    if count:
+        compact_pct = 100 * compact_ok // count
+        ro_pct = 100 * request_only_ok // count
+        print(
+            f"  Projection coverage: compact={compact_ok}/{count} ({compact_pct}%), "
+            f"request-only={request_only_ok}/{count} ({ro_pct}%)"
+        )
+        # Hard fail if coverage collapses — silently empty blobs degrade
+        # the MCP tool surface back to the un-normalized 'full' shape.
+        min_pct = 90
+        if compact_pct < min_pct or ro_pct < min_pct:
+            print(
+                f"  ✖ Projection coverage below {min_pct}% — refusing to ship a "
+                "degraded knowledge DB.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     return count
 
 
