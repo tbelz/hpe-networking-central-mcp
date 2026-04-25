@@ -218,7 +218,7 @@ class TestUnifiedSearch:
     def test_api_scope_no_longer_supported(self, tools):
         result = json.loads(tools["unified_search"](query="x", scope="api"))
         assert "error" in result
-        assert "API Endpoint Catalog" in result["error"]
+        assert "api://endpoint-catalog" in result["error"]
 
     def test_limit_is_clamped_silently(self, tools):
         # No error when limit > 50; tool clamps to 50.

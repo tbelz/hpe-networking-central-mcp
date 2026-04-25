@@ -23,7 +23,7 @@ from .graph.ipc_server import GraphIPCServer
 from .instructions import build_instructions
 from .logging import setup_logging
 from .prompts.workflows import register_prompts
-from .resources.docs import register_resources
+from .resources.docs import register_api_catalog_resource, register_resources
 from .resources.graph import register_graph_resources
 from .tools.api_call import register_api_call_tools, register_greenlake_api_call_tools
 from .tools.api_catalog import register_catalog_tools
@@ -388,6 +388,7 @@ if glp_client is not None:
 else:
     logger.info("greenlake_tools_disabled", reason="GreenLake credentials not configured")
 register_resources(mcp, settings, graph_manager)
+register_api_catalog_resource(mcp, settings, graph_manager)
 register_graph_resources(mcp, graph_manager, lambda: _seed_status)
 register_prompts(mcp, graph_manager)
 

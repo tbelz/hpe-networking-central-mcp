@@ -16,6 +16,49 @@ if TYPE_CHECKING:
 logger = structlog.get_logger("resources.docs")
 
 
+def register_api_catalog_resource(mcp, settings: Settings, graph_manager: "GraphManager"):
+    """Register the API endpoint catalog as a fetchable MCP resource.
+
+    Claude Desktop silently drops the MCP server ``instructions`` field, so
+    the API tree that is also embedded there is unreachable in that client.
+    Exposing the same tree as an explicit resource lets the agent fetch it
+    with a single tool call and place it directly in the context window.
+    """
+    from ..api_tree import render_path_tree
+
+    @mcp.resource("api://endpoint-catalog")
+    def api_endpoint_catalog() -> str:
+        """Full API Endpoint Catalog — every available METHOD /path for Central and GreenLake.
+
+        Read this resource **before** calling get_api_endpoint_detail(),
+        call_central_api(), or call_greenlake_api() to find the correct
+        METHOD and exact path. The catalog is grouped by API category with
+        nested path-tree indentation. A trailing ``!`` marks deprecated
+        endpoints.
+
+        If you cannot see the API Endpoint Catalog in the system
+        instructions, reading this resource is the authoritative fallback.
+        Guessing API paths without consulting the catalog has a near-zero
+        chance of success.
+        """
+        gm = graph_manager
+        if gm is None or not gm.is_available:
+            return (
+                "API endpoint catalog is currently unavailable — "
+                "graph database not initialized. Try again shortly."
+            )
+        try:
+            rows = gm.query(
+                "MATCH (e:ApiEndpoint) "
+                "RETURN e.method AS method, e.path AS path, "
+                "e.category AS category, e.deprecated AS deprecated",
+                read_only=True,
+            )
+        except Exception as exc:
+            return f"API endpoint catalog unavailable: {exc}"
+        return render_path_tree(rows, read_only=settings.read_only)
+
+
 def register_resources(mcp, settings: Settings, graph_manager: GraphManager | None = None):
     """Register documentation resources with the MCP server."""
 
