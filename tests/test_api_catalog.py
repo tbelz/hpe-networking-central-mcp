@@ -295,6 +295,15 @@ class TestGetApiEndpointDetail:
             method="get", path="/monitoring/v2/aps"))
         assert result["method"] == "GET"
 
+    def test_path_without_leading_slash(self, tools):
+        # Agents often omit the leading slash when reading from the catalog tree.
+        # Both forms must resolve to the same endpoint.
+        with_slash = json.loads(tools["get_api_endpoint_detail"](
+            method="GET", path="/monitoring/v2/aps"))
+        without_slash = json.loads(tools["get_api_endpoint_detail"](
+            method="GET", path="monitoring/v2/aps"))
+        assert with_slash["operation_id"] == without_slash["operation_id"]
+
 
 # ── get_api_endpoint_glossary ───────────────────────────────────────
 
@@ -330,6 +339,15 @@ class TestGetApiEndpointGlossary:
     def test_no_args_errors(self, tools):
         result = json.loads(tools["get_api_endpoint_glossary"]())
         assert "error" in result
+
+    def test_path_without_leading_slash(self, tools):
+        # Agents often omit the leading slash when reading from the catalog tree.
+        # Both forms must resolve to the same endpoint.
+        with_slash = json.loads(tools["get_api_endpoint_glossary"](
+            method="POST", path="/config/v1/vlans"))
+        without_slash = json.loads(tools["get_api_endpoint_glossary"](
+            method="POST", path="config/v1/vlans"))
+        assert "VlanCfg" in without_slash["components"]
 
 
 # ── Graph unavailable ────────────────────────────────────────────────

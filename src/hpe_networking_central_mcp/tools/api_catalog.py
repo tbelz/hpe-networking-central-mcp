@@ -139,6 +139,11 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
 
     # ── Shared resolver for the (method, path) / endpoints argument shape ──
 
+    def _normalise_path(p: str) -> str:
+        """Ensure path starts with '/' to match DB storage from OpenAPI spec paths."""
+        p = p.strip()
+        return p if p.startswith("/") else f"/{p}"
+
     def _resolve_request(
         method: str | None,
         path: str | None,
@@ -156,13 +161,13 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                     return None, json.dumps({
                         "error": "Each entry in `endpoints` must be an object with 'method' and 'path' keys.",
                     }), True
-                requested.append((str(item["method"]).upper(), str(item["path"])))
+                requested.append((str(item["method"]).upper(), _normalise_path(str(item["path"]))))
             return requested, None, True
         if not method or not path:
             return None, json.dumps({
                 "error": "Provide either (method, path) or `endpoints=[...]`.",
             }), False
-        return [(method.upper(), path)], None, False
+        return [(method.upper(), _normalise_path(path))], None, False
 
     def _filter_read_only(
         requested: list[tuple[str, str]],

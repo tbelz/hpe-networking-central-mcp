@@ -51,8 +51,11 @@ direct API reads and reusable Python scripts.
    The two tools share the same `(method, path)` / `endpoints=[...]`
    argument shape, so you can fan out either form in a single call.
 
-3. **Quick reads**: Use call_central_api(path, query_params) for GET requests - monitoring queries,
-   config lookups, health checks. This is the fastest way to read live data.
+3. **Quick reads**: For any direct API call, ALWAYS call `get_api_endpoint_detail(method, path)`
+   FIRST to verify the exact path and all available query parameters before calling
+   `call_central_api`. Monitoring and notification endpoints expose many useful filter
+   parameters (state, severity, site, device type, date range, etc.) that you would miss
+   by guessing. Then call `call_central_api(path, query_params)` with the correct parameters.
    Tip: Add `effective=true` to config endpoints for hierarchically merged config,
    and `detailed=true` for source annotations.
    For bulk config analysis, use the API with `effective=true&detailed=true`
