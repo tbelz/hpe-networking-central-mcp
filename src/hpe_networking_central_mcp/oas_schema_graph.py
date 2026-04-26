@@ -443,8 +443,9 @@ def _ensure_component_node(
     enum_lit = _str_list_literal(
         v for v in (body.get("enum") or []) if isinstance(v, str)
     )
+    _req = body.get("required")
     required_lit = _str_list_literal(
-        v for v in (body.get("required") or []) if isinstance(v, str)
+        v for v in (_req if isinstance(_req, list) else []) if isinstance(v, str)
     )
     conn.execute(
         "MERGE (c:SchemaComponent {component_id: $cid}) SET "
@@ -533,8 +534,9 @@ def _emit_property_subgraph(
     flattening, since those are alternatives).
     """
     # Direct properties (no allOf composition).
+    _req = body.get("required")
     own_required = set(
-        v for v in (body.get("required") or []) if isinstance(v, str)
+        v for v in (_req if isinstance(_req, list) else []) if isinstance(v, str)
     )
     own_props = body.get("properties") or {}
     if isinstance(own_props, dict):
@@ -624,8 +626,9 @@ def _flatten_allof_properties(
 ) -> None:
     """Emit HAS_PROPERTY edges from the parent for every leaf property
     contributed by an ``allOf`` branch (recurses through nested allOf)."""
+    _req = branch_body.get("required")
     branch_required = set(
-        v for v in (branch_body.get("required") or []) if isinstance(v, str)
+        v for v in (_req if isinstance(_req, list) else []) if isinstance(v, str)
     )
     props = branch_body.get("properties") or {}
     if isinstance(props, dict):
