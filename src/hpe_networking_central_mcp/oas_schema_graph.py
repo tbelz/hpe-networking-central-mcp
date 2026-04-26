@@ -212,6 +212,9 @@ def populate_schema_graph(
     # Track which component_ids have already been MERGE-d so we only
     # MERGE each once (cheaper + more deterministic logs).
     written_components: set[str] = set()
+    # Track which property_ids have already been MERGE-d to avoid redundant
+    # writes from diamond-inheritance allOf fan-out.
+    written_props: set[str] = set()
 
     for method, path in endpoints:
         method_u = method.upper()
@@ -307,7 +310,7 @@ def populate_schema_graph(
             # Link to root component if the body is a single $ref.
             if root_ref:
                 comp_id = _ensure_component_node(
-                    conn, spec_source, root_ref, components, written_components, stats
+                    conn, spec_source, root_ref, components, written_components, written_props, stats
                 )
                 if comp_id:
                     conn.execute(
@@ -351,7 +354,7 @@ def populate_schema_graph(
             stats["responses"] += 1
             if root_ref:
                 comp_id = _ensure_component_node(
-                    conn, spec_source, root_ref, components, written_components, stats
+                    conn, spec_source, root_ref, components, written_components, written_props, stats
                 )
                 if comp_id:
                     conn.execute(
@@ -377,7 +380,7 @@ def populate_schema_graph(
             for name, body in entries.items():
                 ref = f"#/components/{section}/{name}"
                 comp_id = _ensure_component_node(
-                    conn, spec_source, ref, components, written_components, stats
+                    conn, spec_source, ref, components, written_components, written_props, stats
                 )
                 if not comp_id:
                     continue
@@ -386,7 +389,7 @@ def populate_schema_graph(
                     if not child_ref.startswith("#/components/"):
                         continue
                     child_id = _ensure_component_node(
-                        conn, spec_source, child_ref, components, written_components, stats
+                        conn, spec_source, child_ref, components, written_components, written_props, stats
                     )
                     if not child_id or child_id == comp_id:
                         continue
@@ -414,6 +417,7 @@ def _ensure_component_node(
     ref: str,
     full_components: dict,
     written: set[str],
+    written_props: set[str],
     stats: dict,
 ) -> str:
     """MERGE the SchemaComponent node for ``ref`` and return its component_id.
@@ -474,6 +478,7 @@ def _ensure_component_node(
         body=body,
         full_components=full_components,
         written=written,
+        written_props=written_props,
         stats=stats,
     )
 
@@ -519,6 +524,7 @@ def _emit_property_subgraph(
     body: dict,
     full_components: dict,
     written: set[str],
+    written_props: set[str],
     stats: dict,
 ) -> None:
     """Walk ``body`` and emit ``HAS_PROPERTY`` / ``COMPOSED_OF`` /
@@ -551,6 +557,7 @@ def _emit_property_subgraph(
                 inherited_from="",
                 full_components=full_components,
                 written=written,
+                written_props=written_props,
                 stats=stats,
             )
 
@@ -567,7 +574,7 @@ def _emit_property_subgraph(
                 # Materialise the target component (recurses into its
                 # own property subgraph) and record COMPOSED_OF.
                 target_id = _ensure_component_node(
-                    conn, spec_source, ref, full_components, written, stats
+                    conn, spec_source, ref, full_components, written, written_props, stats
                 )
                 if target_id:
                     conn.execute(
@@ -594,7 +601,9 @@ def _emit_property_subgraph(
                             inherited_from=branch_name,
                             full_components=full_components,
                             written=written,
+                            written_props=written_props,
                             stats=stats,
+                            _visited=frozenset({ref}),
                         )
             else:
                 # Inline branch — for allOf, walk its own properties
@@ -609,7 +618,9 @@ def _emit_property_subgraph(
                         inherited_from="",
                         full_components=full_components,
                         written=written,
+                        written_props=written_props,
                         stats=stats,
+                        _visited=frozenset(),
                     )
 
 
@@ -622,10 +633,17 @@ def _flatten_allof_properties(
     inherited_from: str,
     full_components: dict,
     written: set[str],
+    written_props: set[str],
     stats: dict,
+    _visited: frozenset[str] = frozenset(),
 ) -> None:
     """Emit HAS_PROPERTY edges from the parent for every leaf property
-    contributed by an ``allOf`` branch (recurses through nested allOf)."""
+    contributed by an ``allOf`` branch (recurses through nested allOf).
+
+    ``_visited`` holds the set of $ref strings already on the current
+    recursion path — any ref that appears in it is a cycle and is
+    skipped to prevent infinite recursion.
+    """
     _req = branch_body.get("required")
     branch_required = set(
         v for v in (_req if isinstance(_req, list) else []) if isinstance(v, str)
@@ -643,6 +661,7 @@ def _flatten_allof_properties(
                 inherited_from=inherited_from,
                 full_components=full_components,
                 written=written,
+                written_props=written_props,
                 stats=stats,
             )
 
@@ -653,6 +672,8 @@ def _flatten_allof_properties(
                 continue
             ref = sub.get("$ref")
             if isinstance(ref, str):
+                if ref in _visited:
+                    continue  # circular allOf — skip to prevent infinite recursion
                 target_body = _follow_ref(ref, full_components)
                 if isinstance(target_body, dict):
                     nested_name = _name_for_ref(ref) or inherited_from
@@ -664,7 +685,9 @@ def _flatten_allof_properties(
                         inherited_from=nested_name,
                         full_components=full_components,
                         written=written,
+                        written_props=written_props,
                         stats=stats,
+                        _visited=_visited | {ref},
                     )
             else:
                 _flatten_allof_properties(
@@ -675,7 +698,9 @@ def _flatten_allof_properties(
                     inherited_from=inherited_from,
                     full_components=full_components,
                     written=written,
+                    written_props=written_props,
                     stats=stats,
+                    _visited=_visited,
                 )
 
 
@@ -690,6 +715,7 @@ def _emit_one_property(
     inherited_from: str,
     full_components: dict,
     written: set[str],
+    written_props: set[str],
     stats: dict,
 ) -> None:
     """MERGE one Property node + HAS_PROPERTY edge.
@@ -733,6 +759,12 @@ def _emit_one_property(
     property_id = f"{parent_component_id}#prop:{prop_name}"
     if inherited_from:
         property_id = f"{property_id}@{inherited_from}"
+
+    # Skip if we already emitted this exact property node (diamond inheritance
+    # or repeated allOf flattening paths can reach the same node twice).
+    if property_id in written_props:
+        return
+    written_props.add(property_id)
 
     sdt_lit = _str_list_literal(sdt)
     enum_lit = _str_list_literal(enum_vals)
@@ -780,7 +812,7 @@ def _emit_one_property(
             target_ref = items["$ref"]
     if target_ref and target_ref.startswith("#/components/"):
         target_id = _ensure_component_node(
-            conn, spec_source, target_ref, full_components, written, stats
+            conn, spec_source, target_ref, full_components, written, written_props, stats
         )
         if target_id:
             conn.execute(
