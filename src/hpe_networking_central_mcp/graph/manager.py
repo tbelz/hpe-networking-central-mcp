@@ -392,11 +392,94 @@ There are no config profile nodes in the graph.  Use the Central API directly:
 - Devices at a site: `MATCH (s:Site {name: $n})-[:HAS_DEVICE]->(d) RETURN d.serial, d.name`
 - Blast radius: `MATCH (sc:SiteCollection)-[:CONTAINS_SITE]->(s:Site)-[:HAS_DEVICE]->(d) RETURN s.name, d.serial`
 
+## API Discovery Subgraph (ADR 009)
+
+The graph also models the entire OpenAPI surface as first-class nodes so
+`query_graph()` is the **primary tool for API discovery** — find endpoints,
+inspect request/response shapes, traverse component references, and locate
+required fields without ever materialising a full skeleton.
+
+### Node tables
+- `ApiEndpoint` — one row per `(method, path)`. Properties include
+  `endpoint_id` (PK), `method`, `path`, `category`, `summary`,
+  `description`, `operationId`, `deprecated`, `spec_source`.
+- `Parameter` — request parameters. Properties: `param_id` (PK),
+  `endpoint_id`, `name`, `location` (path/query/header/cookie),
+  `required`, `type`, `enumValues`, `inferredHint`, `description`.
+- `RequestBody` — root request-body wrapper. Links to a `SchemaComponent`
+  via `OF_TYPE`.
+- `Response` — one row per status code (e.g. `200`, `400`). Links to a
+  `SchemaComponent` via `OF_TYPE`.
+- `SchemaComponent` — every reusable OpenAPI component (schemas,
+  parameters, requestBodies, responses). Properties: `component_id` (PK),
+  `spec_source`, `section`, `name`, `type`, `kind`, `required`,
+  `enumValues`, `bodyJson` (full serialised component for deep inspection).
+- `ApiEndpointSkeleton` — large pre-rendered JSON blobs (skeleton +
+  glossary) kept off the hot path. Reached via `HAS_SKELETON`.
+
+### Relationship tables
+- `(ApiEndpoint)-[:HAS_PARAMETER]->(Parameter)`
+- `(ApiEndpoint)-[:HAS_REQUEST_BODY]->(RequestBody)`
+- `(ApiEndpoint)-[:HAS_RESPONSE {statusCode}]->(Response)`
+- `(RequestBody|Response)-[:OF_TYPE]->(SchemaComponent)`
+- `(SchemaComponent)-[:REFERENCES {role, fieldName}]->(SchemaComponent)`
+  — captures `$ref` edges between components (role is e.g. "property",
+  "items", "allOf").
+- `(ApiEndpoint)-[:HAS_SKELETON]->(ApiEndpointSkeleton)`
+
+### Canned API discovery patterns
+
+```cypher
+// Find all GET endpoints in a category
+MATCH (e:ApiEndpoint {category: 'Network Services', method: 'GET'})
+RETURN e.path, e.summary
+ORDER BY e.path
+```
+
+```cypher
+// Required parameters for a specific endpoint
+MATCH (e:ApiEndpoint {method: 'POST', path: $p})-[:HAS_PARAMETER]->(p:Parameter {required: true})
+RETURN p.name, p.location, p.type, p.inferredHint
+```
+
+```cypher
+// Required top-level fields of an endpoint's request body
+MATCH (e:ApiEndpoint {method: 'POST', path: $p})
+      -[:HAS_REQUEST_BODY]->(:RequestBody)-[:OF_TYPE]->(c:SchemaComponent)
+RETURN c.name, c.required
+```
+
+```cypher
+// Endpoints that accept a given component as input
+MATCH (c:SchemaComponent {section: 'schemas', name: $componentName})
+      <-[:OF_TYPE]-(:RequestBody)<-[:HAS_REQUEST_BODY]-(e:ApiEndpoint)
+RETURN e.method, e.path
+```
+
+```cypher
+// Walk one level of $ref from a component
+MATCH (c:SchemaComponent {name: $name})-[r:REFERENCES]->(target:SchemaComponent)
+RETURN r.fieldName, r.role, target.section, target.name, target.type
+```
+
+```cypher
+// Endpoints whose 200 response uses a particular component
+MATCH (e:ApiEndpoint)-[:HAS_RESPONSE {statusCode: '200'}]->(:Response)
+      -[:OF_TYPE]->(c:SchemaComponent {name: $name})
+RETURN e.method, e.path
+```
+
+When you need the full pre-rendered skeleton/glossary blob (rarely — most
+discovery tasks are answered by the structured nodes above), call
+`get_api_endpoint_detail(method, path)` / `get_api_endpoint_glossary(...)`.
+
 ## Tips
 - Use `list_scripts()` to find enrichment scripts (e.g., populate_base_graph, enrich_topology).
 - Execute enrichment scripts to populate/enrich graph data on demand.
 - Read `graph://schema` for up-to-date schema introspection after enrichment.
 - Write operations are blocked in `query_graph()` — enrichment happens via scripts only.
+- `query_graph()` accepts a `parameters` JSON arg for parameterised queries
+  and applies a soft cap of 200 rows / hard cap of 2000.
 """)
 
         return "\n".join(lines)

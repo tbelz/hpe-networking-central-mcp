@@ -37,27 +37,50 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
     )
-    def query_graph(cypher: str) -> str:
-        """Execute a read-only Cypher query against the Central configuration & topology graph.
+    def query_graph(cypher: str, parameters: str = "{}") -> str:
+        """Execute a read-only Cypher query against the Central graph (incl. the API schema subgraph).
 
-        The graph models the Aruba Central hierarchy and physical L2 topology.
-        Read graph://schema for the full schema with node types, properties,
-        relationships, row counts, and example queries.
+        The graph models both the Aruba Central hierarchy / physical L2 topology
+        AND the OpenAPI surface (ApiEndpoint, Parameter, RequestBody, Response,
+        SchemaComponent, plus REFERENCES/HAS_SKELETON edges). This is the
+        primary tool for API discovery and structural exploration. Read
+        ``graph://schema`` for the full schema, row counts, and canned API
+        discovery patterns.
 
-        For write operations (CREATE, MERGE, SET, DELETE), use write_graph instead.
+        For write operations (CREATE, MERGE, SET, DELETE), use ``write_graph``.
+
+        Row caps (to keep responses agent-friendly):
+        - Soft cap: 200 rows. Larger result sets come back as
+          ``{"truncated": true, "cap": 200, "rows": [...], "warning": "..."}``.
+        - Hard cap: 2000 rows. Queries returning more than that are rejected;
+          add ``LIMIT``/``WHERE`` filters or aggregate.
 
         Args:
             cypher: A read-only Cypher query string.
-                    Example: MATCH (d:Device)-[c:CONNECTED_TO]->(d2:Device) RETURN d.name, d2.name, c.speed
+                    Example: MATCH (d:Device)-[c:CONNECTED_TO]->(d2:Device)
+                             RETURN d.name, d2.name, c.speed
+            parameters: JSON-encoded parameter dict for parameterised queries
+                    (default: ``"{}"``). Example: ``{"site": "hq-1"}``.
 
         Returns:
-            JSON array of result rows.
+            JSON array of result rows under the soft cap, otherwise a JSON
+            object with ``truncated``/``rows``/``cap``/``warning`` keys.
         """
         if not cypher or not cypher.strip():
             raise ToolError("Cypher query cannot be empty. Read graph://schema for the schema.")
 
         try:
-            rows = graph.query(cypher, read_only=True)
+            params = json.loads(parameters) if parameters else {}
+        except json.JSONDecodeError as exc:
+            raise ToolError(
+                f"Invalid JSON in parameters: {exc}. "
+                "Example: {\"serial\": \"SN001\"}"
+            )
+        if not isinstance(params, dict):
+            raise ToolError("parameters must decode to a JSON object (dict).")
+
+        try:
+            rows = graph.query(cypher, params=params, read_only=True)
         except ValueError as exc:
             raise ToolError(str(exc))
         except Exception as exc:
@@ -65,7 +88,29 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
             hint = _build_error_hint(msg)
             raise ToolError(f"Cypher query failed: {msg}{hint}")
 
-        logger.info("query_graph_done", rows=len(rows))
+        soft_cap = 200
+        hard_cap = 2000
+        n = len(rows)
+        if n > hard_cap:
+            raise ToolError(
+                f"Query returned {n} rows which exceeds the hard cap of {hard_cap}. "
+                "Add LIMIT or WHERE filters, or aggregate with COUNT/COLLECT."
+            )
+
+        logger.info("query_graph_done", rows=n)
+        if n > soft_cap:
+            envelope = {
+                "truncated": True,
+                "cap": soft_cap,
+                "total_returned": n,
+                "warning": (
+                    f"Result truncated: query returned {n} rows; only the first "
+                    f"{soft_cap} are shown. Add LIMIT/WHERE or aggregate to see "
+                    "the rest."
+                ),
+                "rows": rows[:soft_cap],
+            }
+            return json.dumps(envelope, indent=2, default=str)
         return json.dumps(rows, indent=2, default=str)
 
     @mcp.tool(
