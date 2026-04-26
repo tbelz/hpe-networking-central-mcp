@@ -76,7 +76,7 @@ graph_manager.create_fts_indexes()
 # the skeleton now carries only a ``$components_index``.  An older DB
 # will lack the new column and ``get_schema_component`` would fail at
 # query time, so refuse to start so the operator notices immediately.
-_KNOWLEDGE_SCHEMA_VERSION = 4
+_KNOWLEDGE_SCHEMA_VERSION = 5
 
 
 def _check_knowledge_schema_version() -> None:

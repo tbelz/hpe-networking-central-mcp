@@ -39,6 +39,7 @@ from hpe_networking_central_mcp.oas_normalize import (  # noqa: E402
     project_glossary,
     project_skeleton,
 )
+from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph  # noqa: E402
 from hpe_networking_central_mcp.oas_scraper import ReadMeSpecProvider  # noqa: E402
 from hpe_networking_central_mcp.vsg_scraper import VsgDocProvider  # noqa: E402
 
@@ -76,6 +77,8 @@ def _sync_specs(cache_dir: Path) -> tuple[list[dict], dict]:
     try:
         provider = ReadMeSpecProvider()
         central_specs = provider.fetch_specs(cache_dir=cache_dir / "central", ttl=0)
+        for s in central_specs:
+            s["_spec_source"] = "central"
         specs.extend(central_specs)
         sync_health["central"] = _summarise_oas_reports(
             provider.last_reports, central_specs
@@ -101,6 +104,8 @@ def _sync_specs(cache_dir: Path) -> tuple[list[dict], dict]:
         try:
             glp_provider = GreenLakeSpecProvider()
             glp_specs = glp_provider.fetch_specs(cache_dir=cache_dir / "glp", ttl=0)
+            for s in glp_specs:
+                s["_spec_source"] = "glp"
             specs.extend(glp_specs)
             sync_health["greenlake"] = {
                 "status": "ok",
@@ -425,6 +430,54 @@ def _sync_docs(cache_dir: Path) -> tuple[list, dict]:
         return [], health
 
 
+def _populate_schema_subgraph(db: lb.Database, specs: list[dict]) -> dict:
+    """Walk every spec and populate Parameter/RequestBody/Response/SchemaComponent
+    nodes, plus REFERENCES edges and ApiEndpointSkeleton blob nodes.
+
+    ``specs`` must already be normalized and tagged with ``_spec_source``
+    (set in ``_sync_specs``).
+    """
+    conn = lb.Connection(db)
+    totals = {
+        "endpoints": 0,
+        "parameters": 0,
+        "request_bodies": 0,
+        "responses": 0,
+        "components": 0,
+        "references": 0,
+        "skeletons": 0,
+    }
+    for spec in specs:
+        spec_source = spec.get("_spec_source") or "central"
+        endpoints: list[tuple[str, str]] = []
+        for path, path_item in (spec.get("paths") or {}).items():
+            if not isinstance(path_item, dict):
+                continue
+            for method in ("get", "post", "put", "patch", "delete", "head", "options"):
+                if isinstance(path_item.get(method), dict):
+                    endpoints.append((method.upper(), path))
+        if not endpoints:
+            continue
+        try:
+            stats = populate_schema_graph(
+                conn,
+                spec_source=spec_source,
+                spec=spec,
+                endpoints=endpoints,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            print(
+                f"    ⚠ populate_schema_graph failed for "
+                f"{(spec.get('info') or {}).get('title', '?')!r}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        for k, v in stats.items():
+            if k in totals:
+                totals[k] += v
+    return totals
+
+
 def _populate_docs(db: lb.Database, docs: list) -> int:
     """Insert DocSection nodes from synced VSG documentation."""
     conn = lb.Connection(db)
@@ -570,6 +623,20 @@ def main() -> None:
     index.build(specs)
     endpoint_count = _populate_endpoints(db, index, specs)
 
+    # 3b. Populate schema subgraph (Parameter / RequestBody / Response /
+    # SchemaComponent / ApiEndpointSkeleton + REFERENCES edges) from each
+    # source spec.  Spec source is determined from the ``_spec_source`` tag
+    # set in ``_sync_specs``.
+    print("\n[3b/6] Populating API schema subgraph...")
+    schema_stats = _populate_schema_subgraph(db, specs)
+    print(
+        f"  Schema subgraph: {schema_stats['endpoints']} endpoints, "
+        f"{schema_stats['parameters']} parameters, "
+        f"{schema_stats['components']} components, "
+        f"{schema_stats['references']} REFERENCES edges, "
+        f"{schema_stats['skeletons']} skeleton blobs"
+    )
+
     # 4. Sync and populate VSG documentation
     print("\n[4/6] Refreshing and populating VSG documentation...")
     doc_entries, vsg_health = _sync_docs(cache_dir)
@@ -596,7 +663,7 @@ def main() -> None:
     import time
     manifest = {
         "version": time.strftime("knowledge-db-%Y%m%d-%H%M%S", time.gmtime()),
-        "schema_version": 4,
+        "schema_version": 5,
         "endpoint_count": endpoint_count,
         "category_count": len(index.categories),
         "doc_count": doc_count,

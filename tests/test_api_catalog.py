@@ -151,6 +151,43 @@ def gm(tmp_path_factory):
                 "op": op_id, "cat": category,
             },
         )
+        # Mirror the populate_schema_graph wiring: every ApiEndpoint also
+        # owns an ApiEndpointSkeleton blob node + HAS_SKELETON edge.
+        eid = f"{method}:{path}"
+        gm.execute(
+            "CREATE (s:ApiEndpointSkeleton {"
+            "  endpoint_id: $eid,"
+            f"  bodySkeletonJson: '{_esc(skel_json)}',"
+            f"  bodyGlossaryJson: '{_esc(gloss_json)}'"
+            "})",
+            {"eid": eid},
+        )
+        gm.execute(
+            "MATCH (e:ApiEndpoint {endpoint_id: $eid}), "
+            "(s:ApiEndpointSkeleton {endpoint_id: $eid}) "
+            "CREATE (e)-[:HAS_SKELETON]->(s)",
+            {"eid": eid},
+        )
+        # Mirror the populate_schema_graph SchemaComponent rows so
+        # get_schema_component can resolve them.  Spec source is irrelevant
+        # for the lookup (we match by section + name) so we use a fixed
+        # "test" tag.
+        if components:
+            for section, section_map in components.items():
+                if not isinstance(section_map, dict):
+                    continue
+                for name, body in section_map.items():
+                    cid = f"test:{section}:{name}"
+                    body_json = json.dumps(body)
+                    gm.execute(
+                        "MERGE (c:SchemaComponent {component_id: $cid}) SET "
+                        "c.spec_source = 'test', c.section = $sec, c.name = $name, "
+                        "c.type = '', c.kind = '', "
+                        "c.required = CAST([] AS STRING[]), "
+                        "c.enumValues = CAST([] AS STRING[]), "
+                        f"c.bodyJson = '{_esc(body_json)}'",
+                        {"cid": cid, "sec": section, "name": name},
+                    )
 
     _create("GET", "/monitoring/v2/aps", "List all access points",
             "Paginated list of APs", "listAPs", "monitoring",

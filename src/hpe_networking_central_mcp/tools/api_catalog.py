@@ -68,8 +68,8 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             return None
         try:
             rows = gm.query(
-                "MATCH (e:ApiEndpoint) WHERE e.endpoint_id = $eid "
-                "RETURN e.bodySkeletonJson",
+                "MATCH (e:ApiEndpoint {endpoint_id: $eid})-[:HAS_SKELETON]->"
+                "(s:ApiEndpointSkeleton) RETURN s.bodySkeletonJson",
                 {"eid": f"{method.upper()}:{template_path}"},
                 read_only=True,
             )
@@ -77,7 +77,7 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             return None
         if not rows:
             return None
-        blob = rows[0].get("e.bodySkeletonJson") or ""
+        blob = rows[0].get("s.bodySkeletonJson") or ""
         if not blob:
             return None
         # Re-emit as compact-but-readable JSON. If parsing fails, fall back
@@ -337,8 +337,9 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
 
         eids = [f"{m}:{p}" for m, p in requested]
         rows = gm.query(
-            "MATCH (e:ApiEndpoint) WHERE e.endpoint_id IN $eids "
-            "RETURN e.method, e.path, e.category, e.bodySkeletonJson",
+            "MATCH (e:ApiEndpoint)-[:HAS_SKELETON]->(s:ApiEndpointSkeleton) "
+            "WHERE e.endpoint_id IN $eids "
+            "RETURN e.method, e.path, e.category, s.bodySkeletonJson",
             {"eids": eids},
             read_only=True,
         )
@@ -352,7 +353,7 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             path_val = r.get("e.path", "")
             eid_key = f"{method_val}:{path_val}"
             found_eids.add(eid_key)
-            blob = r.get("e.bodySkeletonJson") or ""
+            blob = r.get("s.bodySkeletonJson") or ""
             if not blob:
                 logger.warning(
                     "endpoint_skeleton_blob_missing",
@@ -532,8 +533,9 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
 
         eids = [f"{m}:{p}" for m, p in requested]
         rows = gm.query(
-            "MATCH (e:ApiEndpoint) WHERE e.endpoint_id IN $eids "
-            "RETURN e.method, e.path, e.bodyGlossaryJson",
+            "MATCH (e:ApiEndpoint)-[:HAS_SKELETON]->(s:ApiEndpointSkeleton) "
+            "WHERE e.endpoint_id IN $eids "
+            "RETURN e.method, e.path, s.bodyGlossaryJson",
             {"eids": eids},
             read_only=True,
         )
@@ -549,7 +551,7 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             path_val = r.get("e.path", "")
             eid_key = f"{method_val}:{path_val}"
             found_eids.add(eid_key)
-            blob = r.get("e.bodyGlossaryJson") or ""
+            blob = r.get("s.bodyGlossaryJson") or ""
             if not blob:
                 logger.warning(
                     "endpoint_glossary_blob_missing",
@@ -670,21 +672,21 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         norm_path = _normalise_path(path)
         eid = f"{method.upper()}:{norm_path}"
 
+        # Verify the endpoint exists so we can distinguish "endpoint unknown"
+        # from "endpoint exists but does not reference this component".
         try:
-            rows = gm.query(
-                "MATCH (e:ApiEndpoint) WHERE e.endpoint_id = $eid "
-                "RETURN e.bodyComponentsJson",
+            ep_rows = gm.query(
+                "MATCH (e:ApiEndpoint {endpoint_id: $eid}) RETURN COUNT(e) AS c",
                 {"eid": eid},
                 read_only=True,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("get_schema_component_query_failed", error=str(exc), eid=eid)
+            logger.warning("get_schema_component_endpoint_check_failed", error=str(exc), eid=eid)
             return json.dumps({
                 "error": "Component lookup failed.",
-                "hint": "The knowledge DB may be missing the bodyComponentsJson column. Rebuild it.",
+                "hint": "The graph database may be misconfigured. Rebuild the knowledge DB.",
             })
-
-        if not rows:
+        if not ep_rows or (ep_rows[0].get("c") or 0) == 0:
             return json.dumps({
                 "error": f"No endpoint found for {method.upper()} {norm_path}.",
                 "hint": (
@@ -693,48 +695,74 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                 ),
             })
 
-        blob = rows[0].get("e.bodyComponentsJson") or ""
+        # Match the SchemaComponent by section + name. Spec sources rarely
+        # collide on a component name, but if they do we just take the
+        # first hit — same behaviour as the previous bodyComponentsJson
+        # blob, which was also keyed only by section/name.
+        try:
+            rows = gm.query(
+                "MATCH (c:SchemaComponent) "
+                "WHERE c.section = $sec AND c.name = $name "
+                "RETURN c.bodyJson, c.spec_source LIMIT 1",
+                {"sec": section, "name": name},
+                read_only=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_schema_component_query_failed", error=str(exc), eid=eid)
+            return json.dumps({
+                "error": "Component lookup failed.",
+                "hint": "The graph database may be missing the SchemaComponent table. Rebuild the knowledge DB.",
+            })
+
+        if not rows:
+            # Surface what *is* known about this section so the caller can
+            # quickly see what is available without re-fetching the
+            # endpoint detail.
+            avail_rows = gm.query(
+                "MATCH (c:SchemaComponent) WHERE c.section = $sec "
+                "RETURN c.name ORDER BY c.name",
+                {"sec": section},
+                read_only=True,
+            )
+            available = [r.get("c.name", "") for r in avail_rows if r.get("c.name")]
+            if available:
+                return json.dumps({
+                    "error": f"Component '{name}' not found in section '{section}'.",
+                    "available": available[:200],
+                    "hint": (
+                        "Component names come from the $components_index returned by "
+                        "get_api_endpoint_detail."
+                    ),
+                })
+            return json.dumps({
+                "error": f"Section '{section}' not present in the schema graph.",
+                "available_sections": ["schemas", "responses", "parameters", "requestBodies"],
+            })
+
+        blob = rows[0].get("c.bodyJson") or ""
         if not blob:
             return json.dumps({
                 "error": (
-                    f"Endpoint {method.upper()} {norm_path} references no components, "
-                    "or its components blob is empty."
+                    f"Component '{name}' in section '{section}' has an empty body."
                 ),
-                "hint": "Inspect $components_index in get_api_endpoint_detail to confirm.",
+                "hint": "Rebuild the knowledge DB to regenerate component data.",
             })
 
         try:
-            components_map = json.loads(blob)
+            body = json.loads(blob)
         except (json.JSONDecodeError, TypeError) as exc:
             logger.warning(
                 "get_schema_component_blob_invalid",
                 method=method,
                 path=norm_path,
+                name=name,
                 error=str(exc),
             )
             return json.dumps({
                 "error": (
-                    f"Endpoint {method.upper()} {norm_path} components blob is corrupt."
+                    f"Component '{name}' body is corrupt."
                 ),
                 "hint": "Rebuild the knowledge DB to regenerate component data.",
-            })
-
-        section_map = components_map.get(section)
-        if not isinstance(section_map, dict):
-            available_sections = sorted(k for k in components_map if isinstance(components_map[k], dict))
-            return json.dumps({
-                "error": f"Section '{section}' not present for this endpoint.",
-                "available_sections": available_sections,
-            })
-
-        if name not in section_map:
-            return json.dumps({
-                "error": f"Component '{name}' not found in section '{section}'.",
-                "available": sorted(section_map.keys()),
-                "hint": (
-                    "Component names come from the $components_index returned by "
-                    "get_api_endpoint_detail."
-                ),
             })
 
         return json.dumps({
@@ -742,5 +770,5 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             "path": norm_path,
             "section": section,
             "name": name,
-            "body": section_map[name],
+            "body": body,
         }, indent=2)

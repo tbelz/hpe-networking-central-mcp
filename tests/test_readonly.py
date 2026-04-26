@@ -200,6 +200,28 @@ def gm_catalog(tmp_path_factory):
         "  bodyGlossaryJson: ''"
         "})"
     )
+    # Mirror the populate_schema_graph wiring: every ApiEndpoint also
+    # owns an ApiEndpointSkeleton blob node + HAS_SKELETON edge so the
+    # catalog tools can read the skeleton/glossary through the graph.
+    for eid, skel in (
+        ("GET:/c/v1/things", skel_get),
+        ("POST:/c/v1/things", skel_post),
+        ("DELETE:/c/v1/things/{id}", skel_del),
+    ):
+        gm.execute(
+            "CREATE (s:ApiEndpointSkeleton {"
+            "  endpoint_id: $eid,"
+            f"  bodySkeletonJson: '{_esc(skel)}',"
+            "  bodyGlossaryJson: ''"
+            "})",
+            {"eid": eid},
+        )
+        gm.execute(
+            "MATCH (e:ApiEndpoint {endpoint_id: $eid}), "
+            "(s:ApiEndpointSkeleton {endpoint_id: $eid}) "
+            "CREATE (e)-[:HAS_SKELETON]->(s)",
+            {"eid": eid},
+        )
     gm.create_fts_indexes()
     return gm
 

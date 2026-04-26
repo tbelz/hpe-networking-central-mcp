@@ -199,10 +199,12 @@ def populate_schema_graph(
     """
     components = spec.get("components") or {}
     stats = {
+        "endpoints": 0,
         "parameters": 0,
         "request_bodies": 0,
         "responses": 0,
         "components": 0,
+        "references": 0,
         "skeletons": 0,
     }
 
@@ -227,6 +229,7 @@ def populate_schema_graph(
         ).rows_as_dict())
         if not rows or rows[0]["c"] == 0:
             continue
+        stats["endpoints"] += 1
 
         # ── Parameters ──
         for idx, raw_p in enumerate(op.get("parameters") or []):
@@ -397,6 +400,7 @@ def populate_schema_graph(
                         "MERGE (a)-[:REFERENCES {via: $via}]->(b)",
                         parameters={"aid": comp_id, "bid": child_id, "via": via},
                     )
+                    stats["references"] += 1
 
         # ── Skeleton + glossary blob node ──
         try:
