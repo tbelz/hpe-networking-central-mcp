@@ -405,7 +405,8 @@ required fields without ever materialising a full skeleton.
   `description`, `operationId`, `deprecated`.
 - `Parameter` — request parameters. Properties: `parameter_id` (PK),
   `endpoint_id`, `name`, `location` (path/query/header/cookie),
-  `required`, `type`, `enumValues`, `inferredHint`, `description`.
+  `required`, `type`, `format`, `pattern`, `enumValues`,
+  `inferredHint`, `description`.
 - `RequestBody` — root request-body wrapper. Links to a `SchemaComponent`
   via `BODY_REFERENCES`.
 - `Response` — one row per status code (e.g. `200`, `400`). Links to a

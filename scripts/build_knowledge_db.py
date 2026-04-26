@@ -406,6 +406,11 @@ def _populate_schema_subgraph(db: lb.Database, specs: list[dict]) -> dict:
                 spec=spec,
                 endpoints=endpoints,
                 existing_eids=existing_eids,
+                # Skip Property nodes for GreenLake specs: they carry no
+                # ``x-supportedDeviceType`` / ``x-path`` extensions, so the
+                # property-level subgraph adds no query value while bloating
+                # writes. Preserves prior build-time/size envelope.
+                emit_property_subgraph=(spec_source != "glp"),
             )
         except Exception as exc:  # pragma: no cover — defensive
             print(
@@ -422,7 +427,7 @@ def _populate_schema_subgraph(db: lb.Database, specs: list[dict]) -> dict:
         cmp_ = stats.get("components", 0)
         props = stats.get("properties", 0)
         print(
-            f"    [3b/6] {idx}/{total_specs} ({spec_source}/{title}): "
+            f"    [3b/6] {idx}/{len(spec_endpoints)} ({spec_source}/{title}): "
             f"{ep} ep • {cmp_} cmp • {props} props parsed in {dt:.2f}s",
             flush=True,
         )

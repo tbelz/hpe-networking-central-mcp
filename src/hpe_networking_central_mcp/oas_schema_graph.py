@@ -38,9 +38,9 @@ from .oas_normalize import (
 #
 # Earlier builds tagged JSON-string columns with a ``b64:`` prefix to
 # work around real_ladybug 0.15.x prepared-statement type-inference
-# bugs. The current writer uses literal-embedded UNWIND (no
-# parameters), so plain JSON is now stored directly. The decoder is
-# kept tolerant so DBs built with the old encoder still read cleanly.
+# bugs. The current writer uses ``COPY FROM`` with PyArrow tables, so
+# plain JSON is now stored directly. The decoder is kept tolerant so
+# DBs built with the old encoder still read cleanly.
 _JSON_BLOB_PREFIX = "b64:"
 
 
@@ -223,20 +223,21 @@ def _resolve_property_schema(prop_body: Any, full_components: dict) -> dict:
     return prop_body
 
 
-# ── Per-spec write batch (UNWIND-flushed) ───────────────────────────
+# ── Per-spec write batch (COPY-flushed) ─────────────────────────────
 
 
 class _Batch:
-    """Buffers schema-subgraph writes for a single spec.
+    """Buffers schema-subgraph writes and bulk-loads them via ``COPY FROM``.
 
-    All node MERGEs and edge MERGEs are accumulated in plain Python
-    lists and flushed in O(few-dozen) ``UNWIND $rows`` statements at
-    ``flush()`` time. This replaces the previous ~5 statements per
-    endpoint × ~2k endpoints × ~10 properties each pattern (which
-    auto-committed tens of thousands of single-row transactions).
+    Node and edge rows are accumulated in plain Python lists and flushed
+    in one ``COPY {table} FROM $df`` per table at ``flush()`` time.
+    LadybugDB issue #285 (UNWIND+MERGE bulk insert) is WONTFIX upstream,
+    so this is the only viable bulk path.
 
-    Edge pair lists are deduped on insert via small ``set`` indexes so
-    we never MATCH/MERGE the same edge twice.
+    Every collector is deduped on insert via small ``set`` indexes
+    (``_seen_*``) keyed by primary key (nodes) or edge tuple (rels):
+    ``COPY`` does INSERT not MERGE, so PK duplicates would otherwise
+    error.  See ``_preseed_batch_from_db`` for cross-batch idempotency.
     """
 
     __slots__ = (
@@ -565,16 +566,18 @@ _REL_REFERENCES_SCHEMA = pa.schema([
 def _rows_to_pa(rows: list[dict], schema: pa.Schema) -> pa.Table:
     """Materialise a list[dict] as a PyArrow table conforming to ``schema``.
 
-    Missing keys default to ``None`` (or ``""`` / ``[]`` for non-null
-    string/list columns). Column order follows ``schema``.
+    Missing keys are coerced to type-appropriate empty values
+    (``""`` / ``[]`` / ``False``).  This intentionally collapses NULL
+    into the empty value because none of the OAS-graph consumers rely
+    on ``IS NULL`` semantics — an absent ``readOnly`` is read as "not
+    read-only", an absent ``enumValues`` as "no enum constraint", etc.
+    Column order follows ``schema``.
     """
     cols: dict[str, list] = {f.name: [] for f in schema}
     for r in rows:
         for f in schema:
             v = r.get(f.name)
             if v is None:
-                # Sensible defaults so Ladybug doesn't reject NULLs on
-                # non-nullable columns.
                 if pa.types.is_string(f.type):
                     v = ""
                 elif pa.types.is_list(f.type):
@@ -686,7 +689,9 @@ def _collect_spec_into_batch(
             schema = resolved.get("schema") or {}
             pname = resolved.get("name") or ""
             ploc = resolved.get("in") or ""
-            param_id = f"{eid}#param:{ploc}:{pname or idx}"
+            # Use ``@{idx}`` for unnamed params so a numeric name like
+            # "5" can never collide with the synthesised positional id.
+            param_id = f"{eid}#param:{ploc}:{pname or f'@{idx}'}"
             enum_vals = [
                 v for v in (schema.get("enum") or []) if isinstance(v, str)
             ]
