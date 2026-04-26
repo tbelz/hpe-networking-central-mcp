@@ -35,6 +35,7 @@ from hpe_networking_central_mcp.graph.schema import (  # noqa: E402
 from hpe_networking_central_mcp.oas_index import OASIndex  # noqa: E402
 from hpe_networking_central_mcp.oas_normalize import (  # noqa: E402
     normalize as normalize_spec,
+    project_components,
     project_glossary,
     project_skeleton,
 )
@@ -174,12 +175,17 @@ def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> 
     """Insert ApiEndpoint and ApiCategory nodes from the OASIndex.
 
     ``specs`` should be the **normalized** spec list — projection columns
-    (``bodySkeletonJson``, ``bodyGlossaryJson``) are computed from these.
+    (``bodySkeletonJson``, ``bodyGlossaryJson``, ``bodyComponentsJson``)
+    are computed from these.  ``bodySkeletonJson`` no longer carries the
+    transitively-expanded ``$components`` blob (only an index of names
+    and minimal hints); the full bodies live in ``bodyComponentsJson``
+    and are served on demand by ``get_schema_component``.
     """
     conn = lb.Connection(db)
     count = 0
     skeleton_ok = 0
     glossary_ok = 0
+    components_ok = 0
 
     # ReadMe.io serves one operation per .md file, so most providers ship
     # ~1600 individual specs that share only ~50 ``info.title`` values.
@@ -238,9 +244,13 @@ def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> 
         escaped_body = _cypher_escape(body_json)
         escaped_resps = _cypher_escape(responses_json)
 
-        # Compute skeleton + glossary projections from the normalized spec.
+        # Compute skeleton + glossary + components projections from the
+        # normalized spec.  The skeleton no longer inlines component
+        # bodies (only an index); the full bodies live in their own
+        # column for on-demand lookup via ``get_schema_component``.
         skeleton_json = ""
         glossary_json = ""
+        components_json = ""
         spec = specs_by_endpoint.get((entry.method, entry.path)) or specs_by_category.get(entry.category)
         if spec is not None:
             try:
@@ -261,12 +271,24 @@ def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> 
                     f"    ⚠ project_glossary failed for {entry.method} {entry.path}: {exc}",
                     file=sys.stderr,
                 )
+            try:
+                comp_view = project_components(spec, entry.method, entry.path)
+                if comp_view:
+                    components_json = json.dumps(comp_view)
+            except Exception as exc:  # pragma: no cover — defensive
+                print(
+                    f"    ⚠ project_components failed for {entry.method} {entry.path}: {exc}",
+                    file=sys.stderr,
+                )
         if skeleton_json:
             skeleton_ok += 1
         if glossary_json:
             glossary_ok += 1
+        if components_json:
+            components_ok += 1
         escaped_skeleton = _cypher_escape(skeleton_json)
         escaped_glossary = _cypher_escape(glossary_json)
+        escaped_components = _cypher_escape(components_json)
 
         conn.execute(
             "CREATE (e:ApiEndpoint {"
@@ -276,7 +298,8 @@ def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> 
             f"  parameters: '{escaped_params}', requestBody: '{escaped_body}',"
             f"  responses: '{escaped_resps}',"
             f"  bodySkeletonJson: '{escaped_skeleton}',"
-            f"  bodyGlossaryJson: '{escaped_glossary}'"
+            f"  bodyGlossaryJson: '{escaped_glossary}',"
+            f"  bodyComponentsJson: '{escaped_components}'"
             "})",
             parameters={
                 "eid": endpoint_id,
@@ -309,12 +332,16 @@ def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> 
     if count:
         skel_pct = 100 * skeleton_ok // count
         gloss_pct = 100 * glossary_ok // count
+        comp_pct = 100 * components_ok // count
         print(
             f"  Projection coverage: skeleton={skeleton_ok}/{count} ({skel_pct}%), "
-            f"glossary={glossary_ok}/{count} ({gloss_pct}%)"
+            f"glossary={glossary_ok}/{count} ({gloss_pct}%), "
+            f"components={components_ok}/{count} ({comp_pct}%)"
         )
         # Hard fail if coverage collapses — silently empty blobs degrade
         # the MCP tool surface to a useless shell.
+        # ``components`` may legitimately be empty for endpoints that
+        # reference no components, so it is not part of the threshold.
         min_pct = 90
         if skel_pct < min_pct or gloss_pct < min_pct:
             print(
@@ -569,7 +596,7 @@ def main() -> None:
     import time
     manifest = {
         "version": time.strftime("knowledge-db-%Y%m%d-%H%M%S", time.gmtime()),
-        "schema_version": 3,
+        "schema_version": 4,
         "endpoint_count": endpoint_count,
         "category_count": len(index.categories),
         "doc_count": doc_count,

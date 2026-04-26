@@ -111,6 +111,7 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         responses      STRING,
         bodySkeletonJson     STRING,
         bodyGlossaryJson     STRING,
+        bodyComponentsJson   STRING,
         embedding      FLOAT[384],
         PRIMARY KEY (endpoint_id)
     )

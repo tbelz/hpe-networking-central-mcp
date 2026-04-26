@@ -35,13 +35,26 @@ direct API reads and reusable Python scripts.
    it in the instructions (some clients drop the instructions field), read
    `api://endpoint-catalog` before looking up any endpoint. Then use:
 
-     • `get_api_endpoint_detail(method, path)` *(or its bulk form)* —
-       returns the full structural **skeleton** of the endpoint:
-       parameters, request body schema, success and first-error response
-       shapes, and a transitive `$components` side-table. All
-       human-readable prose (descriptions, titles, examples) is stripped.
-       Field names + types + enums are usually enough to map a config
-       value onto the right field. This is what you call by default.
+     • `get_api_endpoint_detail(method, path)` *(or its bulk form,
+       optionally filtered with `parts=[...]`)* — returns the
+       structural **skeleton** of the endpoint: parameters, request
+       body schema, success and first-error response shapes, and a
+       `$components_index` listing every transitively-referenced
+       component by name with minimal hints (`type`, `enum`,
+       `required`, `child_refs`, presence flags for `oneOf` /
+       `anyOf` / `allOf`). All human-readable prose (descriptions,
+       titles, examples) is stripped. Field names + types + enums
+       are usually enough to map a config value onto the right field.
+       This is what you call by default. Use `parts=["meta",
+       "parameters"]` (or any subset of `meta`, `parameters`,
+       `request_body`, `responses`, `$components_index`,
+       `required_paths`) to keep the payload tight when you only need
+       part of the skeleton.
+     • `get_schema_component(method, path, name)` — fetch the full
+       prose-stripped body of one component named in the
+       `$components_index`. Use this when the index alone is not
+       enough: `oneOf` / `anyOf` / `allOf` flagged in the index, or
+       when you need the property list of a `child_refs` target.
      • `get_api_endpoint_glossary(method, path)` *(or its bulk form,
        optionally filtered with `components=[...]`)* — returns the
        human-readable descriptions for the same endpoint, organised
@@ -145,7 +158,9 @@ Before writing ANY script you MUST complete these steps IN ORDER:
 2. **Read the `api://endpoint-catalog` resource** (or scan it in the system
    instructions below) for the right `METHOD /path`. NEVER guess API paths.
 3. `get_api_endpoint_detail(method, path)` — get the structural skeleton
-   (parameters, request body, response shape, transitive `$components`).
+   (parameters, request body, response shape, `$components_index`).
+   Drill into individual components on demand with
+   `get_schema_component(method, path, name)`.
    Add `get_api_endpoint_glossary(method, path)` only if a field name is
    ambiguous.
 4. Only THEN write the script using the discovered endpoints and schemas.

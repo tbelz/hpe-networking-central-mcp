@@ -252,18 +252,27 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         method: str | None = None,
         path: str | None = None,
         endpoints: list[dict] | None = None,
+        parts: list[str] | None = None,
     ) -> str:
         """Get the structural skeleton of one or more API endpoints.
 
         Returns parameters, request body schema, success and first-error
-        response shapes, and a transitive ``$components`` side-table —
-        with all human-readable prose (descriptions, titles, examples)
-        stripped at every nested level.  The operation-level ``summary``
-        is intentionally preserved as a one-line label so an agent can
-        recognise the endpoint without a second tool call.  An agent can
-        map configuration values onto field names directly from
-        names + types + enums alone, which keeps the payload small enough
-        to fit several endpoints into one prompt.
+        response shapes, and a ``$components_index`` listing every
+        transitively-referenced component by name with minimal hints
+        (``type``, ``enum``, ``required``, ``child_refs``, presence
+        flags for ``oneOf`` / ``anyOf`` / ``allOf``).  All
+        human-readable prose (descriptions, titles, examples) is
+        stripped at every nested level.  The operation-level
+        ``summary`` is intentionally preserved as a one-line label so an
+        agent can recognise the endpoint without a second tool call.
+
+        Component bodies themselves are NOT inlined — the index is the
+        contract.  Once the agent knows it needs the full body of a
+        specific schema (e.g. ``Vlan`` or ``ApRadioProfile``) it calls
+        ``get_schema_component(method, path, name)`` to fetch just that
+        one component.  This keeps detail calls small even for endpoints
+        whose transitively expanded components used to dominate >98 %
+        of payload bytes (port profiles, ethernet interfaces, …).
 
         For ambiguous field names — and for parameter semantics the
         skeleton omits because they are documented only in prose (e.g.
@@ -290,6 +299,12 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             method: HTTP method (GET, POST, PUT, PATCH, DELETE). Single form.
             path: Full API path (e.g. "/monitoring/v2/aps"). Single form.
             endpoints: List of {"method", "path"} dicts. Bulk form.
+            parts: Optional projection filter — restrict the returned
+                payload to a subset of top-level keys.  Valid values:
+                ``"meta"`` (operation-level fields like ``method``,
+                ``path``, ``summary``, ``category``), ``"parameters"``,
+                ``"request_body"``, ``"required_paths"``, ``"responses"``,
+                ``"$components_index"``.  Unknown names are ignored.
 
         Returns:
             JSON with endpoint skeleton(s).
@@ -357,6 +372,27 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                 continue
             d.setdefault("category", r.get("e.category", ""))
             details_by_eid[eid_key] = d
+
+        # Apply optional ``parts=`` projection filter.  ``meta`` keeps the
+        # operation-level fields (method, path, summary, category, etc.);
+        # other names map to top-level keys produced by ``project_skeleton``.
+        if parts:
+            _META_KEYS = {"method", "path", "summary", "category", "operation_id", "deprecated", "tags"}
+            _SECTION_KEYS = {"parameters", "request_body", "required_paths", "responses", "$components_index"}
+            _KNOWN_PARTS = {"meta"} | _SECTION_KEYS
+            requested_parts = {str(p) for p in parts}
+            known_requested_parts = requested_parts & _KNOWN_PARTS
+            if known_requested_parts:
+                keep_meta = "meta" in known_requested_parts
+                keep_sections = known_requested_parts & _SECTION_KEYS
+                for eid_key, d in list(details_by_eid.items()):
+                    filtered: dict[str, Any] = {}
+                    for k, v in d.items():
+                        if k in keep_sections:
+                            filtered[k] = v
+                        elif keep_meta and k in _META_KEYS:
+                            filtered[k] = v
+                    details_by_eid[eid_key] = filtered
 
         # Record inspection for the policy gate. Any endpoint the DB
         # actually returned a row for counts as inspected — even if the
@@ -587,3 +623,124 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         if skipped_read_only:
             response["skipped_read_only"] = skipped_read_only
         return json.dumps(response, indent=2)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+    def get_schema_component(
+        method: str,
+        path: str,
+        name: str,
+        section: str = "schemas",
+    ) -> str:
+        """Fetch the full body of one schema component referenced by an endpoint.
+
+        ``get_api_endpoint_detail`` returns a ``$components_index`` that
+        names every component reachable from an endpoint along with
+        minimal hints (type, enum, required, child_refs).  Use this tool
+        to drill into a specific component when the index alone is not
+        enough — typically when the index flags ``oneOf`` / ``anyOf`` /
+        ``allOf`` (the agent must see the variants), when a nested
+        ``items_ref`` points at an array element schema, or when the
+        agent needs the property list of an object referenced via
+        ``child_refs``.
+
+        Component bodies are stored prose-stripped (descriptions /
+        titles / examples removed) so a tight structural fetch stays
+        small.  For human-readable descriptions of the same component,
+        use ``get_api_endpoint_glossary(method, path, components=[name])``.
+
+        Args:
+            method: HTTP method of the owning endpoint.
+            path: Full API path of the owning endpoint.
+            name: Component name (as it appears in ``$components_index``,
+                e.g. ``"Vlan"``, ``"ApRadioProfile"``).
+            section: Component section — usually ``"schemas"`` (default);
+                ``"responses"`` for shared response components.
+
+        Returns:
+            JSON object with the component body, or an error if the
+            endpoint or component is unknown.
+        """
+        gm = _graph_manager
+        if gm is None or not gm.is_available:
+            return json.dumps({
+                "error": "Graph database not available.",
+                "hint": "The graph database may still be loading. Try again shortly.",
+            })
+
+        norm_path = _normalise_path(path)
+        eid = f"{method.upper()}:{norm_path}"
+
+        try:
+            rows = gm.query(
+                "MATCH (e:ApiEndpoint) WHERE e.endpoint_id = $eid "
+                "RETURN e.bodyComponentsJson",
+                {"eid": eid},
+                read_only=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_schema_component_query_failed", error=str(exc), eid=eid)
+            return json.dumps({
+                "error": "Component lookup failed.",
+                "hint": "The knowledge DB may be missing the bodyComponentsJson column. Rebuild it.",
+            })
+
+        if not rows:
+            return json.dumps({
+                "error": f"No endpoint found for {method.upper()} {norm_path}.",
+                "hint": (
+                    "Read the api://endpoint-catalog resource for the correct method/path. "
+                    "Guessing paths without consulting the catalog has a near-zero chance of success."
+                ),
+            })
+
+        blob = rows[0].get("e.bodyComponentsJson") or ""
+        if not blob:
+            return json.dumps({
+                "error": (
+                    f"Endpoint {method.upper()} {norm_path} references no components, "
+                    "or its components blob is empty."
+                ),
+                "hint": "Inspect $components_index in get_api_endpoint_detail to confirm.",
+            })
+
+        try:
+            components_map = json.loads(blob)
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning(
+                "get_schema_component_blob_invalid",
+                method=method,
+                path=norm_path,
+                error=str(exc),
+            )
+            return json.dumps({
+                "error": (
+                    f"Endpoint {method.upper()} {norm_path} components blob is corrupt."
+                ),
+                "hint": "Rebuild the knowledge DB to regenerate component data.",
+            })
+
+        section_map = components_map.get(section)
+        if not isinstance(section_map, dict):
+            available_sections = sorted(k for k in components_map if isinstance(components_map[k], dict))
+            return json.dumps({
+                "error": f"Section '{section}' not present for this endpoint.",
+                "available_sections": available_sections,
+            })
+
+        if name not in section_map:
+            return json.dumps({
+                "error": f"Component '{name}' not found in section '{section}'.",
+                "available": sorted(section_map.keys()),
+                "hint": (
+                    "Component names come from the $components_index returned by "
+                    "get_api_endpoint_detail."
+                ),
+            })
+
+        return json.dumps({
+            "method": method.upper(),
+            "path": norm_path,
+            "section": section,
+            "name": name,
+            "body": section_map[name],
+        }, indent=2)
