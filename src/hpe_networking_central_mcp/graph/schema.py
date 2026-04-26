@@ -148,10 +148,78 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         PRIMARY KEY (filename)
     )
     """,
+    # ── Schema subgraph (ADR 009) ────────────────────────────────────
+    # Decomposes per-endpoint OAS blobs into queryable Cypher entities so
+    # ``query_graph`` can serve as the primary API-discovery surface.
+    """
+    CREATE NODE TABLE IF NOT EXISTS Parameter (
+        parameter_id STRING,
+        endpoint_id  STRING,
+        name         STRING,
+        location     STRING,
+        required     BOOLEAN,
+        type         STRING,
+        format       STRING,
+        enumValues   STRING[],
+        pattern      STRING,
+        inferredHint STRING,
+        PRIMARY KEY (parameter_id)
+    )
+    """,
+    """
+    CREATE NODE TABLE IF NOT EXISTS RequestBody (
+        request_body_id     STRING,
+        endpoint_id         STRING,
+        content_type        STRING,
+        required            BOOLEAN,
+        root_component_ref  STRING,
+        PRIMARY KEY (request_body_id)
+    )
+    """,
+    """
+    CREATE NODE TABLE IF NOT EXISTS Response (
+        response_id         STRING,
+        endpoint_id         STRING,
+        status              STRING,
+        content_type        STRING,
+        root_component_ref  STRING,
+        PRIMARY KEY (response_id)
+    )
+    """,
+    """
+    CREATE NODE TABLE IF NOT EXISTS SchemaComponent (
+        component_id   STRING,
+        spec_source    STRING,
+        section        STRING,
+        name           STRING,
+        type           STRING,
+        kind           STRING,
+        required       STRING[],
+        enumValues     STRING[],
+        bodyJson       STRING,
+        PRIMARY KEY (component_id)
+    )
+    """,
+    """
+    CREATE NODE TABLE IF NOT EXISTS ApiEndpointSkeleton (
+        endpoint_id        STRING,
+        bodySkeletonJson   STRING,
+        bodyGlossaryJson   STRING,
+        PRIMARY KEY (endpoint_id)
+    )
+    """,
 ]
 
 KNOWLEDGE_REL_TABLES: list[str] = [
     "CREATE REL TABLE IF NOT EXISTS BELONGS_TO_CATEGORY (FROM ApiEndpoint TO ApiCategory)",
+    # ── Schema subgraph relationships (ADR 009) ──────────────────────
+    "CREATE REL TABLE IF NOT EXISTS HAS_PARAMETER (FROM ApiEndpoint TO Parameter)",
+    "CREATE REL TABLE IF NOT EXISTS HAS_REQUEST_BODY (FROM ApiEndpoint TO RequestBody)",
+    "CREATE REL TABLE IF NOT EXISTS HAS_RESPONSE (FROM ApiEndpoint TO Response)",
+    "CREATE REL TABLE IF NOT EXISTS BODY_REFERENCES (FROM RequestBody TO SchemaComponent)",
+    "CREATE REL TABLE IF NOT EXISTS RESPONSE_REFERENCES (FROM Response TO SchemaComponent)",
+    "CREATE REL TABLE IF NOT EXISTS REFERENCES (FROM SchemaComponent TO SchemaComponent, via STRING)",
+    "CREATE REL TABLE IF NOT EXISTS HAS_SKELETON (FROM ApiEndpoint TO ApiEndpointSkeleton)",
 ]
 
 # ── Relationship table DDL ───────────────────────────────────────────
