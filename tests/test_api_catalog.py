@@ -24,7 +24,8 @@ from hpe_networking_central_mcp.config import Settings
 
 # Fixtures mirror the real project_skeleton output shape:
 #   responses → dict keyed by status code + optional "error" sentinel
-#   $components → sectioned: {"schemas": {...}, "responses": {...}}
+#   $components_index → sectioned: {"schemas": {...}, "responses": {...}}
+#                       with per-entry minimal hints (type / required / refs)
 _VLAN_SKELETON = {
     "method": "POST",
     "path": "/config/v1/vlans",
@@ -50,9 +51,25 @@ _VLAN_SKELETON = {
         "201": {"schema": {"$ref": "#/components/schemas/VlanCfg"}},
         "error": "#/components/responses/BadRequest",
     },
-    "$components": {
+    "$components_index": {
         "schemas": {"VlanCfg": {"type": "object"}},
         "responses": {"BadRequest": {"type": "object"}},
+    },
+}
+
+_VLAN_COMPONENTS = {
+    "schemas": {
+        "VlanCfg": {
+            "type": "object",
+            "properties": {
+                "vlan_id": {"type": "integer"},
+                "name": {"type": "string"},
+            },
+            "required": ["vlan_id"],
+        },
+    },
+    "responses": {
+        "BadRequest": {"type": "object"},
     },
 }
 
@@ -106,9 +123,11 @@ def gm(tmp_path_factory):
 
     def _create(method: str, path: str, summary: str, description: str,
                 op_id: str, category: str, parameters: str = "[]",
-                skeleton: dict | None = None, glossary: dict | None = None):
+                skeleton: dict | None = None, glossary: dict | None = None,
+                components: dict | None = None):
         skel_json = json.dumps(skeleton) if skeleton else ""
         gloss_json = json.dumps(glossary) if glossary else ""
+        comp_json = json.dumps(components) if components else ""
         # JSON blobs and other long strings are inlined (matches the build
         # script). Kuzu's parameter binder cannot infer types for many string
         # parameters in a single statement, which surfaces as a misleading
@@ -122,7 +141,8 @@ def gm(tmp_path_factory):
             f"  parameters: '{_esc(parameters)}',"
             "  requestBody: '', responses: '',"
             f"  bodySkeletonJson: '{_esc(skel_json)}',"
-            f"  bodyGlossaryJson: '{_esc(gloss_json)}'"
+            f"  bodyGlossaryJson: '{_esc(gloss_json)}',"
+            f"  bodyComponentsJson: '{_esc(comp_json)}'"
             "})",
             {
                 "eid": f"{method}:{path}",
@@ -146,7 +166,8 @@ def gm(tmp_path_factory):
                       "components": {}})
     _create("POST", "/config/v1/vlans", "Create a VLAN",
             "Creates a VLAN on a device", "createVLAN", "config",
-            skeleton=_VLAN_SKELETON, glossary=_VLAN_GLOSSARY)
+            skeleton=_VLAN_SKELETON, glossary=_VLAN_GLOSSARY,
+            components=_VLAN_COMPONENTS)
     _create("DELETE", "/config/v1/vlans/{id}", "Delete a VLAN",
             "Removes a VLAN", "deleteVLAN", "config",
             skeleton={"method": "DELETE", "path": "/config/v1/vlans/{id}",
@@ -245,8 +266,8 @@ class TestGetApiEndpointDetail:
         assert "vlan_id" in result["request_body"]["schema"]["properties"]
         assert isinstance(result["responses"], dict)
         assert "201" in result["responses"]
-        assert "$components" in result
-        assert "schemas" in result["$components"]
+        assert "$components_index" in result
+        assert "schemas" in result["$components_index"]
 
     def test_no_descriptions_in_skeleton(self, tools):
         # Skeleton fixture deliberately omits descriptions; the wire
@@ -283,6 +304,58 @@ class TestGetApiEndpointDetail:
         without_slash = json.loads(tools["get_api_endpoint_detail"](
             method="GET", path="monitoring/v2/aps"))
         assert with_slash["operation_id"] == without_slash["operation_id"]
+
+    def test_parts_filter_restricts_payload(self, tools):
+        # parts=["meta", "parameters"] keeps only those sections.
+        result = json.loads(tools["get_api_endpoint_detail"](
+            method="POST", path="/config/v1/vlans",
+            parts=["meta", "parameters"]))
+        assert "parameters" in result
+        assert "method" in result  # meta key
+        assert "request_body" not in result
+        assert "responses" not in result
+        assert "$components_index" not in result
+
+    def test_parts_filter_components_index_only(self, tools):
+        result = json.loads(tools["get_api_endpoint_detail"](
+            method="POST", path="/config/v1/vlans",
+            parts=["$components_index"]))
+        assert "$components_index" in result
+        assert "request_body" not in result
+        assert "method" not in result  # meta excluded
+
+
+# ── get_schema_component ─────────────────────────────────────────────
+
+
+class TestGetSchemaComponent:
+
+    def test_returns_component_body(self, tools):
+        result = json.loads(tools["get_schema_component"](
+            method="POST", path="/config/v1/vlans", name="VlanCfg"))
+        assert result["section"] == "schemas"
+        assert result["name"] == "VlanCfg"
+        body = result["body"]
+        assert body["type"] == "object"
+        assert "vlan_id" in body["properties"]
+        assert body["required"] == ["vlan_id"]
+
+    def test_unknown_component_lists_available(self, tools):
+        result = json.loads(tools["get_schema_component"](
+            method="POST", path="/config/v1/vlans", name="DoesNotExist"))
+        assert "error" in result
+        assert "VlanCfg" in result["available"]
+
+    def test_unknown_endpoint(self, tools):
+        result = json.loads(tools["get_schema_component"](
+            method="GET", path="/nope", name="Foo"))
+        assert "error" in result
+
+    def test_endpoint_without_components(self, tools):
+        # /monitoring/v2/aps has no components blob in the fixture.
+        result = json.loads(tools["get_schema_component"](
+            method="GET", path="/monitoring/v2/aps", name="Foo"))
+        assert "error" in result
 
 
 # ── get_api_endpoint_glossary ───────────────────────────────────────

@@ -7,6 +7,7 @@ import json
 
 from hpe_networking_central_mcp.oas_normalize import (
     normalize,
+    project_components,
     project_glossary,
     project_skeleton,
 )
@@ -216,12 +217,14 @@ def test_skeleton_strips_descriptions_at_every_level():
     skel = project_skeleton(spec, "POST", "/v1/widgets/0")
     assert skel is not None
     # The top-level meta KEEPS its summary so the agent has a one-line label.
-    # But every NESTED schema dict in parameters / request_body / responses /
-    # $components must have no description-bearing keys.  ``properties``
-    # and ``patternProperties`` are skipped because their keys are
+    # But every NESTED schema dict in parameters / request_body / responses
+    # must have no description-bearing keys.  ``properties`` and
+    # ``patternProperties`` are skipped because their keys are
     # user-defined field names (a property literally called ``description``
-    # is legal and must survive).
-    for key in ("parameters", "request_body", "responses", "$components"):
+    # is legal and must survive).  ``$components_index`` carries only
+    # type/enum/required/child_refs hints — never prose — so it is
+    # vacuously safe.
+    for key in ("parameters", "request_body", "responses"):
         sub = skel.get(key)
         if sub is None:
             continue
@@ -295,7 +298,12 @@ def test_skeleton_preserves_structure():
     assert "name" in skel["required_paths"]
     body_str = json.dumps(skel)
     if body_str.count('"$ref"') > 0:
-        assert "$components" in skel
+        assert "$components_index" in skel
+        # Index entries must be tiny: never carry full schema bodies.
+        for section_entries in skel["$components_index"].values():
+            for entry in section_entries.values():
+                assert "properties" not in entry
+                assert "items" not in entry  # only items_ref, not full items
 
 
 def test_glossary_returns_descriptions_only():
@@ -687,3 +695,40 @@ def test_normalize_preserves_existing_components():
     }
     out = normalize(spec)
     assert "Existing" in out["components"]["schemas"]
+
+
+# ── project_components / index split ─────────────────────────────────
+
+
+def test_project_components_returns_full_bodies():
+    """project_components emits the same prose-stripped full bodies that
+    used to live under the skeleton's ``$components`` key."""
+    spec = normalize(_make_synthetic_spec(num_endpoints=4))
+    components = project_components(spec, "POST", "/v1/widgets/0")
+    assert components is not None
+    # normalize() promotes deduped error responses into components.
+    assert any(section_entries for section_entries in components.values())
+    # Every emitted body must be prose-stripped (same rule as skeleton).
+    for section_entries in components.values():
+        for entry in section_entries.values():
+            for forbidden in DESCRIPTION_KEYS:
+                assert forbidden not in entry
+
+
+def test_components_index_is_smaller_than_full_bodies():
+    """The skeleton's $components_index must be substantially smaller
+    than the equivalent full component bodies — that's the whole point
+    of splitting the projection."""
+    spec = normalize(_make_synthetic_spec(num_endpoints=4))
+    skel = project_skeleton(spec, "POST", "/v1/widgets/0")
+    comps = project_components(spec, "POST", "/v1/widgets/0")
+    assert skel is not None and comps is not None
+    if "$components_index" in skel:
+        index_size = len(json.dumps(skel["$components_index"]))
+        full_size = len(json.dumps(comps))
+        assert index_size <= full_size, "index must not exceed full bodies"
+
+
+def test_project_components_returns_none_for_unknown_endpoint():
+    spec = normalize(_make_synthetic_spec(num_endpoints=2))
+    assert project_components(spec, "GET", "/nope") is None

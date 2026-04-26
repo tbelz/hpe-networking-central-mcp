@@ -17,13 +17,18 @@ This module provides two responsibilities:
    rewrite their use sites to ``$ref``.  The resulting spec is still a
    valid OpenAPI 3.x document.
 
-2. **Skeleton + Glossary projections** — ``project_skeleton`` returns the
-   full *structure* of an endpoint (parameters, request body, success and
-   error response shells, transitively-referenced ``$components``) with
-   every human-readable string (``description``, ``title``, ``example``,
-   ``x-typeName``, ``x-typeDescription``) stripped at every level.  An
-   agent can map file-config values to field names directly from
-   names+types+enums without paying the description tax.
+2. **Skeleton + Glossary + Components projections** —
+   ``project_skeleton`` returns the *structure* of an endpoint
+   (parameters, request body, success and error response shells, and a
+   ``$components_index`` listing every transitively-referenced component
+   by name with minimal hints — type, enum, required, child_refs). All
+   human-readable strings (``description``, ``title``, ``example``,
+   ``x-typeName``, ``x-typeDescription``) are stripped at every level.
+   The full bodies of those components are emitted by the separate
+   ``project_components`` projection so the build pipeline can store
+   them in their own DB column; ``get_schema_component`` then serves a
+   single component on demand without re-shipping the entire side-table
+   on every detail call.
 
    ``project_glossary`` returns ONLY the descriptive prose for the same
    endpoint, organised per-component, so an agent can fetch human help
@@ -577,17 +582,26 @@ def _extract_prose(node: Any) -> Any:
 
 
 def project_skeleton(spec: dict, method: str, path: str) -> dict | None:
-    """Return the full structural shape of an endpoint, descriptions stripped.
+    """Return the structural shape of an endpoint, descriptions stripped.
 
     Includes parameters, request body, success response, first error
-    response (as ``$ref``), the transitively-referenced ``$components``
-    side-table, and a flat ``required_paths`` list computed from the
+    response (as ``$ref``), a ``$components_index`` summarising every
+    transitively-referenced component by name (type, enum, required,
+    child_refs), and a flat ``required_paths`` list computed from the
     fully-resolved request body.  Every ``description`` / ``title`` /
     ``example`` / ``x-typeName`` / ``x-typeDescription`` /
     ``x-patternSources`` / ``summary`` field inside ``parameters``,
-    ``request_body``, ``responses``, and ``$components`` is removed.
-    Operation-level ``summary`` is preserved at the top level so the agent
-    keeps a one-line label for the endpoint.
+    ``request_body``, and ``responses`` is removed.  Operation-level
+    ``summary`` is preserved at the top level so the agent keeps a
+    one-line label for the endpoint.
+
+    Component bodies are NOT inlined.  Use :func:`project_components`
+    (build pipeline) to obtain the full bodies, and
+    ``get_schema_component(method, path, name)`` (runtime tool) to fetch
+    a single one on demand.  This keeps detail calls small even on
+    huge endpoints (port profiles, ethernet interfaces, …) where
+    transitively expanded components otherwise dominate >98 % of
+    payload bytes.
     """
     op = _find_operation(spec, method, path)
     if op is None:
@@ -671,18 +685,119 @@ def project_skeleton(spec: dict, method: str, path: str) -> dict | None:
     payload["required_paths"] = required_paths
     payload["responses"] = responses_out
 
-    # Side-table: transitively-needed components, also stripped of prose.
+    # Side-table is replaced by an *index*: name + minimal hints
+    # (type/enum/required/child_refs) per referenced component.  Full
+    # bodies live in a separate :func:`project_components` projection so
+    # ``get_api_endpoint_detail`` stays small even on huge endpoints
+    # (port profiles, ethernet interfaces, …) where transitively
+    # expanded components otherwise dominate >98 % of the payload bytes.
+    # Use ``get_schema_component(method, path, name)`` to fetch a single
+    # component's full body on demand.
     side = _extract_referenced_components(payload, components)
-    if side:
-        stripped_side: dict[str, dict] = {}
-        for section, entries in side.items():
-            stripped_section: dict[str, Any] = {}
-            for name, sch in entries.items():
-                stripped_section[name] = _strip_skeleton_keys(sch)
-            stripped_side[section] = stripped_section
-        payload["$components"] = stripped_side
-
+    payload["$components_index"] = _build_components_index(side)
     return payload
+
+
+def project_components(spec: dict, method: str, path: str) -> dict | None:
+    """Return the prose-stripped full bodies of components for an endpoint.
+
+    Returns the same shape that :func:`project_skeleton` previously
+    embedded under ``$components`` — ``{"schemas": {...}, "responses":
+    {...}}`` — with descriptions / titles / examples stripped at every
+    nesting level.  Used by the build pipeline to populate a separate
+    DB column so ``get_schema_component`` can serve a single component
+    on demand without re-walking the spec.
+
+    Returns ``None`` when the endpoint is unknown.
+    """
+    op = _find_operation(spec, method, path)
+    if op is None:
+        return None
+    components = spec.get("components") or {}
+    refs_root: dict[str, Any] = {
+        "parameters": op.get("parameters") or [],
+        "requestBody": op.get("requestBody"),
+        "responses": op.get("responses") or {},
+    }
+    side = _extract_referenced_components(refs_root, components)
+    if not side:
+        return {}
+    out: dict[str, dict] = {}
+    for section, entries in side.items():
+        if not isinstance(entries, dict):
+            continue
+        out[section] = {
+            name: _strip_skeleton_keys(sch) for name, sch in entries.items()
+        }
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Components index — minimal per-component summary
+# ---------------------------------------------------------------------------
+#
+# For a typical "big" endpoint, >98 % of the legacy skeleton's bytes lived
+# in the transitively-expanded ``$components`` side-table.  The index
+# replaces that blob with one entry per referenced component carrying
+# only the structural hints an agent needs to decide whether to drill in
+# (via ``get_schema_component``).
+
+_INDEX_KEEP_KEYS = ("type", "format")
+
+
+def _component_index_entry(body: Any) -> dict[str, Any]:
+    """Summarise one component into the index shape.
+
+    Keeps:
+      * ``type`` and ``format`` (top-level only),
+      * ``enum`` for primitives,
+      * ``required`` for objects,
+      * ``oneOf`` / ``anyOf`` / ``allOf`` presence flags so the agent
+        knows the component is a union and must fetch the full body
+        before guessing a shape,
+      * ``items_ref`` for arrays whose items are a single ``$ref``,
+      * ``child_refs`` — every ``$ref`` reachable from this component
+        (deduplicated, sorted), so the agent can plan its drill-downs
+        without first fetching the body.
+    """
+    if not isinstance(body, dict):
+        return {}
+    entry: dict[str, Any] = {}
+    for k in _INDEX_KEEP_KEYS:
+        if k in body:
+            entry[k] = body[k]
+    enum = body.get("enum")
+    if isinstance(enum, list) and enum:
+        entry["enum"] = enum
+    required = body.get("required")
+    if isinstance(required, list) and required:
+        entry["required"] = [r for r in required if isinstance(r, str)]
+    for kw in ("oneOf", "anyOf", "allOf"):
+        if isinstance(body.get(kw), list) and body[kw]:
+            entry[kw] = True
+    if body.get("type") == "array":
+        items = body.get("items")
+        if isinstance(items, dict) and "$ref" in items:
+            entry["items_ref"] = items["$ref"]
+    refs: set[str] = set()
+    _collect_refs(body, refs)
+    if refs:
+        entry["child_refs"] = sorted(refs)
+    return entry
+
+
+def _build_components_index(side: Any) -> dict[str, dict]:
+    """Project a full components side-table to its per-section index."""
+    if not isinstance(side, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for section, entries in side.items():
+        if not isinstance(entries, dict):
+            continue
+        out[section] = {
+            name: _component_index_entry(body) for name, body in entries.items()
+        }
+    return out
 
 
 def project_glossary(spec: dict, method: str, path: str) -> dict | None:
@@ -803,7 +918,6 @@ def project_glossary(spec: dict, method: str, path: str) -> dict | None:
 
     payload["components"] = components_out
     return payload
-
 
 
 # ---------------------------------------------------------------------------

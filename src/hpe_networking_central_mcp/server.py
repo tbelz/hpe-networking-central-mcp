@@ -71,13 +71,12 @@ graph_manager.create_fts_indexes()
 
 
 # ── Knowledge DB schema-version check ────────────────────────────────
-# Version 3 introduces normalized OAS specs and the bodySkeletonJson /
-# bodyGlossaryJson columns required by get_api_endpoint_detail and
-# get_api_endpoint_glossary.  An older DB will lack those columns and
-# the per-endpoint detail tools will fail at query time — refuse to
-# start so the operator notices immediately rather than seeing
-# silent fallbacks for weeks.
-_KNOWLEDGE_SCHEMA_VERSION = 3
+# Version 4 splits the previous ``$components`` blob out of
+# ``bodySkeletonJson`` into its own ``bodyComponentsJson`` column;
+# the skeleton now carries only a ``$components_index``.  An older DB
+# will lack the new column and ``get_schema_component`` would fail at
+# query time, so refuse to start so the operator notices immediately.
+_KNOWLEDGE_SCHEMA_VERSION = 4
 
 
 def _check_knowledge_schema_version() -> None:
