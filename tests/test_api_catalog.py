@@ -324,6 +324,23 @@ class TestGetApiEndpointDetail:
         assert "request_body" not in result
         assert "method" not in result  # meta excluded
 
+    def test_parts_filter_meta_includes_operation_id(self, tools):
+        # ``operation_id`` (snake_case) must survive the ``meta`` filter.
+        result = json.loads(tools["get_api_endpoint_detail"](
+            method="POST", path="/config/v1/vlans",
+            parts=["meta"]))
+        assert "operation_id" in result
+        assert "method" in result
+
+    def test_parts_filter_all_unknown_returns_full_skeleton(self, tools):
+        # When every requested part is unknown the filter must not apply
+        # and the full skeleton is returned instead of an empty dict.
+        result = json.loads(tools["get_api_endpoint_detail"](
+            method="POST", path="/config/v1/vlans",
+            parts=["nope", "also_unknown"]))
+        assert "method" in result
+        assert "request_body" in result
+
 
 # ── get_schema_component ─────────────────────────────────────────────
 

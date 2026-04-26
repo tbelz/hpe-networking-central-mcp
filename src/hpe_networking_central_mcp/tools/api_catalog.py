@@ -377,19 +377,22 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
         # operation-level fields (method, path, summary, category, etc.);
         # other names map to top-level keys produced by ``project_skeleton``.
         if parts:
-            _META_KEYS = {"method", "path", "summary", "category", "operationId", "deprecated", "tags"}
+            _META_KEYS = {"method", "path", "summary", "category", "operation_id", "deprecated", "tags"}
             _SECTION_KEYS = {"parameters", "request_body", "required_paths", "responses", "$components_index"}
+            _KNOWN_PARTS = {"meta"} | _SECTION_KEYS
             requested_parts = {str(p) for p in parts}
-            keep_meta = "meta" in requested_parts
-            keep_sections = requested_parts & _SECTION_KEYS
-            for eid_key, d in list(details_by_eid.items()):
-                filtered: dict[str, Any] = {}
-                for k, v in d.items():
-                    if k in keep_sections:
-                        filtered[k] = v
-                    elif keep_meta and k in _META_KEYS:
-                        filtered[k] = v
-                details_by_eid[eid_key] = filtered
+            known_requested_parts = requested_parts & _KNOWN_PARTS
+            if known_requested_parts:
+                keep_meta = "meta" in known_requested_parts
+                keep_sections = known_requested_parts & _SECTION_KEYS
+                for eid_key, d in list(details_by_eid.items()):
+                    filtered: dict[str, Any] = {}
+                    for k, v in d.items():
+                        if k in keep_sections:
+                            filtered[k] = v
+                        elif keep_meta and k in _META_KEYS:
+                            filtered[k] = v
+                    details_by_eid[eid_key] = filtered
 
         # Record inspection for the policy gate. Any endpoint the DB
         # actually returned a row for counts as inspected — even if the

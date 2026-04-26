@@ -47,8 +47,9 @@ direct API reads and reusable Python scripts.
        are usually enough to map a config value onto the right field.
        This is what you call by default. Use `parts=["meta",
        "parameters"]` (or any subset of `meta`, `parameters`,
-       `request_body`, `responses`, `$components_index`) to keep the
-       payload tight when you only need part of the skeleton.
+       `request_body`, `responses`, `$components_index`,
+       `required_paths`) to keep the payload tight when you only need
+       part of the skeleton.
      • `get_schema_component(method, path, name)` — fetch the full
        prose-stripped body of one component named in the
        `$components_index`. Use this when the index alone is not
