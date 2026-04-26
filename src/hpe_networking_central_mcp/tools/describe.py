@@ -56,6 +56,16 @@ _RESPONSE_BODY_QUERY = (
     "ORDER BY p.name"
 )
 
+# Cypher: walk endpoint -> parameter list (path/query/header parameters).
+_PARAMETERS_QUERY = (
+    "MATCH (e:ApiEndpoint {endpoint_id: $eid})-[:HAS_PARAMETER]->(p:Parameter) "
+    "RETURN p.name AS name, p.location AS location, p.required AS required, "
+    "p.type AS type, p.format AS format, p.enumValues AS enumValues, "
+    "p.pattern AS pattern, p.inferredHint AS inferredHint, "
+    "p.description AS description "
+    "ORDER BY p.location, p.name"
+)
+
 
 def _normalise_path(p: str) -> str:
     p = p.strip()
@@ -64,7 +74,9 @@ def _normalise_path(p: str) -> str:
 
 def _row_to_property(row: dict) -> dict:
     """Shape one Cypher row into the public property record."""
-    ext_raw = row.get("extensionsJson") or ""
+    from ..oas_schema_graph import decode_json_blob
+
+    ext_raw = decode_json_blob(row.get("extensionsJson") or "")
     extensions: dict[str, Any] = {}
     if ext_raw:
         try:
@@ -105,13 +117,33 @@ def describe_endpoint(
 ) -> dict:
     """Programmatic entrypoint (also used by tests).
 
-    Returns a dict with keys ``method``, ``path``, ``source``
-    ("requestBody" or "response:200"), ``properties`` (list), and
-    ``deviceType`` (echoed). When the endpoint has neither a request
-    body nor a 200 response with properties, returns an empty
-    ``properties`` list.
+    Returns a dict with keys ``method``, ``path``, ``parameters``
+    (list of path/query/header parameter records), ``source``
+    ("requestBody" or "response:200"), ``properties`` (list of body
+    leaf-property records), and ``deviceType`` (echoed). When the
+    endpoint has neither a request body nor a 200 response with
+    properties, ``properties`` is empty; ``parameters`` is independent
+    of the body and may still be populated.
     """
     eid = f"{method.upper()}:{_normalise_path(path)}"
+    # Parameters are independent of body/response — always query them.
+    param_rows = graph_manager.query(
+        _PARAMETERS_QUERY, {"eid": eid}, read_only=True
+    )
+    parameters = [
+        {
+            "name": r.get("name", ""),
+            "location": r.get("location", ""),
+            "required": bool(r.get("required") or False),
+            "type": r.get("type", ""),
+            "format": r.get("format", ""),
+            "enumValues": list(r.get("enumValues") or []),
+            "pattern": r.get("pattern", ""),
+            "inferredHint": r.get("inferredHint", ""),
+            "description": r.get("description", ""),
+        }
+        for r in param_rows
+    ]
     rows = graph_manager.query(
         _REQUEST_BODY_QUERY, {"eid": eid}, read_only=True
     )
@@ -126,7 +158,8 @@ def describe_endpoint(
             "method": method.upper(),
             "path": _normalise_path(path),
             "deviceType": device_type or "",
-            "source": "",
+            "source": "" if not parameters else "parameters-only",
+            "parameters": parameters,
             "properties": [],
         }
     props = [_row_to_property(r) for r in rows]
@@ -137,6 +170,7 @@ def describe_endpoint(
         "path": _normalise_path(path),
         "deviceType": device_type or "",
         "source": source,
+        "parameters": parameters,
         "properties": props,
     }
 
@@ -154,37 +188,45 @@ def register_describe_tools(
         path: str,
         deviceType: str | None = None,
     ) -> str:
-        """Field-by-field guide for assembling an endpoint's body.
+        """Field-by-field guide for assembling an endpoint call.
 
-        Returns one record per leaf property of the endpoint's request
-        body (or 200 response if the endpoint has no request body),
-        already flattened across ``allOf`` branches. Use this instead of
-        reading ``get_api_endpoint_detail`` when you intend to construct
-        a call body.
+        Returns the request parameters (path/query/header) plus one
+        record per leaf property of the endpoint's request body (or 200
+        response if the endpoint has no request body), already
+        flattened across ``allOf`` branches. Use this whenever you
+        intend to construct a Central / GreenLake API call so you know
+        every required field, type, and enum without having to read raw
+        OAS blobs.
 
-        Each record contains:
+        The result has two top-level lists:
 
-          - ``component`` — the owning SchemaComponent name
-          - ``name`` — the field name as it appears in JSON
-          - ``type`` / ``format`` — JSON Schema type info
-          - ``required`` — whether the field is required on its parent
-          - ``readOnly`` — true for response-only fields; **omit these
-            from POST/PUT/PATCH bodies**
-          - ``enumValues`` — allowed string values when constrained
-          - ``description`` — human-readable description if present
-          - ``supportedDeviceTypes`` — the value of
-            ``x-supportedDeviceType`` for that field (empty list means
-            "applies to all device types")
-          - ``yangPath`` — the value of ``x-path`` (YANG mapping) when
-            present, otherwise ``""``
-          - ``inheritedFrom`` — name of the ``allOf`` branch that
-            contributed the property, or ``""`` for direct properties
-          - ``extensions`` — the full ``x-*`` vendor-extension dict
-            (includes the keys promoted to typed columns above)
+          - ``parameters`` — request parameters with ``name``,
+            ``location`` (``path``/``query``/``header``/``cookie``),
+            ``required``, ``type``, ``format``, ``enumValues``,
+            ``pattern``, ``inferredHint`` (e.g. ``pagination``,
+            ``comma-list``, ``odata-filter``), and ``description``.
+          - ``properties`` — body leaf properties (request body if
+            present, otherwise 200 response). Each record contains:
 
-        When ``deviceType`` is supplied, only fields whose
-        ``supportedDeviceTypes`` list contains it (or is empty) are
-        returned. Pair with ``query_graph`` for ad-hoc filtering needs.
+              * ``component`` — the owning SchemaComponent name
+              * ``name`` — the field name as it appears in JSON
+              * ``type`` / ``format`` — JSON Schema type info
+              * ``required`` — whether the field is required on its parent
+              * ``readOnly`` — true for response-only fields; **omit
+                these from POST/PUT/PATCH bodies**
+              * ``enumValues`` — allowed string values when constrained
+              * ``description`` — human-readable description if present
+              * ``supportedDeviceTypes`` — value of
+                ``x-supportedDeviceType`` (empty list = all device types)
+              * ``yangPath`` — value of ``x-path`` (YANG mapping) when present
+              * ``inheritedFrom`` — name of the ``allOf`` branch that
+                contributed the property, or ``""`` for direct properties
+              * ``extensions`` — full ``x-*`` vendor-extension dict
+
+        When ``deviceType`` is supplied, body properties whose
+        ``supportedDeviceTypes`` list does not contain it (and is
+        non-empty) are filtered out. ``parameters`` are not filtered.
+        Pair with ``query_graph`` for ad-hoc filtering needs.
 
         Args:
             method: HTTP method, e.g. ``"POST"``.
@@ -195,8 +237,9 @@ def register_describe_tools(
 
         Returns:
             JSON string with ``method``, ``path``, ``deviceType``,
-            ``source`` (``requestBody`` / ``response:200``), and
-            ``properties`` (list of records as above).
+            ``source`` (``requestBody`` / ``response:200`` /
+            ``parameters-only`` / ``""``), ``parameters`` (list), and
+            ``properties`` (list).
         """
         gm = graph_manager
         if gm is None or not gm.is_available:

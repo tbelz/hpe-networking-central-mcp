@@ -70,11 +70,16 @@ New node tables (additions to `KNOWLEDGE_NODE_TABLES`):
   `required STRING[]`, `enum STRING[]`, `bodyJson` (the
   prose-stripped full body — moved here from
   `ApiEndpoint.bodyComponentsJson`).
-* `ApiEndpointSkeleton` — one row per endpoint, holding the full
-  pre-rendered `bodySkeletonJson` and `bodyGlossaryJson`. Reachable
-  from `ApiEndpoint` via `HAS_SKELETON`. This keeps the existing tools
-  cheap to back without duplicating the blob on every relationship
-  traversal.
+* `ApiEndpointSkeleton` — **(superseded in Phase 2E.)** Originally
+  one row per endpoint holding the full pre-rendered
+  `bodySkeletonJson` / `bodyGlossaryJson` blobs. Phase 2E removed this
+  node together with the `get_api_endpoint_detail` /
+  `get_api_endpoint_glossary` tools — the structured
+  `SchemaComponent` + `Property` subgraph supersedes it for every
+  discovery use case. `describe_endpoint_for_device(method, path,
+  deviceType?)` is the body-assembly entry point; it walks the
+  Property subgraph and returns request parameters plus every leaf
+  body field, already flattened across `allOf` branches.
 
 New relationship tables (additions to `KNOWLEDGE_REL_TABLES`):
 

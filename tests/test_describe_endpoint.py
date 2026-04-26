@@ -99,6 +99,29 @@ def _ntp_spec() -> dict:
             "/v1/aps": {
                 "get": {
                     "operationId": "listAps",
+                    "parameters": [
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "integer"},
+                            "description": "Page size.",
+                        },
+                        {
+                            "name": "siteIds",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"},
+                            "description": "Comma-separated site IDs.",
+                        },
+                        {
+                            "name": "serial",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                            "description": "Device serial.",
+                        },
+                    ],
                     "responses": {
                         "200": {
                             "description": "list",
@@ -220,6 +243,26 @@ class TestDescribeEndpoint:
         result = describe_endpoint(gm, "GET", "/v1/aps", device_type="Switch CX")
         names = {p["name"] for p in result["properties"]}
         assert "id" in names  # would have been filtered if we required exact match
+
+    def test_includes_request_parameters(self, gm):
+        """Parameters (path/query/header) must be returned alongside body props."""
+        result = describe_endpoint(gm, "GET", "/v1/aps")
+        params = result["parameters"]
+        assert isinstance(params, list)
+        by_name = {p["name"]: p for p in params}
+        assert {"limit", "siteIds", "serial"} <= set(by_name)
+        assert by_name["serial"]["location"] == "path"
+        assert by_name["serial"]["required"] is True
+        assert by_name["limit"]["inferredHint"] == "pagination"
+        # Lower-cased "ids" suffix should produce comma-list hint
+        # (regression: previously matched only "Ids" after lowercasing).
+        assert by_name["siteIds"]["inferredHint"] == "comma-list"
+
+    def test_parameters_present_for_post_with_no_path_params(self, gm):
+        """Endpoints without parameters return an empty list, not a missing key."""
+        result = describe_endpoint(gm, "POST", "/v1/ntp")
+        assert "parameters" in result
+        assert result["parameters"] == []
 
 
 class TestRegisterTool:

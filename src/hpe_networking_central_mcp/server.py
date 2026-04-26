@@ -96,8 +96,8 @@ def _check_knowledge_schema_version() -> None:
             f"server-required version {_KNOWLEDGE_SCHEMA_VERSION}. "
             "Re-run scripts/build_knowledge_db.py or wait for the next "
             "knowledge-db release. Refusing to start to avoid serving "
-            "broken get_api_endpoint_detail / get_api_endpoint_glossary "
-            "responses."
+            "stale describe_endpoint_for_device / query_graph results "
+            "against an out-of-date schema."
         )
         logger.error("knowledge_schema_version_mismatch", expected=_KNOWLEDGE_SCHEMA_VERSION, found=found)
         raise SystemExit(msg)
@@ -305,8 +305,6 @@ register_execution_tools(mcp, settings)
 register_graph_tools(mcp, settings, graph_manager)
 register_script_tools(mcp, settings, graph_manager)
 register_catalog_tools(mcp, settings, graph_manager)
-register_describe_tools(mcp, settings, graph_manager)
-from .tools.describe import register_describe_tools
 register_describe_tools(mcp, settings, graph_manager)
 register_api_call_tools(mcp, settings, client)
 if glp_client is not None:

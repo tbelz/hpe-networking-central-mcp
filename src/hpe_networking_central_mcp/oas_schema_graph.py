@@ -20,9 +20,12 @@ build ordering does not become a hard constraint.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
-from typing import Any, Iterable
+from typing import Any
+
+import pyarrow as pa
 
 from .oas_normalize import (
     _extract_referenced_components,
@@ -31,23 +34,38 @@ from .oas_normalize import (
 )
 
 
-# ── Cypher literal escaping (real_ladybug parameter binding bug) ────
+# ── Legacy JSON-blob decoder ────────────────────────────────────────
+#
+# Earlier builds tagged JSON-string columns with a ``b64:`` prefix to
+# work around real_ladybug 0.15.x prepared-statement type-inference
+# bugs. The current writer uses literal-embedded UNWIND (no
+# parameters), so plain JSON is now stored directly. The decoder is
+# kept tolerant so DBs built with the old encoder still read cleanly.
+_JSON_BLOB_PREFIX = "b64:"
 
 
-def _esc(value: str) -> str:
-    """Escape a Python string for inline embedding as a Cypher string literal."""
-    return value.replace("\\", "\\\\").replace("'", "\\'")
+def decode_json_blob(stored: str) -> str:
+    """Return the JSON text for ``stored``; tolerates legacy b64 blobs."""
+    if not stored:
+        return ""
+    if stored.startswith(_JSON_BLOB_PREFIX):
+        return base64.b64decode(stored[len(_JSON_BLOB_PREFIX):]).decode("utf-8")
+    return stored
 
 
-def _str_list_literal(values: Iterable[str]) -> str:
-    """Emit a Cypher list literal of strings (real_ladybug rejects STRING[] params).
-
-    Empty lists need an explicit CAST so Kuzu can infer the element type.
-    """
-    items = [f"'{_esc(v)}'" for v in values if isinstance(v, str)]
-    if not items:
-        return "CAST([] AS STRING[])"
-    return "[" + ", ".join(items) + "]"
+# ── Cypher literal escaping (real_ladybug parameter-binding bug) ────
+#
+# Earlier builds rendered every value as a Cypher literal to bypass
+# real_ladybug 0.15.x prepared-statement bugs (auto-inferred MAP from
+# JSON strings, ANY[] vs STRING[] inference variance across rows, and
+# an ``unordered_map::at`` crash on
+# ``UNWIND $rows AS r MATCH ... MERGE rel``). The current writer uses
+# ``COPY ... FROM $df`` with PyArrow tables (the documented bulk-load
+# path), which avoids prepared statements AND MERGE entirely — Ladybug
+# upstream issue #285 is "WONTFIX" for bulk MERGE.
+#
+# Nothing in this module emits MERGE statements anymore; primary-key
+# deduplication happens in Python before COPY runs.
 
 
 # ── Component IDs ────────────────────────────────────────────────────
@@ -98,7 +116,7 @@ def _infer_param_hint(param: dict) -> str:
         return "odata-filter"
     if name in ("orderby", "$orderby", "order_by"):
         return "odata-orderby"
-    if "csv" in name or name.endswith("_list") or name.endswith("Ids"):
+    if "csv" in name or name.endswith("_list") or name.endswith("ids"):
         if schema.get("type") == "string":
             return "comma-list"
     if name in ("limit", "offset", "page", "page_size"):
@@ -181,29 +199,431 @@ def _name_for_ref(ref: str) -> str:
 # ── Public API ──────────────────────────────────────────────────────
 
 
-def populate_schema_graph(
-    conn,
-    *,
-    spec_source: str,
-    spec: dict,
-    endpoints: list[tuple[str, str]],
-    emit_property_subgraph: bool = True,
-) -> dict:
-    """Decompose ``spec`` into schema-subgraph rows for ``endpoints``.
+# ── Vendor-extension columns promoted on Property nodes ────────────
 
-    Returns a small stats dict ``{"parameters": N, "request_bodies": N,
-    "responses": N, "components": N}`` for the build
-    log.  The helper assumes the underlying ``ApiEndpoint`` row exists;
-    endpoints without a row are silently skipped.
 
-    ``emit_property_subgraph`` controls whether Property nodes and
-    HAS_PROPERTY edges are written.  Disable for large platform specs
-    (GreenLake) that have no HPE vendor extensions — those specs never
-    carry ``x-supportedDeviceType`` / ``x-path`` so the property-level
-    graph adds no query value while adding many thousands of DB writes.
+_TYPED_EXT_DEVICE_TYPE = "x-supportedDeviceType"
+_TYPED_EXT_YANG_PATH = "x-path"
+
+
+def _collect_x_extensions(prop_body: dict) -> dict:
+    """Return every ``x-*`` key from ``prop_body`` as a plain dict."""
+    return {k: v for k, v in prop_body.items() if isinstance(k, str) and k.startswith("x-")}
+
+
+def _resolve_property_schema(prop_body: Any, full_components: dict) -> dict:
+    """Resolve a property's schema body, following one level of $ref."""
+    if not isinstance(prop_body, dict):
+        return {}
+    ref = prop_body.get("$ref")
+    if isinstance(ref, str):
+        target = _follow_ref(ref, full_components)
+        if isinstance(target, dict):
+            return target
+    return prop_body
+
+
+# ── Per-spec write batch (UNWIND-flushed) ───────────────────────────
+
+
+class _Batch:
+    """Buffers schema-subgraph writes for a single spec.
+
+    All node MERGEs and edge MERGEs are accumulated in plain Python
+    lists and flushed in O(few-dozen) ``UNWIND $rows`` statements at
+    ``flush()`` time. This replaces the previous ~5 statements per
+    endpoint × ~2k endpoints × ~10 properties each pattern (which
+    auto-committed tens of thousands of single-row transactions).
+
+    Edge pair lists are deduped on insert via small ``set`` indexes so
+    we never MATCH/MERGE the same edge twice.
     """
-    components = spec.get("components") or {}
-    stats = {
+
+    __slots__ = (
+        "params",
+        "request_bodies",
+        "responses",
+        "components",
+        "properties",
+        "has_param",
+        "has_request_body",
+        "body_refs",
+        "has_response",
+        "response_refs",
+        "has_property",
+        "property_of_type",
+        "composed_of",
+        "references",
+        "_seen_params",
+        "_seen_request_bodies",
+        "_seen_responses",
+        "_seen_components",
+        "_seen_properties",
+        "_seen_has_param",
+        "_seen_has_request_body",
+        "_seen_body_refs",
+        "_seen_has_response",
+        "_seen_response_refs",
+        "_seen_has_property",
+        "_seen_property_of_type",
+        "_seen_composed_of",
+        "_seen_references",
+    )
+
+    def __init__(self) -> None:
+        self.params: list[dict] = []
+        self.request_bodies: list[dict] = []
+        self.responses: list[dict] = []
+        self.components: list[dict] = []
+        self.properties: list[dict] = []
+        self.has_param: list[dict] = []
+        self.has_request_body: list[dict] = []
+        self.body_refs: list[dict] = []
+        self.has_response: list[dict] = []
+        self.response_refs: list[dict] = []
+        self.has_property: list[dict] = []
+        self.property_of_type: list[dict] = []
+        self.composed_of: list[dict] = []
+        self.references: list[dict] = []
+        self._seen_params: set[str] = set()
+        self._seen_request_bodies: set[str] = set()
+        self._seen_responses: set[str] = set()
+        self._seen_components: set[str] = set()
+        self._seen_properties: set[str] = set()
+        self._seen_has_param: set[tuple[str, str]] = set()
+        self._seen_has_request_body: set[tuple[str, str]] = set()
+        self._seen_body_refs: set[tuple[str, str]] = set()
+        self._seen_has_response: set[tuple[str, str]] = set()
+        self._seen_response_refs: set[tuple[str, str]] = set()
+        self._seen_has_property: set[tuple[str, str]] = set()
+        self._seen_property_of_type: set[tuple[str, str]] = set()
+        self._seen_composed_of: set[tuple[str, str, str]] = set()
+        self._seen_references: set[tuple[str, str, str]] = set()
+
+    # ── Node MERGE collectors ──────────────────────────────────
+
+    def add_parameter(self, row: dict) -> bool:
+        pid = row["parameter_id"]
+        if pid in self._seen_params:
+            return False
+        self._seen_params.add(pid)
+        self.params.append(row)
+        return True
+
+    def add_request_body(self, row: dict) -> bool:
+        rid = row["request_body_id"]
+        if rid in self._seen_request_bodies:
+            return False
+        self._seen_request_bodies.add(rid)
+        self.request_bodies.append(row)
+        return True
+
+    def add_response(self, row: dict) -> bool:
+        rid = row["response_id"]
+        if rid in self._seen_responses:
+            return False
+        self._seen_responses.add(rid)
+        self.responses.append(row)
+        return True
+
+    def add_component(self, row: dict) -> bool:
+        """Returns True if newly added, False if already buffered."""
+        cid = row["component_id"]
+        if cid in self._seen_components:
+            return False
+        self._seen_components.add(cid)
+        self.components.append(row)
+        return True
+
+    def add_property(self, row: dict) -> bool:
+        pid = row["property_id"]
+        if pid in self._seen_properties:
+            return False
+        self._seen_properties.add(pid)
+        self.properties.append(row)
+        return True
+
+    # ── Edge MERGE collectors ──────────────────────────────────
+
+    def add_has_param(self, eid: str, pid: str) -> bool:
+        key = (eid, pid)
+        if key in self._seen_has_param:
+            return False
+        self._seen_has_param.add(key)
+        self.has_param.append({"a": eid, "b": pid})
+        return True
+
+    def add_has_request_body(self, eid: str, rid: str) -> bool:
+        key = (eid, rid)
+        if key in self._seen_has_request_body:
+            return False
+        self._seen_has_request_body.add(key)
+        self.has_request_body.append({"a": eid, "b": rid})
+        return True
+
+    def add_body_ref(self, rid: str, cid: str) -> bool:
+        key = (rid, cid)
+        if key in self._seen_body_refs:
+            return False
+        self._seen_body_refs.add(key)
+        self.body_refs.append({"a": rid, "b": cid})
+        return True
+
+    def add_has_response(self, eid: str, rid: str) -> bool:
+        key = (eid, rid)
+        if key in self._seen_has_response:
+            return False
+        self._seen_has_response.add(key)
+        self.has_response.append({"a": eid, "b": rid})
+        return True
+
+    def add_response_ref(self, rid: str, cid: str) -> bool:
+        key = (rid, cid)
+        if key in self._seen_response_refs:
+            return False
+        self._seen_response_refs.add(key)
+        self.response_refs.append({"a": rid, "b": cid})
+        return True
+
+    def add_has_property(self, cid: str, pid: str) -> bool:
+        key = (cid, pid)
+        if key in self._seen_has_property:
+            return False
+        self._seen_has_property.add(key)
+        self.has_property.append({"a": cid, "b": pid})
+        return True
+
+    def add_property_of_type(self, pid: str, cid: str) -> bool:
+        key = (pid, cid)
+        if key in self._seen_property_of_type:
+            return False
+        self._seen_property_of_type.add(key)
+        self.property_of_type.append({"a": pid, "b": cid})
+        return True
+
+    def add_composed_of(self, parent_cid: str, child_cid: str, kind: str) -> bool:
+        key = (parent_cid, child_cid, kind)
+        if key in self._seen_composed_of:
+            return False
+        self._seen_composed_of.add(key)
+        self.composed_of.append({"a": parent_cid, "b": child_cid, "kind": kind})
+        return True
+
+    def add_reference(self, parent_cid: str, child_cid: str, via: str) -> bool:
+        key = (parent_cid, child_cid, via)
+        if key in self._seen_references:
+            return False
+        self._seen_references.add(key)
+        self.references.append({"a": parent_cid, "b": child_cid, "via": via})
+        return True
+
+    # ── Flush ──────────────────────────────────────────────────
+
+    def flush(self, conn) -> None:
+        """Bulk-load every collector via ``COPY ... FROM $df`` with
+        in-memory PyArrow tables.
+
+        Avoids both the real_ladybug 0.15.x prepared-statement bugs and
+        the documented MERGE-via-UNWIND anti-pattern (LadybugDB issue
+        #285, WONTFIX). Primary-key deduplication has already been
+        done in Python by the per-batch ``_seen_*`` sets, so each
+        ``COPY`` runs with ``ignore_errors=true`` only as belt-and-
+        braces against re-running the helper twice on the same DB
+        (idempotent for tests).
+
+        ``COPY`` requires nodes to exist before any rel rows that
+        reference them, so node tables are loaded first in dependency
+        order.
+        """
+        # ── Node tables (in dependency order) ──
+        _copy_node_table(
+            conn,
+            "Parameter",
+            self.params,
+            schema=_PARAM_SCHEMA,
+        )
+        _copy_node_table(
+            conn,
+            "RequestBody",
+            self.request_bodies,
+            schema=_REQUEST_BODY_SCHEMA,
+        )
+        _copy_node_table(
+            conn,
+            "Response",
+            self.responses,
+            schema=_RESPONSE_SCHEMA,
+        )
+        _copy_node_table(
+            conn,
+            "SchemaComponent",
+            self.components,
+            schema=_COMPONENT_SCHEMA,
+        )
+        _copy_node_table(
+            conn,
+            "Property",
+            self.properties,
+            schema=_PROPERTY_SCHEMA,
+        )
+
+        # ── Rel tables (require both endpoints to be loaded) ──
+        _copy_rel_table(conn, "HAS_PARAMETER", self.has_param, _REL_AB_SCHEMA)
+        _copy_rel_table(conn, "HAS_REQUEST_BODY", self.has_request_body, _REL_AB_SCHEMA)
+        _copy_rel_table(conn, "BODY_REFERENCES", self.body_refs, _REL_AB_SCHEMA)
+        _copy_rel_table(conn, "HAS_RESPONSE", self.has_response, _REL_AB_SCHEMA)
+        _copy_rel_table(conn, "RESPONSE_REFERENCES", self.response_refs, _REL_AB_SCHEMA)
+        _copy_rel_table(conn, "HAS_PROPERTY", self.has_property, _REL_AB_SCHEMA)
+        _copy_rel_table(conn, "PROPERTY_OF_TYPE", self.property_of_type, _REL_AB_SCHEMA)
+        _copy_rel_table(
+            conn, "COMPOSED_OF", self.composed_of, _REL_COMPOSED_OF_SCHEMA
+        )
+        _copy_rel_table(
+            conn, "REFERENCES", self.references, _REL_REFERENCES_SCHEMA
+        )
+
+
+# ── PyArrow schemas (column order MUST match graph/schema.py DDL) ───
+
+_PARAM_SCHEMA = pa.schema([
+    ("parameter_id", pa.string()),
+    ("endpoint_id", pa.string()),
+    ("name", pa.string()),
+    ("location", pa.string()),
+    ("required", pa.bool_()),
+    ("type", pa.string()),
+    ("format", pa.string()),
+    ("enumValues", pa.list_(pa.string())),
+    ("pattern", pa.string()),
+    ("inferredHint", pa.string()),
+    ("description", pa.string()),
+])
+
+_REQUEST_BODY_SCHEMA = pa.schema([
+    ("request_body_id", pa.string()),
+    ("endpoint_id", pa.string()),
+    ("content_type", pa.string()),
+    ("required", pa.bool_()),
+    ("root_component_ref", pa.string()),
+])
+
+_RESPONSE_SCHEMA = pa.schema([
+    ("response_id", pa.string()),
+    ("endpoint_id", pa.string()),
+    ("status", pa.string()),
+    ("content_type", pa.string()),
+    ("root_component_ref", pa.string()),
+])
+
+_COMPONENT_SCHEMA = pa.schema([
+    ("component_id", pa.string()),
+    ("spec_source", pa.string()),
+    ("section", pa.string()),
+    ("name", pa.string()),
+    ("type", pa.string()),
+    ("kind", pa.string()),
+    ("required", pa.list_(pa.string())),
+    ("enumValues", pa.list_(pa.string())),
+    ("bodyJson", pa.string()),
+])
+
+_PROPERTY_SCHEMA = pa.schema([
+    ("property_id", pa.string()),
+    ("parent_component_id", pa.string()),
+    ("name", pa.string()),
+    ("type", pa.string()),
+    ("format", pa.string()),
+    ("required", pa.bool_()),
+    ("enumValues", pa.list_(pa.string())),
+    ("description", pa.string()),
+    ("supportedDeviceTypes", pa.list_(pa.string())),
+    ("yangPath", pa.string()),
+    ("extensionsJson", pa.string()),
+    ("inheritedFrom", pa.string()),
+    ("readOnly", pa.bool_()),
+])
+
+# Rel schemas: first two columns are FROM/TO PKs; extra cols follow.
+_REL_AB_SCHEMA = pa.schema([
+    ("a", pa.string()),
+    ("b", pa.string()),
+])
+
+_REL_COMPOSED_OF_SCHEMA = pa.schema([
+    ("a", pa.string()),
+    ("b", pa.string()),
+    ("kind", pa.string()),
+])
+
+_REL_REFERENCES_SCHEMA = pa.schema([
+    ("a", pa.string()),
+    ("b", pa.string()),
+    ("via", pa.string()),
+])
+
+
+def _rows_to_pa(rows: list[dict], schema: pa.Schema) -> pa.Table:
+    """Materialise a list[dict] as a PyArrow table conforming to ``schema``.
+
+    Missing keys default to ``None`` (or ``""`` / ``[]`` for non-null
+    string/list columns). Column order follows ``schema``.
+    """
+    cols: dict[str, list] = {f.name: [] for f in schema}
+    for r in rows:
+        for f in schema:
+            v = r.get(f.name)
+            if v is None:
+                # Sensible defaults so Ladybug doesn't reject NULLs on
+                # non-nullable columns.
+                if pa.types.is_string(f.type):
+                    v = ""
+                elif pa.types.is_list(f.type):
+                    v = []
+                elif pa.types.is_boolean(f.type):
+                    v = False
+            cols[f.name].append(v)
+    return pa.table(cols, schema=schema)
+
+
+def _copy_node_table(
+    conn,
+    table: str,
+    rows: list[dict],
+    *,
+    schema: pa.Schema,
+) -> None:
+    """Bulk-load a node table from buffered rows."""
+    if not rows:
+        return
+    pa_table = _rows_to_pa(rows, schema)
+    conn.execute(
+        f"COPY {table} FROM $df (ignore_errors=true)",
+        parameters={"df": pa_table},
+    )
+
+
+def _copy_rel_table(
+    conn,
+    table: str,
+    rows: list[dict],
+    schema: pa.Schema,
+) -> None:
+    """Bulk-load a rel table from buffered rows.
+
+    Schema must list FROM column first, TO column second, then any
+    edge properties.
+    """
+    if not rows:
+        return
+    pa_table = _rows_to_pa(rows, schema)
+    conn.execute(
+        f"COPY {table} FROM $df (ignore_errors=true)",
+        parameters={"df": pa_table},
+    )
+
+
+def _empty_stats() -> dict:
+    return {
         "endpoints": 0,
         "parameters": 0,
         "request_bodies": 0,
@@ -213,15 +633,36 @@ def populate_schema_graph(
         "references": 0,
     }
 
-    # Track which (component_id, target_id, via) edges have been written
-    # so we do not double-insert REFERENCES even within a single call.
-    written_refs: set[tuple[str, str, str]] = set()
-    # Track which component_ids have already been MERGE-d so we only
-    # MERGE each once (cheaper + more deterministic logs).
-    written_components: set[str] = set()
-    # Track which property_ids have already been MERGE-d to avoid redundant
-    # writes from diamond-inheritance allOf fan-out.
-    written_props: set[str] = set()
+
+def _query_existing_eids(conn, requested_eids: list[str]) -> set[str]:
+    """One-shot lookup of which ApiEndpoint IDs already exist."""
+    if not requested_eids:
+        return set()
+    rows = conn.execute(
+        "UNWIND $eids AS eid MATCH (e:ApiEndpoint {endpoint_id: eid}) "
+        "RETURN e.endpoint_id AS eid",
+        parameters={"eids": requested_eids},
+    ).rows_as_dict()
+    return {r["eid"] for r in rows}
+
+
+def _collect_spec_into_batch(
+    batch: "_Batch",
+    *,
+    spec_source: str,
+    spec: dict,
+    endpoints: list[tuple[str, str]],
+    existing_eids: set[str],
+    stats: dict,
+    emit_property_subgraph: bool = True,
+) -> None:
+    """Pure-Python collection: walk one spec, append rows to ``batch``.
+
+    No DB I/O. The caller is responsible for flushing the batch via
+    ``batch.flush(conn)`` (or ``flush_batch`` below) after all
+    interesting specs have been collected.
+    """
+    components = spec.get("components") or {}
 
     for method, path in endpoints:
         method_u = method.upper()
@@ -229,13 +670,7 @@ def populate_schema_graph(
         if op is None:
             continue
         eid = f"{method_u}:{path}"
-
-        # ── Verify the ApiEndpoint row exists; skip silently otherwise.
-        rows = list(conn.execute(
-            "MATCH (e:ApiEndpoint {endpoint_id: $eid}) RETURN COUNT(e) AS c",
-            parameters={"eid": eid},
-        ).rows_as_dict())
-        if not rows or rows[0]["c"] == 0:
+        if eid not in existing_eids:
             continue
         stats["endpoints"] += 1
 
@@ -252,35 +687,23 @@ def populate_schema_graph(
             pname = resolved.get("name") or ""
             ploc = resolved.get("in") or ""
             param_id = f"{eid}#param:{ploc}:{pname or idx}"
-            enum_lit = _str_list_literal(
+            enum_vals = [
                 v for v in (schema.get("enum") or []) if isinstance(v, str)
-            )
-            conn.execute(
-                "MERGE (p:Parameter {parameter_id: $pid}) SET "
-                "p.endpoint_id = $eid, p.name = $name, p.location = $loc, "
-                "p.required = $req, p.type = $ty, p.format = $fmt, "
-                f"p.enumValues = {enum_lit}, "
-                "p.pattern = $pat, p.inferredHint = $ph, "
-                "p.description = $pdesc",
-                parameters={
-                    "pid": param_id,
-                    "eid": eid,
-                    "name": pname,
-                    "loc": ploc,
-                    "req": bool(resolved.get("required", False)),
-                    "ty": str(schema.get("type") or ""),
-                    "fmt": str(schema.get("format") or ""),
-                    "pat": str(schema.get("pattern") or ""),
-                    "ph": _infer_param_hint(resolved),
-                    "pdesc": str(resolved.get("description") or ""),
-                },
-            )
-            conn.execute(
-                "MATCH (e:ApiEndpoint {endpoint_id: $eid}), "
-                "(p:Parameter {parameter_id: $pid}) "
-                "MERGE (e)-[:HAS_PARAMETER]->(p)",
-                parameters={"eid": eid, "pid": param_id},
-            )
+            ]
+            batch.add_parameter({
+                "parameter_id": param_id,
+                "endpoint_id": eid,
+                "name": pname,
+                "location": ploc,
+                "required": bool(resolved.get("required", False)),
+                "type": str(schema.get("type") or ""),
+                "format": str(schema.get("format") or ""),
+                "enumValues": enum_vals,
+                "pattern": str(schema.get("pattern") or ""),
+                "inferredHint": _infer_param_hint(resolved),
+                "description": str(resolved.get("description") or ""),
+            })
+            batch.add_has_param(eid, param_id)
             stats["parameters"] += 1
 
         # ── Request body ──
@@ -295,38 +718,22 @@ def populate_schema_graph(
             media, schema = _pick_media_schema(content)
             rb_id = f"{eid}#requestBody"
             root_ref = _root_ref(schema) or ""
-            conn.execute(
-                "MERGE (rb:RequestBody {request_body_id: $rid}) SET "
-                "rb.endpoint_id = $eid, rb.content_type = $ct, "
-                "rb.required = $req, rb.root_component_ref = $rr",
-                parameters={
-                    "rid": rb_id,
-                    "eid": eid,
-                    "ct": media,
-                    "req": bool(rb_resolved.get("required", False)),
-                    "rr": root_ref,
-                },
-            )
-            conn.execute(
-                "MATCH (e:ApiEndpoint {endpoint_id: $eid}), "
-                "(rb:RequestBody {request_body_id: $rid}) "
-                "MERGE (e)-[:HAS_REQUEST_BODY]->(rb)",
-                parameters={"eid": eid, "rid": rb_id},
-            )
+            batch.add_request_body({
+                "request_body_id": rb_id,
+                "endpoint_id": eid,
+                "content_type": media,
+                "required": bool(rb_resolved.get("required", False)),
+                "root_component_ref": root_ref,
+            })
+            batch.add_has_request_body(eid, rb_id)
             stats["request_bodies"] += 1
-            # Link to root component if the body is a single $ref.
             if root_ref:
                 comp_id = _ensure_component_node(
-                    conn, spec_source, root_ref, components, written_components, written_props, stats,
+                    batch, spec_source, root_ref, components, stats,
                     emit_property_subgraph=emit_property_subgraph,
                 )
                 if comp_id:
-                    conn.execute(
-                        "MATCH (rb:RequestBody {request_body_id: $rid}), "
-                        "(c:SchemaComponent {component_id: $cid}) "
-                        "MERGE (rb)-[:BODY_REFERENCES]->(c)",
-                        parameters={"rid": rb_id, "cid": comp_id},
-                    )
+                    batch.add_body_ref(rb_id, comp_id)
 
         # ── Responses ──
         for status, resp in (op.get("responses") or {}).items():
@@ -341,42 +748,24 @@ def populate_schema_graph(
             media, schema = _pick_media_schema(content)
             resp_id = f"{eid}#response:{status}"
             root_ref = _root_ref(schema) or ""
-            conn.execute(
-                "MERGE (r:Response {response_id: $rid}) SET "
-                "r.endpoint_id = $eid, r.status = $st, "
-                "r.content_type = $ct, r.root_component_ref = $rr",
-                parameters={
-                    "rid": resp_id,
-                    "eid": eid,
-                    "st": str(status),
-                    "ct": media,
-                    "rr": root_ref,
-                },
-            )
-            conn.execute(
-                "MATCH (e:ApiEndpoint {endpoint_id: $eid}), "
-                "(r:Response {response_id: $rid}) "
-                "MERGE (e)-[:HAS_RESPONSE]->(r)",
-                parameters={"eid": eid, "rid": resp_id},
-            )
+            batch.add_response({
+                "response_id": resp_id,
+                "endpoint_id": eid,
+                "status": str(status),
+                "content_type": media,
+                "root_component_ref": root_ref,
+            })
+            batch.add_has_response(eid, resp_id)
             stats["responses"] += 1
             if root_ref:
                 comp_id = _ensure_component_node(
-                    conn, spec_source, root_ref, components, written_components, written_props, stats,
+                    batch, spec_source, root_ref, components, stats,
                     emit_property_subgraph=emit_property_subgraph,
                 )
                 if comp_id:
-                    conn.execute(
-                        "MATCH (r:Response {response_id: $rid}), "
-                        "(c:SchemaComponent {component_id: $cid}) "
-                        "MERGE (r)-[:RESPONSE_REFERENCES]->(c)",
-                        parameters={"rid": resp_id, "cid": comp_id},
-                    )
+                    batch.add_response_ref(resp_id, comp_id)
 
-        # ── Walk transitively-referenced components + REFERENCES edges ──
-        # Use the canonical ref walker to discover every reachable
-        # component, then for each one, MERGE its node and its outgoing
-        # REFERENCES edges with their `via` site recorded.
+        # ── REFERENCES walker ──
         refs_root: dict[str, Any] = {
             "parameters": op.get("parameters") or [],
             "requestBody": op.get("requestBody"),
@@ -389,57 +778,199 @@ def populate_schema_graph(
             for name, body in entries.items():
                 ref = f"#/components/{section}/{name}"
                 comp_id = _ensure_component_node(
-                    conn, spec_source, ref, components, written_components, written_props, stats,
+                    batch, spec_source, ref, components, stats,
                     emit_property_subgraph=emit_property_subgraph,
                 )
                 if not comp_id:
                     continue
-                # Outgoing REFERENCES edges from this component.
                 for child_ref, via in _walk_refs_with_site(body):
                     if not child_ref.startswith("#/components/"):
                         continue
                     child_id = _ensure_component_node(
-                        conn, spec_source, child_ref, components, written_components, written_props, stats,
+                        batch, spec_source, child_ref, components, stats,
                         emit_property_subgraph=emit_property_subgraph,
                     )
                     if not child_id or child_id == comp_id:
                         continue
-                    edge_key = (comp_id, child_id, via)
-                    if edge_key in written_refs:
-                        continue
-                    written_refs.add(edge_key)
-                    conn.execute(
-                        "MATCH (a:SchemaComponent {component_id: $aid}), "
-                        "(b:SchemaComponent {component_id: $bid}) "
-                        "MERGE (a)-[:REFERENCES {via: $via}]->(b)",
-                        parameters={"aid": comp_id, "bid": child_id, "via": via},
-                    )
-                    stats["references"] += 1
+                    if batch.add_reference(comp_id, child_id, via):
+                        stats["references"] += 1
 
+
+# ── Public API ──────────────────────────────────────────────────────
+
+
+# Public alias so callers (build script, tests) can import a typed Batch.
+SchemaGraphBatch = _Batch
+
+
+def new_batch() -> "_Batch":
+    """Return a fresh schema-graph batch for use with ``collect_into_batch``."""
+    return _Batch()
+
+
+def collect_into_batch(
+    batch: "_Batch",
+    *,
+    spec_source: str,
+    spec: dict,
+    endpoints: list[tuple[str, str]],
+    existing_eids: set[str],
+    emit_property_subgraph: bool = True,
+) -> dict:
+    """Collect schema-subgraph rows for ONE spec into ``batch`` (no DB I/O).
+
+    ``existing_eids`` must be a pre-computed set of ApiEndpoint IDs
+    that already exist in the DB. The caller filters with
+    ``query_existing_eids(conn, [...])`` before the loop so the build
+    script doesn't issue one MATCH query per spec.
+
+    Returns per-spec stats; the build script logs these to provide ETA.
+    """
+    stats = _empty_stats()
+    _collect_spec_into_batch(
+        batch,
+        spec_source=spec_source,
+        spec=spec,
+        endpoints=endpoints,
+        existing_eids=existing_eids,
+        stats=stats,
+        emit_property_subgraph=emit_property_subgraph,
+    )
     return stats
 
 
-# ── Component MERGE ──────────────────────────────────────────────────
+def query_existing_eids(conn, eids: list[str]) -> set[str]:
+    """Public helper: which of ``eids`` exist in the ApiEndpoint table."""
+    return _query_existing_eids(conn, eids)
+
+
+def _preseed_batch_from_db(conn, batch: "_Batch") -> None:
+    """Populate ``batch._seen_*`` sets from existing DB rows so a
+    re-run of ``populate_schema_graph`` becomes idempotent.
+
+    Only used by the per-spec wrapper. The build path runs against an
+    empty DB and skips this entirely.
+    """
+    # Nodes
+    for r in conn.execute("MATCH (p:Parameter) RETURN p.parameter_id AS k").rows_as_dict():
+        batch._seen_params.add(r["k"])
+    for r in conn.execute("MATCH (rb:RequestBody) RETURN rb.request_body_id AS k").rows_as_dict():
+        batch._seen_request_bodies.add(r["k"])
+    for r in conn.execute("MATCH (resp:Response) RETURN resp.response_id AS k").rows_as_dict():
+        batch._seen_responses.add(r["k"])
+    for r in conn.execute("MATCH (c:SchemaComponent) RETURN c.component_id AS k").rows_as_dict():
+        batch._seen_components.add(r["k"])
+    for r in conn.execute("MATCH (p:Property) RETURN p.property_id AS k").rows_as_dict():
+        batch._seen_properties.add(r["k"])
+    # Rels
+    for r in conn.execute(
+        "MATCH (e:ApiEndpoint)-[:HAS_PARAMETER]->(p:Parameter) "
+        "RETURN e.endpoint_id AS a, p.parameter_id AS b"
+    ).rows_as_dict():
+        batch._seen_has_param.add((r["a"], r["b"]))
+    for r in conn.execute(
+        "MATCH (e:ApiEndpoint)-[:HAS_REQUEST_BODY]->(rb:RequestBody) "
+        "RETURN e.endpoint_id AS a, rb.request_body_id AS b"
+    ).rows_as_dict():
+        batch._seen_has_request_body.add((r["a"], r["b"]))
+    for r in conn.execute(
+        "MATCH (rb:RequestBody)-[:BODY_REFERENCES]->(c:SchemaComponent) "
+        "RETURN rb.request_body_id AS a, c.component_id AS b"
+    ).rows_as_dict():
+        batch._seen_body_refs.add((r["a"], r["b"]))
+    for r in conn.execute(
+        "MATCH (e:ApiEndpoint)-[:HAS_RESPONSE]->(resp:Response) "
+        "RETURN e.endpoint_id AS a, resp.response_id AS b"
+    ).rows_as_dict():
+        batch._seen_has_response.add((r["a"], r["b"]))
+    for r in conn.execute(
+        "MATCH (resp:Response)-[:RESPONSE_REFERENCES]->(c:SchemaComponent) "
+        "RETURN resp.response_id AS a, c.component_id AS b"
+    ).rows_as_dict():
+        batch._seen_response_refs.add((r["a"], r["b"]))
+    for r in conn.execute(
+        "MATCH (c:SchemaComponent)-[:HAS_PROPERTY]->(p:Property) "
+        "RETURN c.component_id AS a, p.property_id AS b"
+    ).rows_as_dict():
+        batch._seen_has_property.add((r["a"], r["b"]))
+    for r in conn.execute(
+        "MATCH (p:Property)-[:PROPERTY_OF_TYPE]->(c:SchemaComponent) "
+        "RETURN p.property_id AS a, c.component_id AS b"
+    ).rows_as_dict():
+        batch._seen_property_of_type.add((r["a"], r["b"]))
+    for r in conn.execute(
+        "MATCH (a:SchemaComponent)-[r:COMPOSED_OF]->(b:SchemaComponent) "
+        "RETURN a.component_id AS a, b.component_id AS b, r.kind AS kind"
+    ).rows_as_dict():
+        batch._seen_composed_of.add((r["a"], r["b"], r["kind"]))
+    for r in conn.execute(
+        "MATCH (a:SchemaComponent)-[r:REFERENCES]->(b:SchemaComponent) "
+        "RETURN a.component_id AS a, b.component_id AS b, r.via AS via"
+    ).rows_as_dict():
+        batch._seen_references.add((r["a"], r["b"], r["via"]))
+
+
+def flush_batch(conn, batch: "_Batch") -> None:
+    """Flush an accumulated batch to the DB via COPY FROM PyArrow."""
+    batch.flush(conn)
+
+
+def populate_schema_graph(
+    conn,
+    *,
+    spec_source: str,
+    spec: dict,
+    endpoints: list[tuple[str, str]],
+    emit_property_subgraph: bool = True,
+) -> dict:
+    """Decompose ``spec`` into schema-subgraph rows for ``endpoints``
+    and bulk-load them via ``COPY ... FROM $df``.
+
+    Convenience wrapper that creates a batch, looks up existing
+    endpoint IDs, collects rows, and flushes — useful for tests and
+    one-off populations. The build script uses ``collect_into_batch`` +
+    ``flush_batch`` so all 1000+ specs share a single global batch and
+    one COPY per table.
+
+    Returns a stats dict with per-table counts. Endpoints whose
+    ``ApiEndpoint`` row is missing are silently skipped.
+    """
+    stats = _empty_stats()
+    requested_eids = [f"{m.upper()}:{p}" for m, p in endpoints]
+    if not requested_eids:
+        return stats
+    existing_eids = _query_existing_eids(conn, requested_eids)
+    batch = _Batch()
+    _preseed_batch_from_db(conn, batch)
+    _collect_spec_into_batch(
+        batch,
+        spec_source=spec_source,
+        spec=spec,
+        endpoints=endpoints,
+        existing_eids=existing_eids,
+        stats=stats,
+        emit_property_subgraph=emit_property_subgraph,
+    )
+    batch.flush(conn)
+    return stats
+
+
+
+# ── Component MERGE (buffered) ──────────────────────────────────────
 
 
 def _ensure_component_node(
-    conn,
+    batch: _Batch,
     spec_source: str,
     ref: str,
     full_components: dict,
-    written: set[str],
-    written_props: set[str],
     stats: dict,
     emit_property_subgraph: bool = True,
 ) -> str:
-    """MERGE the SchemaComponent node for ``ref`` and return its component_id.
+    """Buffer the SchemaComponent row + its property subgraph.
 
-    Also emits the property-level subgraph (HAS_PROPERTY edges to
-    ``Property`` nodes, COMPOSED_OF edges for allOf/oneOf/anyOf
-    branches) so the agent can query properties + vendor extensions
-    directly without reading ``bodyJson``.
-
-    Returns "" if the ref cannot be resolved.
+    Returns the component_id (deterministic) so callers can wire up
+    edges. Returns "" if the ref cannot be resolved.
     """
     if not ref.startswith("#/components/"):
         return ""
@@ -448,7 +979,7 @@ def _ensure_component_node(
     if not section or not name:
         return ""
     comp_id = _named_component_id(spec_source, section, name)
-    if comp_id in written:
+    if comp_id in batch._seen_components:
         return comp_id
 
     body = _follow_ref(ref, full_components)
@@ -456,103 +987,51 @@ def _ensure_component_node(
         return ""
     stripped = _strip_skeleton_keys(body)
     body_json = json.dumps(stripped)
-    enum_lit = _str_list_literal(
-        v for v in (body.get("enum") or []) if isinstance(v, str)
-    )
+    enum_vals = [v for v in (body.get("enum") or []) if isinstance(v, str)]
     _req = body.get("required")
-    required_lit = _str_list_literal(
-        v for v in (_req if isinstance(_req, list) else []) if isinstance(v, str)
-    )
-    conn.execute(
-        "MERGE (c:SchemaComponent {component_id: $cid}) SET "
-        "c.spec_source = $src, c.section = $sec, c.name = $name, "
-        "c.type = $ty, c.kind = $kind, "
-        f"c.required = {required_lit}, c.enumValues = {enum_lit}, "
-        f"c.bodyJson = '{_esc(body_json)}'",
-        parameters={
-            "cid": comp_id,
-            "src": spec_source,
-            "sec": section,
-            "name": name,
-            "ty": str(body.get("type") or ""),
-            "kind": _component_kind(body),
-        },
-    )
-    written.add(comp_id)
+    required = [v for v in (_req if isinstance(_req, list) else []) if isinstance(v, str)]
+
+    batch.add_component({
+        "component_id": comp_id,
+        "spec_source": spec_source,
+        "section": section,
+        "name": name,
+        "type": str(body.get("type") or ""),
+        "kind": _component_kind(body),
+        "required": required,
+        "enumValues": enum_vals,
+        "bodyJson": body_json,
+    })
     stats["components"] += 1
 
-    # ── Property-level extraction + allOf flattening (Phase 2C) ──
     if emit_property_subgraph:
         _emit_property_subgraph(
-            conn,
+            batch,
             spec_source=spec_source,
             parent_component_id=comp_id,
             parent_component_name=name,
             body=body,
             full_components=full_components,
-            written=written,
-            written_props=written_props,
             stats=stats,
         )
 
     return comp_id
 
 
-# ── Property-level extraction (ADR 009 Phase 2C) ────────────────────
-
-
-# Vendor extensions that get promoted to typed columns on Property
-# nodes for first-class Cypher filtering. Every other ``x-*`` key is
-# preserved verbatim under ``extensionsJson``.
-_TYPED_EXT_DEVICE_TYPE = "x-supportedDeviceType"
-_TYPED_EXT_YANG_PATH = "x-path"
-
-
-def _collect_x_extensions(prop_body: dict) -> dict:
-    """Return every ``x-*`` key from ``prop_body`` as a plain dict."""
-    return {k: v for k, v in prop_body.items() if isinstance(k, str) and k.startswith("x-")}
-
-
-def _resolve_property_schema(prop_body: Any, full_components: dict) -> dict:
-    """Resolve a property's schema body, following one level of $ref.
-
-    Returns the resolved dict (the original property body if no $ref).
-    """
-    if not isinstance(prop_body, dict):
-        return {}
-    ref = prop_body.get("$ref")
-    if isinstance(ref, str):
-        target = _follow_ref(ref, full_components)
-        if isinstance(target, dict):
-            return target
-    return prop_body
+# ── Property-level extraction (buffered) ────────────────────────────
 
 
 def _emit_property_subgraph(
-    conn,
+    batch: _Batch,
     *,
     spec_source: str,
     parent_component_id: str,
     parent_component_name: str,
     body: dict,
     full_components: dict,
-    written: set[str],
-    written_props: set[str],
     stats: dict,
 ) -> None:
-    """Walk ``body`` and emit ``HAS_PROPERTY`` / ``COMPOSED_OF`` /
-    ``PROPERTY_OF_TYPE`` edges for ``parent_component_id``.
-
-    For ``allOf`` branches:
-      - emits ``COMPOSED_OF {kind: 'allOf'}`` to every $ref branch,
-      - flattens leaf properties (both inline and from $ref branches)
-        onto the parent with ``inheritedFrom`` set to the originating
-        branch component (or "" for inline).
-
-    For ``oneOf`` / ``anyOf``: only emits ``COMPOSED_OF`` (no
-    flattening, since those are alternatives).
-    """
-    # Direct properties (no allOf composition).
+    """Emit HAS_PROPERTY / COMPOSED_OF / PROPERTY_OF_TYPE rows."""
     _req = body.get("required")
     own_required = set(
         v for v in (_req if isinstance(_req, list) else []) if isinstance(v, str)
@@ -561,7 +1040,7 @@ def _emit_property_subgraph(
     if isinstance(own_props, dict):
         for prop_name, prop_body in own_props.items():
             _emit_one_property(
-                conn,
+                batch,
                 spec_source=spec_source,
                 parent_component_id=parent_component_id,
                 prop_name=prop_name,
@@ -569,12 +1048,9 @@ def _emit_property_subgraph(
                 required=prop_name in own_required,
                 inherited_from="",
                 full_components=full_components,
-                written=written,
-                written_props=written_props,
                 stats=stats,
             )
 
-    # Composition keywords.
     for kind in ("allOf", "oneOf", "anyOf"):
         branches = body.get(kind)
         if not isinstance(branches, list):
@@ -584,79 +1060,50 @@ def _emit_property_subgraph(
                 continue
             ref = branch.get("$ref")
             if isinstance(ref, str):
-                # Materialise the target component (recurses into its
-                # own property subgraph) and record COMPOSED_OF.
                 target_id = _ensure_component_node(
-                    conn, spec_source, ref, full_components, written, written_props, stats
+                    batch, spec_source, ref, full_components, stats
                 )
                 if target_id:
-                    conn.execute(
-                        "MATCH (a:SchemaComponent {component_id: $aid}), "
-                        "(b:SchemaComponent {component_id: $bid}) "
-                        "MERGE (a)-[:COMPOSED_OF {kind: $kind}]->(b)",
-                        parameters={
-                            "aid": parent_component_id,
-                            "bid": target_id,
-                            "kind": kind,
-                        },
-                    )
-                # Flatten allOf so the parent exposes every reachable
-                # leaf in one HAS_PROPERTY hop.
+                    batch.add_composed_of(parent_component_id, target_id, kind)
                 if kind == "allOf":
                     target_body = _follow_ref(ref, full_components)
                     if isinstance(target_body, dict):
                         branch_name = _name_for_ref(ref)
                         _flatten_allof_properties(
-                            conn,
+                            batch,
                             spec_source=spec_source,
                             parent_component_id=parent_component_id,
                             branch_body=target_body,
                             inherited_from=branch_name,
                             full_components=full_components,
-                            written=written,
-                            written_props=written_props,
                             stats=stats,
                             _visited=frozenset({ref}),
                         )
             else:
-                # Inline branch — for allOf, walk its own properties
-                # (and any further nested allOf) onto the parent with
-                # inheritedFrom="" since they are defined directly here.
                 if kind == "allOf":
                     _flatten_allof_properties(
-                        conn,
+                        batch,
                         spec_source=spec_source,
                         parent_component_id=parent_component_id,
                         branch_body=branch,
                         inherited_from="",
                         full_components=full_components,
-                        written=written,
-                        written_props=written_props,
                         stats=stats,
                         _visited=frozenset(),
                     )
 
 
 def _flatten_allof_properties(
-    conn,
+    batch: _Batch,
     *,
     spec_source: str,
     parent_component_id: str,
     branch_body: dict,
     inherited_from: str,
     full_components: dict,
-    written: set[str],
-    written_props: set[str],
     stats: dict,
     _visited: frozenset[str] = frozenset(),
 ) -> None:
-    """Emit HAS_PROPERTY edges from the parent for every leaf property
-    contributed by an ``allOf`` branch (recurses through nested allOf).
-
-    ``_visited`` holds the set of $ref strings already on the current
-    recursion path — any ref that appears in it is a cycle and is
-    skipped to prevent infinite recursion.
-    """
     _req = branch_body.get("required")
     branch_required = set(
         v for v in (_req if isinstance(_req, list) else []) if isinstance(v, str)
@@ -665,7 +1112,7 @@ def _flatten_allof_properties(
     if isinstance(props, dict):
         for prop_name, prop_body in props.items():
             _emit_one_property(
-                conn,
+                batch,
                 spec_source=spec_source,
                 parent_component_id=parent_component_id,
                 prop_name=prop_name,
@@ -673,8 +1120,6 @@ def _flatten_allof_properties(
                 required=prop_name in branch_required,
                 inherited_from=inherited_from,
                 full_components=full_components,
-                written=written,
-                written_props=written_props,
                 stats=stats,
             )
 
@@ -686,39 +1131,35 @@ def _flatten_allof_properties(
             ref = sub.get("$ref")
             if isinstance(ref, str):
                 if ref in _visited:
-                    continue  # circular allOf — skip to prevent infinite recursion
+                    continue
                 target_body = _follow_ref(ref, full_components)
                 if isinstance(target_body, dict):
                     nested_name = _name_for_ref(ref) or inherited_from
                     _flatten_allof_properties(
-                        conn,
+                        batch,
                         spec_source=spec_source,
                         parent_component_id=parent_component_id,
                         branch_body=target_body,
                         inherited_from=nested_name,
                         full_components=full_components,
-                        written=written,
-                        written_props=written_props,
                         stats=stats,
                         _visited=_visited | {ref},
                     )
             else:
                 _flatten_allof_properties(
-                    conn,
+                    batch,
                     spec_source=spec_source,
                     parent_component_id=parent_component_id,
                     branch_body=sub,
                     inherited_from=inherited_from,
                     full_components=full_components,
-                    written=written,
-                    written_props=written_props,
                     stats=stats,
                     _visited=_visited,
                 )
 
 
 def _emit_one_property(
-    conn,
+    batch: _Batch,
     *,
     spec_source: str,
     parent_component_id: str,
@@ -727,19 +1168,10 @@ def _emit_one_property(
     required: bool,
     inherited_from: str,
     full_components: dict,
-    written: set[str],
-    written_props: set[str],
     stats: dict,
 ) -> None:
-    """MERGE one Property node + HAS_PROPERTY edge.
-
-    Also emits PROPERTY_OF_TYPE when the property's value is itself a
-    component reference (top-level $ref or array of $ref).
-    """
     resolved = _resolve_property_schema(prop_body, full_components)
     extensions = _collect_x_extensions(prop_body)
-    # If the resolved target also carries x-* (rare), merge into the
-    # property's extensions but do NOT clobber the call-site values.
     for k, v in _collect_x_extensions(resolved).items():
         extensions.setdefault(k, v)
 
@@ -761,7 +1193,6 @@ def _emit_one_property(
     prop_format = str(resolved.get("format") or "")
     description = str(resolved.get("description") or prop_body.get("description") or "")
 
-    # readOnly: prefer call-site over resolved target; default False.
     read_only_raw = prop_body.get("readOnly")
     if read_only_raw is None:
         read_only_raw = resolved.get("readOnly")
@@ -773,49 +1204,24 @@ def _emit_one_property(
     if inherited_from:
         property_id = f"{property_id}@{inherited_from}"
 
-    # Skip if we already emitted this exact property node (diamond inheritance
-    # or repeated allOf flattening paths can reach the same node twice).
-    if property_id in written_props:
-        return
-    written_props.add(property_id)
+    if batch.add_property({
+        "property_id": property_id,
+        "parent_component_id": parent_component_id,
+        "name": prop_name,
+        "type": prop_type,
+        "format": prop_format,
+        "required": bool(required),
+        "enumValues": enum_vals,
+        "description": description,
+        "supportedDeviceTypes": sdt,
+        "yangPath": yang_path,
+        "extensionsJson": extensions_json,
+        "inheritedFrom": inherited_from,
+        "readOnly": read_only,
+    }):
+        stats["properties"] = stats.get("properties", 0) + 1
+    batch.add_has_property(parent_component_id, property_id)
 
-    sdt_lit = _str_list_literal(sdt)
-    enum_lit = _str_list_literal(enum_vals)
-
-    conn.execute(
-        "MERGE (p:Property {property_id: $pid}) SET "
-        "p.parent_component_id = $parent, p.name = $pname, "
-        "p.type = $pty, p.format = $pfmt, p.required = $preq, "
-        f"p.enumValues = {enum_lit}, "
-        "p.description = $pdesc, "
-        f"p.supportedDeviceTypes = {sdt_lit}, "
-        "p.yangPath = $yp, "
-        f"p.extensionsJson = '{_esc(extensions_json)}', "
-        "p.inheritedFrom = $inh, "
-        "p.readOnly = $pro",
-        parameters={
-            "pid": property_id,
-            "parent": parent_component_id,
-            "pname": prop_name,
-            "pty": prop_type,
-            "pfmt": prop_format,
-            "preq": bool(required),
-            "pdesc": description,
-            "yp": yang_path,
-            "inh": inherited_from,
-            "pro": read_only,
-        },
-    )
-    conn.execute(
-        "MATCH (c:SchemaComponent {component_id: $cid}), "
-        "(p:Property {property_id: $pid}) "
-        "MERGE (c)-[:HAS_PROPERTY]->(p)",
-        parameters={"cid": parent_component_id, "pid": property_id},
-    )
-    stats["properties"] = stats.get("properties", 0) + 1
-
-    # Optional PROPERTY_OF_TYPE edge when the property points at a
-    # named component (top-level $ref or array of $ref).
     target_ref: str | None = None
     if isinstance(prop_body.get("$ref"), str):
         target_ref = prop_body["$ref"]
@@ -825,12 +1231,7 @@ def _emit_one_property(
             target_ref = items["$ref"]
     if target_ref and target_ref.startswith("#/components/"):
         target_id = _ensure_component_node(
-            conn, spec_source, target_ref, full_components, written, written_props, stats
+            batch, spec_source, target_ref, full_components, stats
         )
         if target_id:
-            conn.execute(
-                "MATCH (p:Property {property_id: $pid}), "
-                "(c:SchemaComponent {component_id: $cid}) "
-                "MERGE (p)-[:PROPERTY_OF_TYPE]->(c)",
-                parameters={"pid": property_id, "cid": target_id},
-            )
+            batch.add_property_of_type(property_id, target_id)

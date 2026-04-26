@@ -228,6 +228,8 @@ class TestPopulateProperties:
         assert rows[0]["yp"] == "/ac-ntp:ntp/ac-ntp:auth/ac-ntp:key-value"
 
     def test_extensions_json_preserves_other_x_keys(self, fresh_db):
+        from hpe_networking_central_mcp.oas_schema_graph import decode_json_blob
+
         _, conn = fresh_db
         _seed(conn)
         rows = list(conn.execute(
@@ -235,7 +237,7 @@ class TestPopulateProperties:
             "RETURN p.extensionsJson AS ext"
         ).rows_as_dict())
         assert rows
-        ext = json.loads(rows[0]["ext"]) if rows[0]["ext"] else {}
+        ext = json.loads(decode_json_blob(rows[0]["ext"])) if rows[0]["ext"] else {}
         assert ext.get("x-typeDescription") == "Secret string"
         # Also includes the typed-extracted ones for completeness:
         assert ext.get("x-supportedDeviceType") == ["Switch CX"]

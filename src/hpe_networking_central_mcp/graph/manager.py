@@ -402,14 +402,14 @@ required fields without ever materialising a full skeleton.
 ### Node tables
 - `ApiEndpoint` — one row per `(method, path)`. Properties include
   `endpoint_id` (PK), `method`, `path`, `category`, `summary`,
-  `description`, `operationId`, `deprecated`, `spec_source`.
-- `Parameter` — request parameters. Properties: `param_id` (PK),
+  `description`, `operationId`, `deprecated`.
+- `Parameter` — request parameters. Properties: `parameter_id` (PK),
   `endpoint_id`, `name`, `location` (path/query/header/cookie),
   `required`, `type`, `enumValues`, `inferredHint`, `description`.
 - `RequestBody` — root request-body wrapper. Links to a `SchemaComponent`
-  via `OF_TYPE`.
+  via `BODY_REFERENCES`.
 - `Response` — one row per status code (e.g. `200`, `400`). Links to a
-  `SchemaComponent` via `OF_TYPE`.
+  `SchemaComponent` via `RESPONSE_REFERENCES`.
 - `SchemaComponent` — every reusable OpenAPI component (schemas,
   parameters, requestBodies, responses). Properties: `component_id` (PK),
   `spec_source`, `section`, `name`, `type`, `kind`, `required`,
@@ -429,8 +429,10 @@ required fields without ever materialising a full skeleton.
 ### Relationship tables
 - `(ApiEndpoint)-[:HAS_PARAMETER]->(Parameter)`
 - `(ApiEndpoint)-[:HAS_REQUEST_BODY]->(RequestBody)`
-- `(ApiEndpoint)-[:HAS_RESPONSE {statusCode}]->(Response)`
-- `(RequestBody|Response)-[:OF_TYPE]->(SchemaComponent)`
+- `(ApiEndpoint)-[:HAS_RESPONSE]->(Response)` — one edge per status
+  code (the status is stored on the `Response.status` property).
+- `(RequestBody)-[:BODY_REFERENCES]->(SchemaComponent)`
+- `(Response)-[:RESPONSE_REFERENCES]->(SchemaComponent)`
 - `(SchemaComponent)-[:HAS_PROPERTY]->(Property)` — every leaf
   property reachable from the component (direct or flattened from an
   `allOf` branch).
@@ -440,9 +442,9 @@ required fields without ever materialising a full skeleton.
 - `(SchemaComponent)-[:COMPOSED_OF {kind}]->(SchemaComponent)` —
   records `allOf` / `oneOf` / `anyOf` composition; `kind` is the
   composition keyword.
-- `(SchemaComponent)-[:REFERENCES {role, fieldName}]->(SchemaComponent)`
-  — captures `$ref` edges between components (role is e.g. "property",
-  "items", "allOf").
+- `(SchemaComponent)-[:REFERENCES {via}]->(SchemaComponent)`
+  — captures `$ref` edges between components; `via` is e.g.
+  `"property:<name>"`, `"items:<name>"`, `"allOf"`.
 
 ### Canned API discovery patterns
 
@@ -462,27 +464,27 @@ RETURN p.name, p.location, p.type, p.inferredHint
 ```cypher
 // Required top-level fields of an endpoint's request body
 MATCH (e:ApiEndpoint {method: 'POST', path: $p})
-      -[:HAS_REQUEST_BODY]->(:RequestBody)-[:OF_TYPE]->(c:SchemaComponent)
+      -[:HAS_REQUEST_BODY]->(:RequestBody)-[:BODY_REFERENCES]->(c:SchemaComponent)
 RETURN c.name, c.required
 ```
 
 ```cypher
 // Endpoints that accept a given component as input
 MATCH (c:SchemaComponent {section: 'schemas', name: $componentName})
-      <-[:OF_TYPE]-(:RequestBody)<-[:HAS_REQUEST_BODY]-(e:ApiEndpoint)
+      <-[:BODY_REFERENCES]-(:RequestBody)<-[:HAS_REQUEST_BODY]-(e:ApiEndpoint)
 RETURN e.method, e.path
 ```
 
 ```cypher
 // Walk one level of $ref from a component
 MATCH (c:SchemaComponent {name: $name})-[r:REFERENCES]->(target:SchemaComponent)
-RETURN r.fieldName, r.role, target.section, target.name, target.type
+RETURN r.via, target.section, target.name, target.type
 ```
 
 ```cypher
 // Endpoints whose 200 response uses a particular component
-MATCH (e:ApiEndpoint)-[:HAS_RESPONSE {statusCode: '200'}]->(:Response)
-      -[:OF_TYPE]->(c:SchemaComponent {name: $name})
+MATCH (e:ApiEndpoint)-[:HAS_RESPONSE]->(resp:Response {status: '200'})
+      -[:RESPONSE_REFERENCES]->(c:SchemaComponent {name: $name})
 RETURN e.method, e.path
 ```
 
@@ -498,7 +500,7 @@ ORDER BY p.name
 // Find an API field by its YANG path (helps map legacy CLI/YANG configs
 // to the right OpenAPI body field)
 MATCH (p:Property {yangPath: $yp})<-[:HAS_PROPERTY]-(c:SchemaComponent)
-      <-[:OF_TYPE]-(:RequestBody)<-[:HAS_REQUEST_BODY]-(e:ApiEndpoint)
+      <-[:BODY_REFERENCES]-(:RequestBody)<-[:HAS_REQUEST_BODY]-(e:ApiEndpoint)
 RETURN e.method, e.path, c.name AS component, p.name AS field
 ```
 
@@ -516,9 +518,12 @@ RETURN p.name, p.type, p.required,
 ORDER BY source, p.name
 ```
 
-When you need the full pre-rendered skeleton/glossary blob (rarely — most
-discovery tasks are answered by the structured nodes above), call
-`get_api_endpoint_detail(method, path)` / `get_api_endpoint_glossary(...)`.
+When you need a field-by-field guide for assembling a call body (request
+or 200 response), call `describe_endpoint_for_device(method, path,
+deviceType?)` — it returns the request parameters plus every leaf
+property of the body, already flattened across `allOf` branches and
+filterable by device type. For everything else (cross-spec lookups,
+category rollups, custom traversals) use `query_graph()` directly.
 
 ## Tips
 - Use `list_scripts()` to find enrichment scripts (e.g., populate_base_graph, enrich_topology).
