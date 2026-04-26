@@ -1,0 +1,85 @@
+"""Tests for the hard-fail behaviour of ``CentralAPI.paginate``.
+
+Previously ``paginate()`` would silently emit a stderr warning and return
+a partial list when ``max_pages`` was hit before the server reported all
+items collected. That was a data-correctness hazard: a downstream RCA
+script could conclude e.g. "no client at site X" simply because the loop
+truncated. The new contract is to raise ``PaginationError`` so callers
+must consciously choose between raising the cap or pre-filtering.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+# central_helpers.py lives next to _http_core.py and imports it as a
+# top-level module (script-runtime style). Make both importable.
+_PKG_DIR = (
+    Path(__file__).resolve().parent.parent
+    / "src"
+    / "hpe_networking_central_mcp"
+)
+if str(_PKG_DIR) not in sys.path:
+    sys.path.insert(0, str(_PKG_DIR))
+
+
+def _load_central_helpers():
+    spec = importlib.util.spec_from_file_location(
+        "central_helpers_under_test", _PKG_DIR / "central_helpers.py"
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture(scope="module")
+def helpers():
+    return _load_central_helpers()
+
+
+class TestPaginateHardFail:
+
+    def test_raises_when_max_pages_hit_with_outstanding_items(self, helpers):
+        api = helpers.CentralAPI()
+        api._ensure_token = MagicMock()  # bypass real auth
+
+        # Server reports total=10, but each page only returns 2 items —
+        # so finishing requires 5 pages. We cap at max_pages=2 to force
+        # the truncation branch.
+        page = {"aps": [{"i": 1}, {"i": 2}], "total": 10}
+        api._request = MagicMock(return_value=page)
+
+        with pytest.raises(helpers.PaginationError) as exc:
+            api.paginate("/dummy", max_pages=2)
+        assert "PAGINATION_TRUNCATED" in exc.value.error_code
+        assert "max_pages=2" in str(exc.value)
+
+    def test_returns_full_list_when_total_reached_within_cap(self, helpers):
+        api = helpers.CentralAPI()
+        api._ensure_token = MagicMock()
+
+        # First page reports total=2 and includes both items — natural exit.
+        api._request = MagicMock(return_value={"aps": [{"i": 1}, {"i": 2}], "total": 2})
+
+        out = api.paginate("/dummy", max_pages=5)
+        assert len(out) == 2
+
+    def test_returns_partial_when_server_runs_dry_before_total(self, helpers):
+        """Empty page exits the loop naturally; this is *not* truncation."""
+        api = helpers.CentralAPI()
+        api._ensure_token = MagicMock()
+
+        responses = [
+            {"aps": [{"i": 1}], "total": 100},  # server lied about total
+            {"aps": [], "total": 100},          # but next page is empty
+        ]
+        api._request = MagicMock(side_effect=responses)
+
+        out = api.paginate("/dummy", max_pages=5)
+        assert out == [{"i": 1}]

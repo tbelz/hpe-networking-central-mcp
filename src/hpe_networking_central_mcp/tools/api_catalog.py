@@ -16,7 +16,11 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from ..config import Settings
-from .api_call_policy import get_tracker
+from .api_call_policy import (
+    get_tracker,
+    register_endpoints as _register_endpoint_templates,
+    set_skeleton_fetcher,
+)
 from .search import fts_search, contains_search
 
 if TYPE_CHECKING:
@@ -31,6 +35,59 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
     """Register API discovery tools with the MCP server."""
     global _graph_manager
     _graph_manager = graph_manager
+
+    # ── Wire the api_call_policy gate to the catalog graph. ──────────
+    # The gate needs two things from the catalog:
+    #   1. The full set of endpoint templates so it can resolve a
+    #      concrete path (e.g. .../DL0006948/...) back to its catalog
+    #      template (e.g. .../{serial-number}/...) before checking
+    #      whether the agent inspected it.
+    #   2. A way to fetch a single endpoint's skeleton on demand so the
+    #      gate can inline it into a block response (one round-trip
+    #      instead of two).
+    if graph_manager is not None and graph_manager.is_available:
+        try:
+            rows = graph_manager.query(
+                "MATCH (e:ApiEndpoint) RETURN e.method, e.path",
+                read_only=True,
+            )
+            method_to_paths: dict[str, list[str]] = {}
+            for r in rows:
+                m = r.get("e.method", "")
+                p = r.get("e.path", "")
+                if m and p:
+                    method_to_paths.setdefault(m, []).append(p)
+            _register_endpoint_templates(method_to_paths)
+        except Exception as exc:  # noqa: BLE001 — degrade gracefully
+            logger.warning("endpoint_registry_population_failed", error=str(exc))
+
+    def _fetch_skeleton(method: str, template_path: str) -> str | None:
+        """Look up a single endpoint's skeleton blob for the gate to inline."""
+        gm = _graph_manager
+        if gm is None or not gm.is_available:
+            return None
+        try:
+            rows = gm.query(
+                "MATCH (e:ApiEndpoint) WHERE e.endpoint_id = $eid "
+                "RETURN e.bodySkeletonJson",
+                {"eid": f"{method.upper()}:{template_path}"},
+                read_only=True,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if not rows:
+            return None
+        blob = rows[0].get("e.bodySkeletonJson") or ""
+        if not blob:
+            return None
+        # Re-emit as compact-but-readable JSON. If parsing fails, fall back
+        # to the raw blob — better to show *something* than nothing.
+        try:
+            return json.dumps(json.loads(blob), indent=2)
+        except (json.JSONDecodeError, TypeError):
+            return blob
+
+    set_skeleton_fetcher(_fetch_skeleton)
 
     # NOTE: ``unified_search`` is intentionally NOT registered as an MCP tool.
     # The implementation below is retained in-source purely so the tool can

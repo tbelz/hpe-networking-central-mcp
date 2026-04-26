@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 
 from _http_core import (  # noqa: F401 — re-exported for scripts
     BaseHTTPClient,
@@ -133,11 +132,23 @@ class CentralAPI(BaseHTTPClient):
             items = resp.get(key, [])
             all_items.extend(items)
         else:
+            # Loop exhausted ``max_pages`` without the natural exits firing
+            # (no ``next`` cursor / total reached / empty page). Raise hard
+            # — silently truncating server-side data is a data-correctness
+            # hazard for downstream RCA workflows. Callers who genuinely
+            # want a partial result must opt in by raising ``max_pages``
+            # or pre-filtering the query (e.g. add a server-side filter).
             if total and len(all_items) < total:
-                print(
-                    f"Warning: paginate() hit max_pages={max_pages} "
-                    f"with {len(all_items)}/{total} items",
-                    file=sys.stderr,
+                raise PaginationError(
+                    0,
+                    "PAGINATION_TRUNCATED",
+                    (
+                        f"paginate() hit max_pages={max_pages} after "
+                        f"collecting {len(all_items)}/{total} items. "
+                        "Increase max_pages= or pre-filter the query "
+                        "server-side (e.g. with a `filter=` parameter) "
+                        "to keep the result bounded."
+                    ),
                 )
 
         return all_items
@@ -244,6 +255,18 @@ class GreenLakeAPI(BaseHTTPClient):
 
             items = resp.get(key, [])
             all_items.extend(items)
+        else:
+            if total and len(all_items) < total:
+                raise PaginationError(
+                    0,
+                    "PAGINATION_TRUNCATED",
+                    (
+                        f"paginate() hit max_pages={max_pages} after "
+                        f"collecting {len(all_items)}/{total} items. "
+                        "Increase max_pages= or pre-filter the query "
+                        "server-side to keep the result bounded."
+                    ),
+                )
 
         return all_items
 
