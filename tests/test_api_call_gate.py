@@ -20,19 +20,27 @@ if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
 from hpe_networking_central_mcp.tools.api_call_policy import (
+    EndpointRegistry,
     InspectionTracker,
     check_call_policy,
+    get_registry,
     get_tracker,
     normalise_path,
+    register_endpoints,
+    set_skeleton_fetcher,
 )
 
 
 @pytest.fixture(autouse=True)
-def _reset_tracker():
-    """Each test starts with an empty inspection tracker."""
+def _reset_policy_state():
+    """Each test starts with empty tracker, empty registry, no fetcher."""
     get_tracker().reset()
+    get_registry().reset()
+    set_skeleton_fetcher(None)
     yield
     get_tracker().reset()
+    get_registry().reset()
+    set_skeleton_fetcher(None)
 
 
 # ── InspectionTracker primitives ────────────────────────────────────
@@ -224,9 +232,28 @@ class TestEndToEndGate:
 
         with pytest.raises(ToolError) as exc:
             tools["call_central_api"](path="/monitoring/v2/aps")
-        assert "get_api_endpoint_detail" in str(exc.value)
-        assert "/monitoring/v2/aps" in str(exc.value)
+        # The gate should inline the endpoint skeleton (registered by
+        # register_catalog_tools via set_skeleton_fetcher) so the agent
+        # has the schema in hand without a second round-trip.
+        msg = str(exc.value)
+        assert "schema not consulted" in msg.lower()
+        assert "/monitoring/v2/aps" in msg
+        assert "listAPs" in msg, "skeleton should be inlined in block message"
         client._request.assert_not_called()
+
+    def test_blocked_call_auto_records_inspection_for_retry(self, catalog_tools):
+        tools, client = catalog_tools
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        # First call blocks but inlines the skeleton — agent has the schema.
+        with pytest.raises(ToolError):
+            tools["call_central_api"](path="/monitoring/v2/aps")
+        # Immediate retry must succeed without an explicit
+        # get_api_endpoint_detail call: the gate auto-records the
+        # inspection when it inlines the skeleton.
+        out = tools["call_central_api"](path="/monitoring/v2/aps")
+        assert "items" in out
+        client._request.assert_called_once()
 
     def test_call_central_api_allowed_after_get_api_endpoint_detail(self, catalog_tools):
         tools, client = catalog_tools
@@ -259,7 +286,7 @@ class TestEndToEndGate:
 
         with pytest.raises(ToolError) as exc:
             tools["call_greenlake_api"](path="/monitoring/v2/aps")
-        assert "get_api_endpoint_detail" in str(exc.value)
+        assert "schema not consulted" in str(exc.value).lower()
 
     def test_inspection_for_one_endpoint_does_not_unlock_another(self, catalog_tools):
         tools, _ = catalog_tools
@@ -271,4 +298,138 @@ class TestEndToEndGate:
 
         with pytest.raises(ToolError) as exc:
             tools["call_central_api"](path="/monitoring/v2/switches")
+        # /switches is not in the test graph, so the fetcher returns None
+        # and we fall back to the explicit-instruction message.
         assert "get_api_endpoint_detail" in str(exc.value)
+
+
+# ── Template-aware matching ──────────────────────────────────────────
+
+
+class TestTemplateMatching:
+    """The gate must resolve concrete paths back to catalog templates.
+
+    Without this, every device-specific path (``.../{serial-number}/...``
+    substituted with a real serial) would look like an uninspected
+    endpoint to the gate even after the agent inspected the template.
+    """
+
+    def test_concrete_path_allowed_after_template_inspection(self):
+        register_endpoints({
+            "GET": ["/monitoring/v2/aps/{serial-number}/ports"],
+        })
+        # Agent inspected the template, as catalog tools record it.
+        get_tracker().record(
+            "GET", "/monitoring/v2/aps/{serial-number}/ports", "skeleton"
+        )
+
+        allowed, reason = check_call_policy(
+            "GET", "/monitoring/v2/aps/DL0006948/ports"
+        )
+        assert allowed is True, reason
+
+    def test_concrete_path_blocked_when_template_not_inspected(self):
+        register_endpoints({
+            "GET": ["/monitoring/v2/aps/{serial-number}/ports"],
+        })
+        allowed, reason = check_call_policy(
+            "GET", "/monitoring/v2/aps/DL0006948/ports"
+        )
+        assert allowed is False
+        # Block message must reference the *template*, not the concrete path.
+        assert "{serial-number}" in (reason or "")
+
+    def test_unknown_concrete_path_falls_through_to_literal_check(self):
+        # No templates registered; behaviour matches the original literal-only gate.
+        allowed, _ = check_call_policy("GET", "/foo/bar")
+        assert allowed is False
+        get_tracker().record("GET", "/foo/bar", "skeleton")
+        allowed, _ = check_call_policy("GET", "/foo/bar")
+        assert allowed is True
+
+    def test_method_isolation_in_template_match(self):
+        register_endpoints({
+            "GET": ["/devices/{id}"],
+            "POST": ["/devices/{id}"],
+        })
+        get_tracker().record("GET", "/devices/{id}", "skeleton")
+        # GET on a concrete path resolves to the GET template — allowed.
+        ok_get, _ = check_call_policy("GET", "/devices/abc")
+        assert ok_get is True
+        # POST on the same concrete path resolves to the POST template
+        # which has *not* been inspected — blocked.
+        ok_post, _ = check_call_policy("POST", "/devices/abc")
+        assert ok_post is False
+
+
+# ── Skeleton inlining seam ───────────────────────────────────────────
+
+
+class TestSkeletonFetcherSeam:
+
+    def test_fetcher_invoked_with_template_path(self):
+        register_endpoints({"GET": ["/x/{id}/y"]})
+        seen: list[tuple[str, str]] = []
+
+        def fetcher(method: str, template: str) -> str | None:
+            seen.append((method, template))
+            return '{"operation_id": "demo"}'
+
+        set_skeleton_fetcher(fetcher)
+        allowed, reason = check_call_policy("GET", "/x/123/y")
+        assert allowed is False
+        assert seen == [("GET", "/x/{id}/y")]
+        assert "demo" in (reason or "")
+
+    def test_fetcher_returning_none_falls_back_to_legacy_message(self):
+        register_endpoints({"GET": ["/x/{id}/y"]})
+        set_skeleton_fetcher(lambda m, p: None)
+        allowed, reason = check_call_policy("GET", "/x/123/y")
+        assert allowed is False
+        assert "get_api_endpoint_detail" in (reason or "")
+
+    def test_fetcher_exceptions_are_swallowed(self):
+        register_endpoints({"GET": ["/x/{id}/y"]})
+
+        def boom(method: str, template: str) -> str | None:
+            raise RuntimeError("graph offline")
+
+        set_skeleton_fetcher(boom)
+        allowed, reason = check_call_policy("GET", "/x/123/y")
+        # Fetcher errors must not break the gate — fall back to legacy text.
+        assert allowed is False
+        assert "get_api_endpoint_detail" in (reason or "")
+
+
+# ── EndpointRegistry primitives ──────────────────────────────────────
+
+
+class TestEndpointRegistry:
+
+    def test_register_and_match_concrete_path(self):
+        r = EndpointRegistry()
+        r.register("GET", ["/a/{x}/b/{y}"])
+        assert r.match("GET", "/a/1/b/2") == "/a/{x}/b/{y}"
+
+    def test_register_and_match_template_path(self):
+        r = EndpointRegistry()
+        r.register("GET", ["/a/{x}"])
+        assert r.match("GET", "/a/{x}") == "/a/{x}"
+
+    def test_no_cross_segment_matching(self):
+        r = EndpointRegistry()
+        r.register("GET", ["/a/{x}"])
+        # ``{x}`` must not span ``/`` — ``/a/1/2`` should NOT match.
+        assert r.match("GET", "/a/1/2") is None
+
+    def test_method_lookup_is_isolated(self):
+        r = EndpointRegistry()
+        r.register("GET", ["/a/{x}"])
+        assert r.match("POST", "/a/1") is None
+
+    def test_reset_clears_state(self):
+        r = EndpointRegistry()
+        r.register("GET", ["/a/{x}"])
+        r.reset()
+        assert r.match("GET", "/a/1") is None
+
