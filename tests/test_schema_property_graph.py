@@ -160,8 +160,7 @@ def _seed_endpoint(conn, method: str, path: str) -> str:
     conn.execute(
         "CREATE (e:ApiEndpoint {endpoint_id: $eid, method: $m, path: $p, "
         "summary: '', description: '', operationId: '', category: '', "
-        "deprecated: false, parameters: '', requestBody: '', responses: '', "
-        "bodySkeletonJson: '', bodyGlossaryJson: '', bodyComponentsJson: ''})",
+        "deprecated: false, parameters: '', requestBody: '', responses: ''})",
         parameters={"eid": eid, "m": method, "p": path},
     )
     return eid
@@ -261,6 +260,75 @@ class TestPopulateProperties:
             "RETURN p.inheritedFrom AS i ORDER BY p.name"
         ).rows_as_dict())
         assert all(r["i"] == "" for r in rows), rows
+
+
+# ── readOnly extraction (Phase 2D-1) ────────────────────────────────
+
+
+class TestReadOnlyExtraction:
+    def _seed_with_readonly(self, conn) -> None:
+        from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph
+
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "RO API"},
+            "components": {
+                "schemas": {
+                    "RoSchema": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "readOnly": True},
+                            "name": {"type": "string"},
+                            "createdAt": {"type": "string", "readOnly": True},
+                        },
+                    }
+                }
+            },
+            "paths": {
+                "/v1/ro": {
+                    "post": {
+                        "operationId": "createRo",
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/RoSchema"}
+                                }
+                            },
+                        },
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                }
+            },
+        }
+        _seed_endpoint(conn, "POST", "/v1/ro")
+        populate_schema_graph(
+            conn,
+            spec_source="central",
+            spec=spec,
+            endpoints=[("POST", "/v1/ro")],
+        )
+
+    def test_readOnly_true_when_set(self, fresh_db):
+        _, conn = fresh_db
+        self._seed_with_readonly(conn)
+        rows = list(conn.execute(
+            "MATCH (:SchemaComponent {name: 'RoSchema'})-[:HAS_PROPERTY]->(p:Property) "
+            "RETURN p.name AS n, p.readOnly AS ro ORDER BY p.name"
+        ).rows_as_dict())
+        by_name = {r["n"]: r["ro"] for r in rows}
+        assert by_name == {"createdAt": True, "id": True, "name": False}
+
+    def test_filter_writable_properties_via_cypher(self, fresh_db):
+        """Headline: 'which fields can I include in a POST body?'"""
+        _, conn = fresh_db
+        self._seed_with_readonly(conn)
+        rows = list(conn.execute(
+            "MATCH (:SchemaComponent {name: 'RoSchema'})-[:HAS_PROPERTY]->(p:Property) "
+            "WHERE p.readOnly = false "
+            "RETURN p.name AS n"
+        ).rows_as_dict())
+        assert [r["n"] for r in rows] == ["name"]
 
 
 # ── allOf flattening ────────────────────────────────────────────────

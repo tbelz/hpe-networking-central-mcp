@@ -425,8 +425,6 @@ required fields without ever materialising a full skeleton.
   including the typed-extracted ones), `inheritedFrom` (empty for
   properties defined directly on the component, or the name of the
   `allOf` branch component when the property was flattened up).
-- `ApiEndpointSkeleton` — large pre-rendered JSON blobs (skeleton +
-  glossary) kept off the hot path. Reached via `HAS_SKELETON`.
 
 ### Relationship tables
 - `(ApiEndpoint)-[:HAS_PARAMETER]->(Parameter)`
@@ -445,7 +443,6 @@ required fields without ever materialising a full skeleton.
 - `(SchemaComponent)-[:REFERENCES {role, fieldName}]->(SchemaComponent)`
   — captures `$ref` edges between components (role is e.g. "property",
   "items", "allOf").
-- `(ApiEndpoint)-[:HAS_SKELETON]->(ApiEndpointSkeleton)`
 
 ### Canned API discovery patterns
 

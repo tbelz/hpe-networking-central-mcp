@@ -174,7 +174,6 @@ class TestSchemaDDL:
             "RequestBody",
             "Response",
             "SchemaComponent",
-            "ApiEndpointSkeleton",
         ):
             assert required in tables, f"{required} missing from KNOWLEDGE_NODE_TABLES"
 
@@ -187,7 +186,6 @@ class TestSchemaDDL:
             "BODY_REFERENCES",
             "RESPONSE_REFERENCES",
             "REFERENCES",
-            "HAS_SKELETON",
         ):
             assert required in rels, f"{required} missing from KNOWLEDGE_REL_TABLES"
 
@@ -200,7 +198,6 @@ class TestSchemaDDL:
             "RequestBody",
             "Response",
             "SchemaComponent",
-            "ApiEndpointSkeleton",
         ):
             rows = list(conn.execute(f"MATCH (n:{tbl}) RETURN COUNT(n) AS c").rows_as_dict())
             assert rows[0]["c"] == 0
@@ -215,8 +212,7 @@ def _seed_endpoint_node(conn: lb.Connection, method: str, path: str) -> str:
     conn.execute(
         "CREATE (e:ApiEndpoint {endpoint_id: $eid, method: $m, path: $p, "
         "summary: '', description: '', operationId: '', category: '', "
-        "deprecated: false, parameters: '', requestBody: '', responses: '', "
-        "bodySkeletonJson: '', bodyGlossaryJson: '', bodyComponentsJson: ''})",
+        "deprecated: false, parameters: '', requestBody: '', responses: ''})",
         parameters={"eid": eid, "m": method, "p": path},
     )
     return eid
@@ -225,7 +221,7 @@ def _seed_endpoint_node(conn: lb.Connection, method: str, path: str) -> str:
 class TestPopulateSchemaGraph:
     """Tests for ``populate_schema_graph`` — the build-time helper that
     decomposes a normalised OAS spec into Parameter / RequestBody /
-    Response / SchemaComponent / ApiEndpointSkeleton rows."""
+    Response / SchemaComponent rows."""
 
     def test_helper_is_importable(self):
         from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph  # noqa: F401
@@ -255,6 +251,32 @@ class TestPopulateSchemaGraph:
         scope = next(r for r in rows if r["name"] == "scopeId")
         assert scope["loc"] == "query"
         assert scope["req"] is True
+
+    def test_parameter_description_is_persisted(self, fresh_db):
+        """Phase 2E-2: Parameter.description must be extracted so glossary
+        retirement doesn't lose human-readable parameter docs."""
+        from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph
+
+        db, conn = fresh_db
+        spec = _make_synthetic_spec()
+        _seed_endpoint_node(conn, "POST", "/v1/widgets")
+
+        populate_schema_graph(
+            conn,
+            spec_source="central",
+            spec=spec,
+            endpoints=[("POST", "/v1/widgets")],
+        )
+
+        rows = list(conn.execute(
+            "MATCH (e:ApiEndpoint)-[:HAS_PARAMETER]->(p:Parameter) "
+            "WHERE e.endpoint_id = 'POST:/v1/widgets' "
+            "RETURN p.name AS name, p.description AS description"
+        ).rows_as_dict())
+        by_name = {r["name"]: r["description"] for r in rows}
+        assert by_name["filter"] == "OData filter expression"
+        # `scopeId` had no description in the spec — empty string, not null.
+        assert by_name["scopeId"] == ""
 
     def test_populates_schema_components_with_named_ids(self, fresh_db):
         from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph
@@ -352,31 +374,6 @@ class TestPopulateSchemaGraph:
             "RETURN r.status AS status, c.name AS name"
         ).rows_as_dict())
         assert any(r["status"] == "200" and r["name"] == "Widget" for r in rows)
-
-    def test_skeleton_node_carries_blobs(self, fresh_db):
-        from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph
-
-        db, conn = fresh_db
-        spec = _make_synthetic_spec()
-        _seed_endpoint_node(conn, "POST", "/v1/widgets")
-
-        populate_schema_graph(
-            conn,
-            spec_source="central",
-            spec=spec,
-            endpoints=[("POST", "/v1/widgets")],
-        )
-
-        rows = list(conn.execute(
-            "MATCH (e:ApiEndpoint)-[:HAS_SKELETON]->(s:ApiEndpointSkeleton) "
-            "WHERE e.endpoint_id = 'POST:/v1/widgets' "
-            "RETURN s.bodySkeletonJson AS skel, s.bodyGlossaryJson AS gloss"
-        ).rows_as_dict())
-        assert len(rows) == 1
-        skel = json.loads(rows[0]["skel"])
-        assert skel["method"] == "POST"
-        assert skel["path"] == "/v1/widgets"
-        assert "$components_index" in skel
 
     def test_idempotent_population(self, fresh_db):
         """Running populate twice must not double-insert rows."""

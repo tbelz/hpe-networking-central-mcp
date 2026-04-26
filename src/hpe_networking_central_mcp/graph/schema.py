@@ -109,10 +109,6 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         parameters     STRING,
         requestBody    STRING,
         responses      STRING,
-        bodySkeletonJson     STRING,
-        bodyGlossaryJson     STRING,
-        bodyComponentsJson   STRING,
-        embedding      FLOAT[384],
         PRIMARY KEY (endpoint_id)
     )
     """,
@@ -131,7 +127,6 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         content    STRING,
         source     STRING,
         url        STRING,
-        embedding  FLOAT[384],
         PRIMARY KEY (section_id)
     )
     """,
@@ -163,6 +158,7 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         enumValues   STRING[],
         pattern      STRING,
         inferredHint STRING,
+        description  STRING,
         PRIMARY KEY (parameter_id)
     )
     """,
@@ -200,14 +196,6 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         PRIMARY KEY (component_id)
     )
     """,
-    """
-    CREATE NODE TABLE IF NOT EXISTS ApiEndpointSkeleton (
-        endpoint_id        STRING,
-        bodySkeletonJson   STRING,
-        bodyGlossaryJson   STRING,
-        PRIMARY KEY (endpoint_id)
-    )
-    """,
     # ── Property-level subgraph (ADR 009 Phase 2C) ────────────────────
     # First-class node per leaf field so vendor extensions like
     # x-supportedDeviceType / x-path become Cypher-queryable. allOf
@@ -229,6 +217,7 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         yangPath             STRING,
         extensionsJson       STRING,
         inheritedFrom        STRING,
+        readOnly             BOOLEAN,
         PRIMARY KEY (property_id)
     )
     """,
@@ -243,7 +232,6 @@ KNOWLEDGE_REL_TABLES: list[str] = [
     "CREATE REL TABLE IF NOT EXISTS BODY_REFERENCES (FROM RequestBody TO SchemaComponent)",
     "CREATE REL TABLE IF NOT EXISTS RESPONSE_REFERENCES (FROM Response TO SchemaComponent)",
     "CREATE REL TABLE IF NOT EXISTS REFERENCES (FROM SchemaComponent TO SchemaComponent, via STRING)",
-    "CREATE REL TABLE IF NOT EXISTS HAS_SKELETON (FROM ApiEndpoint TO ApiEndpointSkeleton)",
     # ── Property-level edges (ADR 009 Phase 2C) ──────────────────────
     "CREATE REL TABLE IF NOT EXISTS HAS_PROPERTY (FROM SchemaComponent TO Property)",
     "CREATE REL TABLE IF NOT EXISTS PROPERTY_OF_TYPE (FROM Property TO SchemaComponent)",

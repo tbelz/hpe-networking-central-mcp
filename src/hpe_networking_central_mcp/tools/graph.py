@@ -42,7 +42,7 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
 
         The graph models both the Aruba Central hierarchy / physical L2 topology
         AND the OpenAPI surface (ApiEndpoint, Parameter, RequestBody, Response,
-        SchemaComponent, plus REFERENCES/HAS_SKELETON edges). This is the
+        SchemaComponent, plus REFERENCES edges). This is the
         primary tool for API discovery and structural exploration. Read
         ``graph://schema`` for the full schema, row counts, and canned API
         discovery patterns.

@@ -5,9 +5,9 @@ Given a normalised spec and a list of ``(method, path)`` endpoints, this
 populates the following node + relationship tables (created by
 ``graph/schema.py``):
 
-  Parameter, RequestBody, Response, SchemaComponent, ApiEndpointSkeleton
+  Parameter, RequestBody, Response, SchemaComponent
   HAS_PARAMETER, HAS_REQUEST_BODY, HAS_RESPONSE,
-  BODY_REFERENCES, RESPONSE_REFERENCES, REFERENCES, HAS_SKELETON
+  BODY_REFERENCES, RESPONSE_REFERENCES, REFERENCES
 
 The helper is idempotent: it issues ``MERGE`` statements keyed on
 deterministic IDs, so re-running on the same spec does not double-insert.
@@ -28,8 +28,6 @@ from .oas_normalize import (
     _extract_referenced_components,
     _follow_ref,
     _strip_skeleton_keys,
-    project_glossary,
-    project_skeleton,
 )
 
 
@@ -193,7 +191,7 @@ def populate_schema_graph(
     """Decompose ``spec`` into schema-subgraph rows for ``endpoints``.
 
     Returns a small stats dict ``{"parameters": N, "request_bodies": N,
-    "responses": N, "components": N, "skeletons": N}`` for the build
+    "responses": N, "components": N}`` for the build
     log.  The helper assumes the underlying ``ApiEndpoint`` row exists;
     endpoints without a row are silently skipped.
     """
@@ -206,7 +204,6 @@ def populate_schema_graph(
         "components": 0,
         "properties": 0,
         "references": 0,
-        "skeletons": 0,
     }
 
     # Track which (component_id, target_id, via) edges have been written
@@ -253,7 +250,8 @@ def populate_schema_graph(
                 "p.endpoint_id = $eid, p.name = $name, p.location = $loc, "
                 "p.required = $req, p.type = $ty, p.format = $fmt, "
                 f"p.enumValues = {enum_lit}, "
-                "p.pattern = $pat, p.inferredHint = $ph",
+                "p.pattern = $pat, p.inferredHint = $ph, "
+                "p.description = $pdesc",
                 parameters={
                     "pid": param_id,
                     "eid": eid,
@@ -264,6 +262,7 @@ def populate_schema_graph(
                     "fmt": str(schema.get("format") or ""),
                     "pat": str(schema.get("pattern") or ""),
                     "ph": _infer_param_hint(resolved),
+                    "pdesc": str(resolved.get("description") or ""),
                 },
             )
             conn.execute(
@@ -402,31 +401,6 @@ def populate_schema_graph(
                         parameters={"aid": comp_id, "bid": child_id, "via": via},
                     )
                     stats["references"] += 1
-
-        # ── Skeleton + glossary blob node ──
-        try:
-            skel = project_skeleton(spec, method_u, path) or {}
-        except Exception:
-            skel = {}
-        try:
-            gloss = project_glossary(spec, method_u, path) or {}
-        except Exception:
-            gloss = {}
-        skeleton_json = json.dumps(skel) if skel else ""
-        glossary_json = json.dumps(gloss) if gloss else ""
-        conn.execute(
-            "MERGE (s:ApiEndpointSkeleton {endpoint_id: $eid}) SET "
-            f"s.bodySkeletonJson = '{_esc(skeleton_json)}', "
-            f"s.bodyGlossaryJson = '{_esc(glossary_json)}'",
-            parameters={"eid": eid},
-        )
-        conn.execute(
-            "MATCH (e:ApiEndpoint {endpoint_id: $eid}), "
-            "(s:ApiEndpointSkeleton {endpoint_id: $eid}) "
-            "MERGE (e)-[:HAS_SKELETON]->(s)",
-            parameters={"eid": eid},
-        )
-        stats["skeletons"] += 1
 
     return stats
 
@@ -745,6 +719,12 @@ def _emit_one_property(
     prop_format = str(resolved.get("format") or "")
     description = str(resolved.get("description") or prop_body.get("description") or "")
 
+    # readOnly: prefer call-site over resolved target; default False.
+    read_only_raw = prop_body.get("readOnly")
+    if read_only_raw is None:
+        read_only_raw = resolved.get("readOnly")
+    read_only = bool(read_only_raw) if read_only_raw is not None else False
+
     extensions_json = json.dumps(extensions, sort_keys=True) if extensions else ""
 
     property_id = f"{parent_component_id}#prop:{prop_name}"
@@ -763,7 +743,8 @@ def _emit_one_property(
         f"p.supportedDeviceTypes = {sdt_lit}, "
         "p.yangPath = $yp, "
         f"p.extensionsJson = '{_esc(extensions_json)}', "
-        "p.inheritedFrom = $inh",
+        "p.inheritedFrom = $inh, "
+        "p.readOnly = $pro",
         parameters={
             "pid": property_id,
             "parent": parent_component_id,
@@ -774,6 +755,7 @@ def _emit_one_property(
             "pdesc": description,
             "yp": yang_path,
             "inh": inherited_from,
+            "pro": read_only,
         },
     )
     conn.execute(

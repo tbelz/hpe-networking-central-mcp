@@ -25,6 +25,7 @@ from .resources.docs import register_api_catalog_resource, register_resources
 from .resources.graph import register_graph_resources
 from .tools.api_call import register_api_call_tools, register_greenlake_api_call_tools
 from .tools.api_catalog import register_catalog_tools
+from .tools.describe import register_describe_tools
 from .tools.execution import register_execution_tools, _run_script
 from .tools.graph import register_graph_tools
 from .tools.scripts import register_script_tools, sync_seeds_to_graph
@@ -71,12 +72,11 @@ graph_manager.create_fts_indexes()
 
 
 # ── Knowledge DB schema-version check ────────────────────────────────
-# Version 4 splits the previous ``$components`` blob out of
-# ``bodySkeletonJson`` into its own ``bodyComponentsJson`` column;
-# the skeleton now carries only a ``$components_index``.  An older DB
-# will lack the new column and ``get_schema_component`` would fail at
-# query time, so refuse to start so the operator notices immediately.
-_KNOWLEDGE_SCHEMA_VERSION = 6
+# Version 8 (ADR 009 Phase 2E) drops the skeleton/glossary/components
+# JSON blob columns and the ApiEndpointSkeleton node table — all API
+# discovery now flows through the Property/Parameter/SchemaComponent
+# subgraph and the ``describe_endpoint_for_device`` tool.
+_KNOWLEDGE_SCHEMA_VERSION = 8
 
 
 def _check_knowledge_schema_version() -> None:
@@ -305,6 +305,9 @@ register_execution_tools(mcp, settings)
 register_graph_tools(mcp, settings, graph_manager)
 register_script_tools(mcp, settings, graph_manager)
 register_catalog_tools(mcp, settings, graph_manager)
+register_describe_tools(mcp, settings, graph_manager)
+from .tools.describe import register_describe_tools
+register_describe_tools(mcp, settings, graph_manager)
 register_api_call_tools(mcp, settings, client)
 if glp_client is not None:
     register_greenlake_api_call_tools(mcp, settings, glp_client)

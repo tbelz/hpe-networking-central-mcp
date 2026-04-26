@@ -25,85 +25,70 @@ direct API reads and reusable Python scripts.
    with `effective=true&detailed=true` — it returns provenance annotations showing
    exactly which scope each setting originates from.
 
-2. **Discover APIs**: The available endpoints are listed in the
-   **API Endpoint Catalog** — a category-grouped path-tree of Central and
-   GreenLake endpoints available in this session. In READ_ONLY mode this
-   catalog is filtered to GET endpoints only; otherwise every method
-   (including DELETE) is listed and callable via `call_central_api`. The
-   catalog is embedded below in these instructions **and** is always
-   fetchable as the `api://endpoint-catalog` resource. If you cannot see
-   it in the instructions (some clients drop the instructions field), read
-   `api://endpoint-catalog` before looking up any endpoint. Then use:
+2. **Discover APIs (graph-first)**: The OpenAPI surface is fully decomposed into the
+   graph as `ApiEndpoint`, `Parameter`, `RequestBody`, `Response`, `SchemaComponent`,
+   and `Property` nodes. Read `graph://schema` for the full schema and canned Cypher
+   patterns. Two complementary surfaces exist:
 
-     • `get_api_endpoint_detail(method, path)` *(or its bulk form,
-       optionally filtered with `parts=[...]`)* — returns the
-       structural **skeleton** of the endpoint: parameters, request
-       body schema, success and first-error response shapes, and a
-       `$components_index` listing every transitively-referenced
-       component by name with minimal hints (`type`, `enum`,
-       `required`, `child_refs`, presence flags for `oneOf` /
-       `anyOf` / `allOf`). All human-readable prose (descriptions,
-       titles, examples) is stripped. Field names + types + enums
-       are usually enough to map a config value onto the right field.
-       This is what you call by default. Use `parts=["meta",
-       "parameters"]` (or any subset of `meta`, `parameters`,
-       `request_body`, `responses`, `$components_index`,
-       `required_paths`) to keep the payload tight when you only need
-       part of the skeleton.
-     • `get_schema_component(method, path, name)` — fetch the full
-       prose-stripped body of one component named in the
-       `$components_index`. Use this when the index alone is not
-       enough: `oneOf` / `anyOf` / `allOf` flagged in the index, or
-       when you need the property list of a `child_refs` target.
-     • `get_api_endpoint_glossary(method, path)` *(or its bulk form,
-       optionally filtered with `components=[...]`)* — returns the
-       human-readable descriptions for the same endpoint, organised
-       per-component. Call this **only** when a field name in the
-       skeleton is ambiguous; most workflows do not need it.
+     • `list_api` — a category-grouped path-tree of every available `METHOD /path`.
+       Use this (or the `api://endpoint-catalog` resource, or the embedded catalog
+       below) to find the right endpoint by name.
+     • `query_graph(cypher)` — for any structural question about an endpoint
+       (parameters, request body fields, response shape, what device types support
+       a given Property, transitive `$ref` walks, cross-endpoint comparisons,
+       etc.). The graph is the source of truth.
 
-   The two tools share the same `(method, path)` / `endpoints=[...]`
-   argument shape, so you can fan out either form in a single call.
+   For the common case "I am about to call this endpoint on a device — what do I
+   send?", use `describe_endpoint_for_device(method, path, deviceType=...)`. It
+   returns a compact, device-filtered property summary (name, type, required,
+   enum, supportedDeviceTypes, yangPath, inheritedFrom) for parameters and the
+   request body. This is also the mechanism the call gate uses (see below).
 
-3. **Quick reads**: For any direct API call, ALWAYS call `get_api_endpoint_detail(method, path)`
-   FIRST to verify the exact path and all available query parameters before calling
-   `call_central_api`. Monitoring and notification endpoints expose many useful filter
-   parameters (state, severity, site, device type, date range, etc.) that you would miss
-   by guessing. Then call `call_central_api(path, query_params)` with the correct parameters.
+3. **API call gate (enforced)**: Before `call_central_api` or `call_greenlake_api`
+   will dispatch a request, you MUST have called `describe_endpoint_for_device`
+   for that exact `METHOD /path` in the current session. Calls without prior
+   inspection are rejected with a prescriptive error that *also embeds the
+   property summary inline*, so a single retry with corrected arguments will
+   succeed. This gate exists because skipping the schema lookup is the single
+   most common cause of wrong-parameter / oversized-response failures.
+
+4. **Quick reads**: For any direct API call, first identify the endpoint via
+   `list_api` / the catalog, then run `describe_endpoint_for_device(...)` to
+   confirm parameter names, types, enums, and the request body shape. Then call
+   `call_central_api(path, query_params)` with the correct parameters.
    Tip: Add `effective=true` to config endpoints for hierarchically merged config,
    and `detailed=true` for source annotations.
-   For bulk config analysis, use the API with `effective=true&detailed=true`
-   for authoritative per-device resolution.
 
-4. **Single writes**: Use call_central_api(path, method="POST", body={...}) for simple
+5. **Single writes**: Use call_central_api(path, method="POST", body={...}) for simple
    write operations (create a VLAN, delete a profile, update a setting).
 
-5. **Multi-step workflows**: For operations that involve multiple API calls (e.g., onboard
+6. **Multi-step workflows**: For operations that involve multiple API calls (e.g., onboard
    a device: check inventory → create site → assign device → set persona), ALWAYS use a
    script. Check list_scripts() first for an existing script, then write a new one with
    save_script() if needed. Execute with execute_script(). NEVER chain multiple
    call_central_api() calls for multi-step workflows.
 
-6. **Paginated lists**: When scripts need ALL items from a list endpoint, use
+7. **Paginated lists**: When scripts need ALL items from a list endpoint, use
    `api.paginate(path)` instead of manual pagination loops. It auto-detects cursor vs
    offset pagination and returns a flat list.
 
-7. **Error handling**: Scripts should catch `CentralAPIError` (or subclasses like
+8. **Error handling**: Scripts should catch `CentralAPIError` (or subclasses like
    `NotFoundError`) for graceful error handling. Import them from `central_helpers`.
 
-8. **GreenLake Platform**: Use call_greenlake_api(path, query_params) for HPE GreenLake APIs
+9. **GreenLake Platform**: Use call_greenlake_api(path, query_params) for HPE GreenLake APIs
    (device onboarding, subscriptions, licenses, locations, service catalog). These hit
    https://global.api.greenlake.hpe.com. In scripts, use `from central_helpers import glp`.
    **Note:** The call_greenlake_api tool and glp helper are only available when GreenLake
    credentials are configured. If the tool is not listed, GreenLake access is not enabled.
 
-9. **Graph enrichment**: The graph is populated by seed scripts at startup and can be
-   enriched at any time using `write_graph(cypher, parameters)` to add nodes,
-   relationships, or properties you discover during investigation.
-   Use `list_scripts(tag="graph")` to find enrichment scripts.
-   For custom enrichments, either use `write_graph()` directly
-   or write scripts that use `from central_helpers import graph`.
+10. **Graph enrichment**: The graph is populated by seed scripts at startup and can be
+    enriched at any time using `write_graph(cypher, parameters)` to add nodes,
+    relationships, or properties you discover during investigation.
+    Use `list_scripts(tag="graph")` to find enrichment scripts.
+    For custom enrichments, either use `write_graph()` directly
+    or write scripts that use `from central_helpers import graph`.
 
-10. **Reuse**: Always check list_scripts() before writing a new script.
+11. **Reuse**: Always check list_scripts() before writing a new script.
     Pre-built seed scripts cover common use cases (inventory, topology, config policy).
     Use get_script_content() to inspect existing scripts and learn patterns.
 
@@ -112,28 +97,17 @@ Scripts use `from central_helpers import api, glp, graph` — no OAuth2 boilerpl
 
 ## Choosing the right discovery tool
 
-- **API Endpoint Catalog (`api://endpoint-catalog` resource, or in-context below)**:
-  The authoritative list of every API endpoint. Read the resource or scan the
-  embedded catalog to find a `METHOD /path`, then call
-  `get_api_endpoint_detail(...)` for the structural skeleton, and
-  `get_api_endpoint_glossary(...)` for parameter semantics (filter syntax,
-  enum meanings) when the names alone are ambiguous.
-- **query_graph(cypher)**: Structured Cypher queries for topology traversal, filtering by
-  properties, aggregations, or following relationships. Use when you need precise graph
-  navigation (e.g., "all devices at site X", "effective config for device Y"). Also use
-  it for keyword lookups on graph nodes (devices, sites) — e.g.
-  `MATCH (d:Device) WHERE d.name CONTAINS 'Switch-01' RETURN d`.
-
-## API call gate (enforced)
-
-Before `call_central_api` or `call_greenlake_api` will dispatch a request,
-you MUST have called `get_api_endpoint_detail` or `get_api_endpoint_glossary`
-for that exact `METHOD /path` in the current session. Calls without prior
-inspection are rejected with a prescriptive error pointing you at the right
-lookup. This exists because skipping the schema lookup is the single most
-common cause of wrong-parameter / oversized-response failures — a quick
-detail call surfaces every server-side filter and saves pulling and locally
-truncating large payloads.
+- **list_api** / **`api://endpoint-catalog` resource** / **embedded catalog below**:
+  authoritative list of every `METHOD /path`. Start here when you need to find
+  an endpoint by name.
+- **describe_endpoint_for_device(method, path, deviceType=...)**: device-aware
+  property summary for one endpoint. Mandatory before `call_central_api` /
+  `call_greenlake_api`. Also the fastest answer to "what fields does this body
+  accept?".
+- **query_graph(cypher)**: for everything else — structural traversals
+  (cross-endpoint comparisons, `$ref` walks, all properties supporting a given
+  device type), graph navigation (Org/Site/Device hierarchy, topology), and
+  keyword lookups on graph nodes. Read `graph://schema` first.
 
 ## MCP Resources
 
@@ -144,7 +118,9 @@ Read these resources for context — they are always up to date:
   (some MCP clients such as Claude Desktop drop the instructions field).
   Guessing API paths without consulting the catalog has a near-zero chance
   of success.
-- `graph://schema` — Full graph schema: node types, properties, relationships, row counts,
+- `graph://schema` — Full graph schema: node types (including the API
+  subgraph: `ApiEndpoint`, `Parameter`, `RequestBody`, `Response`,
+  `SchemaComponent`, `Property`), properties, relationships, row counts,
   and example Cypher queries. **Read this first** before writing any Cypher.
 - `graph://seed-status` — Startup seed execution results. Check this if graph data seems
   incomplete or queries return empty results.
@@ -156,13 +132,12 @@ Before writing ANY script you MUST complete these steps IN ORDER:
 
 1. `list_scripts()` — check if a seed or saved script already solves the task.
 2. **Read the `api://endpoint-catalog` resource** (or scan it in the system
-   instructions below) for the right `METHOD /path`. NEVER guess API paths.
-3. `get_api_endpoint_detail(method, path)` — get the structural skeleton
-   (parameters, request body, response shape, `$components_index`).
-   Drill into individual components on demand with
-   `get_schema_component(method, path, name)`.
-   Add `get_api_endpoint_glossary(method, path)` only if a field name is
-   ambiguous.
+   instructions below, or call `list_api`) for the right `METHOD /path`.
+   NEVER guess API paths.
+3. `describe_endpoint_for_device(method, path, deviceType=...)` — get the
+   device-filtered property summary (parameters + body) so you know exactly
+   which fields, types, and enums are valid. Use `query_graph` for any deeper
+   structural question (transitive refs, cross-endpoint comparisons, etc.).
 4. Only THEN write the script using the discovered endpoints and schemas.
 
 Skipping these steps leads to wrong endpoints, wrong parameter names, and wasted iterations.
@@ -192,8 +167,7 @@ configuration changes are NOT permitted in this session:
   • The same restriction applies inside scripts you write or execute —
     `api.post(...)`, `api.delete(...)`, etc. will fail.
   • Mutating endpoints (POST/PUT/PATCH/DELETE) are hidden from
-    list_api, get_api_endpoint_detail, and
-    get_api_endpoint_glossary.
+    list_api and from the embedded API catalog.
 
 Local operations remain available for analysis: write_graph,
 save_script, and execute_script (as long as the script itself only

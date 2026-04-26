@@ -51,8 +51,7 @@ def _make_n_endpoints(gm: GraphManager, n: int) -> None:
             "  summary: '', description: '',"
             "  operationId: '', category: 'cat',"
             "  deprecated: false,"
-            "  parameters: '[]', requestBody: '', responses: '',"
-            "  bodySkeletonJson: '', bodyGlossaryJson: ''"
+            "  parameters: '[]', requestBody: '', responses: ''"
             "})",
             {"eid": f"GET:/p/{i}", "path": f"/p/{i}"},
         )
