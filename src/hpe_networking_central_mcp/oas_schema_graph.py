@@ -187,6 +187,7 @@ def populate_schema_graph(
     spec_source: str,
     spec: dict,
     endpoints: list[tuple[str, str]],
+    emit_property_subgraph: bool = True,
 ) -> dict:
     """Decompose ``spec`` into schema-subgraph rows for ``endpoints``.
 
@@ -194,6 +195,12 @@ def populate_schema_graph(
     "responses": N, "components": N}`` for the build
     log.  The helper assumes the underlying ``ApiEndpoint`` row exists;
     endpoints without a row are silently skipped.
+
+    ``emit_property_subgraph`` controls whether Property nodes and
+    HAS_PROPERTY edges are written.  Disable for large platform specs
+    (GreenLake) that have no HPE vendor extensions — those specs never
+    carry ``x-supportedDeviceType`` / ``x-path`` so the property-level
+    graph adds no query value while adding many thousands of DB writes.
     """
     components = spec.get("components") or {}
     stats = {
@@ -310,7 +317,8 @@ def populate_schema_graph(
             # Link to root component if the body is a single $ref.
             if root_ref:
                 comp_id = _ensure_component_node(
-                    conn, spec_source, root_ref, components, written_components, written_props, stats
+                    conn, spec_source, root_ref, components, written_components, written_props, stats,
+                    emit_property_subgraph=emit_property_subgraph,
                 )
                 if comp_id:
                     conn.execute(
@@ -354,7 +362,8 @@ def populate_schema_graph(
             stats["responses"] += 1
             if root_ref:
                 comp_id = _ensure_component_node(
-                    conn, spec_source, root_ref, components, written_components, written_props, stats
+                    conn, spec_source, root_ref, components, written_components, written_props, stats,
+                    emit_property_subgraph=emit_property_subgraph,
                 )
                 if comp_id:
                     conn.execute(
@@ -380,7 +389,8 @@ def populate_schema_graph(
             for name, body in entries.items():
                 ref = f"#/components/{section}/{name}"
                 comp_id = _ensure_component_node(
-                    conn, spec_source, ref, components, written_components, written_props, stats
+                    conn, spec_source, ref, components, written_components, written_props, stats,
+                    emit_property_subgraph=emit_property_subgraph,
                 )
                 if not comp_id:
                     continue
@@ -389,7 +399,8 @@ def populate_schema_graph(
                     if not child_ref.startswith("#/components/"):
                         continue
                     child_id = _ensure_component_node(
-                        conn, spec_source, child_ref, components, written_components, written_props, stats
+                        conn, spec_source, child_ref, components, written_components, written_props, stats,
+                        emit_property_subgraph=emit_property_subgraph,
                     )
                     if not child_id or child_id == comp_id:
                         continue
@@ -419,6 +430,7 @@ def _ensure_component_node(
     written: set[str],
     written_props: set[str],
     stats: dict,
+    emit_property_subgraph: bool = True,
 ) -> str:
     """MERGE the SchemaComponent node for ``ref`` and return its component_id.
 
@@ -470,17 +482,18 @@ def _ensure_component_node(
     stats["components"] += 1
 
     # ── Property-level extraction + allOf flattening (Phase 2C) ──
-    _emit_property_subgraph(
-        conn,
-        spec_source=spec_source,
-        parent_component_id=comp_id,
-        parent_component_name=name,
-        body=body,
-        full_components=full_components,
-        written=written,
-        written_props=written_props,
-        stats=stats,
-    )
+    if emit_property_subgraph:
+        _emit_property_subgraph(
+            conn,
+            spec_source=spec_source,
+            parent_component_id=comp_id,
+            parent_component_name=name,
+            body=body,
+            full_components=full_components,
+            written=written,
+            written_props=written_props,
+            stats=stats,
+        )
 
     return comp_id
 

@@ -369,6 +369,11 @@ def _populate_schema_subgraph(db: lb.Database, specs: list[dict]) -> dict:
                 spec_source=spec_source,
                 spec=spec,
                 endpoints=endpoints,
+                # GLP specs are large platform APIs without HPE vendor
+                # extensions (x-supportedDeviceType / x-path); skipping
+                # property-subgraph writes for them keeps build time under
+                # 10 min while preserving full coverage for Central specs.
+                emit_property_subgraph=(spec_source != "glp"),
             )
         except Exception as exc:  # pragma: no cover — defensive
             print(
