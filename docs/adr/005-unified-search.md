@@ -1,7 +1,18 @@
 # ADR-005: Unified Search with FTS/BM25
 
 ## Status
-Accepted
+Superseded by [ADR 009](009-graph-as-primary-api-discovery.md) (2026-04-26).
+
+The `unified_search` MCP tool, the `tools/search.py` helpers, and the
+`embedding FLOAT[384]` columns on `ApiEndpoint` and `DocSection` were
+removed in the ADR 009 implementation. Agents now use `query_graph`
+(Cypher, optionally accelerated by the FTS indexes that survive on
+text-bearing nodes) for keyword discovery, and
+`describe_endpoint_for_device` for endpoint-scoped property lookup.
+
+The FTS extension load and the per-node FTS index creation
+(`create_fts_indexes`) are retained — they back ad-hoc Cypher queries
+and graceful degradation, but no MCP tool is exposed on top of them.
 
 ## Context
 API discovery currently uses Cypher `CONTAINS` (substring matching) with no

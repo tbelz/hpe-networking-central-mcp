@@ -35,10 +35,8 @@ from hpe_networking_central_mcp.graph.schema import (  # noqa: E402
 from hpe_networking_central_mcp.oas_index import OASIndex  # noqa: E402
 from hpe_networking_central_mcp.oas_normalize import (  # noqa: E402
     normalize as normalize_spec,
-    project_components,
-    project_glossary,
-    project_skeleton,
 )
+from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph  # noqa: E402
 from hpe_networking_central_mcp.oas_scraper import ReadMeSpecProvider  # noqa: E402
 from hpe_networking_central_mcp.vsg_scraper import VsgDocProvider  # noqa: E402
 
@@ -76,6 +74,8 @@ def _sync_specs(cache_dir: Path) -> tuple[list[dict], dict]:
     try:
         provider = ReadMeSpecProvider()
         central_specs = provider.fetch_specs(cache_dir=cache_dir / "central", ttl=0)
+        for s in central_specs:
+            s["_spec_source"] = "central"
         specs.extend(central_specs)
         sync_health["central"] = _summarise_oas_reports(
             provider.last_reports, central_specs
@@ -101,6 +101,8 @@ def _sync_specs(cache_dir: Path) -> tuple[list[dict], dict]:
         try:
             glp_provider = GreenLakeSpecProvider()
             glp_specs = glp_provider.fetch_specs(cache_dir=cache_dir / "glp", ttl=0)
+            for s in glp_specs:
+                s["_spec_source"] = "glp"
             specs.extend(glp_specs)
             sync_health["greenlake"] = {
                 "status": "ok",
@@ -174,36 +176,13 @@ def _cypher_escape(value: str) -> str:
 def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> int:
     """Insert ApiEndpoint and ApiCategory nodes from the OASIndex.
 
-    ``specs`` should be the **normalized** spec list — projection columns
-    (``bodySkeletonJson``, ``bodyGlossaryJson``, ``bodyComponentsJson``)
-    are computed from these.  ``bodySkeletonJson`` no longer carries the
-    transitively-expanded ``$components`` blob (only an index of names
-    and minimal hints); the full bodies live in ``bodyComponentsJson``
-    and are served on demand by ``get_schema_component``.
+    ``specs`` is accepted for signature compatibility; the schema-graph
+    population pass (Property/SchemaComponent/Parameter) consumes it.
+    The blob projection columns (skeleton/glossary/components) were
+    retired in ADR 009 Phase 2E.
     """
     conn = lb.Connection(db)
     count = 0
-    skeleton_ok = 0
-    glossary_ok = 0
-    components_ok = 0
-
-    # ReadMe.io serves one operation per .md file, so most providers ship
-    # ~1600 individual specs that share only ~50 ``info.title`` values.
-    # Keying by category would discard all but the last spec per title and
-    # silently produce empty projection blobs.  Index by (method, path) so
-    # every endpoint can find its source spec.
-    specs_by_endpoint: dict[tuple[str, str], dict] = {}
-    specs_by_category: dict[str, dict] = {}
-    for spec in specs:
-        title = (spec.get("info") or {}).get("title", "Unknown")
-        # Keep the last spec per title for the (rare) all-in-one provider case.
-        specs_by_category[title] = spec
-        for path, path_item in (spec.get("paths") or {}).items():
-            if not isinstance(path_item, dict):
-                continue
-            for method in ("get", "post", "put", "patch", "delete", "head", "options"):
-                if isinstance(path_item.get(method), dict):
-                    specs_by_endpoint[(method.upper(), path)] = spec
 
     for entry in index._entries:  # noqa: SLF001 — accessing internal for bulk insert
         endpoint_id = f"{entry.method}:{entry.path}"
@@ -244,62 +223,13 @@ def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> 
         escaped_body = _cypher_escape(body_json)
         escaped_resps = _cypher_escape(responses_json)
 
-        # Compute skeleton + glossary + components projections from the
-        # normalized spec.  The skeleton no longer inlines component
-        # bodies (only an index); the full bodies live in their own
-        # column for on-demand lookup via ``get_schema_component``.
-        skeleton_json = ""
-        glossary_json = ""
-        components_json = ""
-        spec = specs_by_endpoint.get((entry.method, entry.path)) or specs_by_category.get(entry.category)
-        if spec is not None:
-            try:
-                skel_view = project_skeleton(spec, entry.method, entry.path)
-                if skel_view is not None:
-                    skeleton_json = json.dumps(skel_view)
-            except Exception as exc:  # pragma: no cover — defensive
-                print(
-                    f"    ⚠ project_skeleton failed for {entry.method} {entry.path}: {exc}",
-                    file=sys.stderr,
-                )
-            try:
-                gloss_view = project_glossary(spec, entry.method, entry.path)
-                if gloss_view is not None:
-                    glossary_json = json.dumps(gloss_view)
-            except Exception as exc:  # pragma: no cover — defensive
-                print(
-                    f"    ⚠ project_glossary failed for {entry.method} {entry.path}: {exc}",
-                    file=sys.stderr,
-                )
-            try:
-                comp_view = project_components(spec, entry.method, entry.path)
-                if comp_view:
-                    components_json = json.dumps(comp_view)
-            except Exception as exc:  # pragma: no cover — defensive
-                print(
-                    f"    ⚠ project_components failed for {entry.method} {entry.path}: {exc}",
-                    file=sys.stderr,
-                )
-        if skeleton_json:
-            skeleton_ok += 1
-        if glossary_json:
-            glossary_ok += 1
-        if components_json:
-            components_ok += 1
-        escaped_skeleton = _cypher_escape(skeleton_json)
-        escaped_glossary = _cypher_escape(glossary_json)
-        escaped_components = _cypher_escape(components_json)
-
         conn.execute(
             "CREATE (e:ApiEndpoint {"
             "  endpoint_id: $eid, method: $method, path: $path,"
             "  summary: $summary, description: $descr, operationId: $opid,"
             f"  category: $cat, deprecated: $dep, {tags_clause}"
             f"  parameters: '{escaped_params}', requestBody: '{escaped_body}',"
-            f"  responses: '{escaped_resps}',"
-            f"  bodySkeletonJson: '{escaped_skeleton}',"
-            f"  bodyGlossaryJson: '{escaped_glossary}',"
-            f"  bodyComponentsJson: '{escaped_components}'"
+            f"  responses: '{escaped_resps}'"
             "})",
             parameters={
                 "eid": endpoint_id,
@@ -329,27 +259,6 @@ def _populate_endpoints(db: lb.Database, index: OASIndex, specs: list[dict]) -> 
     )
 
     print(f"  Inserted {count} endpoints in {len(index.categories)} categories")
-    if count:
-        skel_pct = 100 * skeleton_ok // count
-        gloss_pct = 100 * glossary_ok // count
-        comp_pct = 100 * components_ok // count
-        print(
-            f"  Projection coverage: skeleton={skeleton_ok}/{count} ({skel_pct}%), "
-            f"glossary={glossary_ok}/{count} ({gloss_pct}%), "
-            f"components={components_ok}/{count} ({comp_pct}%)"
-        )
-        # Hard fail if coverage collapses — silently empty blobs degrade
-        # the MCP tool surface to a useless shell.
-        # ``components`` may legitimately be empty for endpoints that
-        # reference no components, so it is not part of the threshold.
-        min_pct = 90
-        if skel_pct < min_pct or gloss_pct < min_pct:
-            print(
-                f"  ✖ Projection coverage below {min_pct}% — refusing to ship a "
-                "degraded knowledge DB.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
     return count
 
 
@@ -423,6 +332,55 @@ def _sync_docs(cache_dir: Path) -> tuple[list, dict]:
             health["cache_age_days"] = cache_age_days
         print(f"    ⚠ VSG refresh failed: {e}", file=sys.stderr)
         return [], health
+
+
+def _populate_schema_subgraph(db: lb.Database, specs: list[dict]) -> dict:
+    """Walk every spec and populate Parameter/RequestBody/Response/SchemaComponent
+    nodes, plus REFERENCES edges.
+
+    ``specs`` must already be normalized and tagged with ``_spec_source``
+    (set in ``_sync_specs``).
+    """
+    conn = lb.Connection(db)
+    totals = {
+        "endpoints": 0,
+        "parameters": 0,
+        "request_bodies": 0,
+        "responses": 0,
+        "components": 0,
+        "properties": 0,
+        "references": 0,
+        "skeletons": 0,
+    }
+    for spec in specs:
+        spec_source = spec.get("_spec_source") or "central"
+        endpoints: list[tuple[str, str]] = []
+        for path, path_item in (spec.get("paths") or {}).items():
+            if not isinstance(path_item, dict):
+                continue
+            for method in ("get", "post", "put", "patch", "delete", "head", "options"):
+                if isinstance(path_item.get(method), dict):
+                    endpoints.append((method.upper(), path))
+        if not endpoints:
+            continue
+        try:
+            stats = populate_schema_graph(
+                conn,
+                spec_source=spec_source,
+                spec=spec,
+                endpoints=endpoints,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            print(
+                f"    ⚠ populate_schema_graph failed for "
+                f"{(spec.get('info') or {}).get('title', '?')!r}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        for k, v in stats.items():
+            if k in totals:
+                totals[k] += v
+    return totals
 
 
 def _populate_docs(db: lb.Database, docs: list) -> int:
@@ -570,6 +528,21 @@ def main() -> None:
     index.build(specs)
     endpoint_count = _populate_endpoints(db, index, specs)
 
+    # 3b. Populate schema subgraph (Parameter / RequestBody / Response /
+    # SchemaComponent + REFERENCES edges) from each
+    # source spec.  Spec source is determined from the ``_spec_source`` tag
+    # set in ``_sync_specs``.
+    print("\n[3b/6] Populating API schema subgraph...")
+    schema_stats = _populate_schema_subgraph(db, specs)
+    print(
+        f"  Schema subgraph: {schema_stats['endpoints']} endpoints, "
+        f"{schema_stats['parameters']} parameters, "
+        f"{schema_stats['components']} components, "
+        f"{schema_stats['properties']} properties, "
+        f"{schema_stats['references']} REFERENCES edges, "
+        f"{schema_stats['skeletons']} skeleton blobs"
+    )
+
     # 4. Sync and populate VSG documentation
     print("\n[4/6] Refreshing and populating VSG documentation...")
     doc_entries, vsg_health = _sync_docs(cache_dir)
@@ -596,7 +569,7 @@ def main() -> None:
     import time
     manifest = {
         "version": time.strftime("knowledge-db-%Y%m%d-%H%M%S", time.gmtime()),
-        "schema_version": 4,
+        "schema_version": 8,
         "endpoint_count": endpoint_count,
         "category_count": len(index.categories),
         "doc_count": doc_count,

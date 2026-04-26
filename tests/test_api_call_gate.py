@@ -2,8 +2,7 @@
 
 The gate refuses ``call_central_api`` / ``call_greenlake_api`` invocations
 for endpoints whose schema has not been inspected via
-``get_api_endpoint_detail`` or ``get_api_endpoint_glossary`` in the same
-session.
+``describe_endpoint_for_device`` in the same session.
 """
 
 from __future__ import annotations
@@ -27,20 +26,19 @@ from hpe_networking_central_mcp.tools.api_call_policy import (
     get_tracker,
     normalise_path,
     register_endpoints,
-    set_skeleton_fetcher,
+    set_property_summary_fetcher,
 )
 
 
 @pytest.fixture(autouse=True)
 def _reset_policy_state():
-    """Each test starts with empty tracker, empty registry, no fetcher."""
     get_tracker().reset()
     get_registry().reset()
-    set_skeleton_fetcher(None)
+    set_property_summary_fetcher(None)
     yield
     get_tracker().reset()
     get_registry().reset()
-    set_skeleton_fetcher(None)
+    set_property_summary_fetcher(None)
 
 
 # ── InspectionTracker primitives ────────────────────────────────────
@@ -52,37 +50,25 @@ class TestInspectionTracker:
         t = InspectionTracker()
         assert t.was_inspected("GET", "/foo") is False
 
-    def test_record_skeleton_satisfies_default_check(self):
+    def test_record_satisfies_check(self):
         t = InspectionTracker()
-        t.record("GET", "/foo", "skeleton")
+        t.record("GET", "/foo")
         assert t.was_inspected("GET", "/foo") is True
-
-    def test_record_glossary_satisfies_default_check(self):
-        t = InspectionTracker()
-        t.record("GET", "/foo", "glossary")
-        assert t.was_inspected("GET", "/foo") is True
-
-    def test_skeleton_does_not_satisfy_glossary_only_predicate(self):
-        # Future-proofing: a stricter policy may require glossary specifically.
-        t = InspectionTracker()
-        t.record("GET", "/foo", "skeleton")
-        assert t.was_inspected("GET", "/foo", kinds=("glossary",)) is False
-        assert t.was_inspected("GET", "/foo", kinds=("skeleton",)) is True
 
     def test_method_is_case_insensitive(self):
         t = InspectionTracker()
-        t.record("get", "/foo", "skeleton")
+        t.record("get", "/foo")
         assert t.was_inspected("GET", "/foo") is True
 
     def test_path_normalisation_with_and_without_leading_slash(self):
         t = InspectionTracker()
-        t.record("GET", "monitoring/v2/aps", "skeleton")
+        t.record("GET", "monitoring/v2/aps")
         assert t.was_inspected("GET", "/monitoring/v2/aps") is True
         assert t.was_inspected("GET", "monitoring/v2/aps") is True
 
     def test_reset_clears_records(self):
         t = InspectionTracker()
-        t.record("GET", "/foo", "skeleton")
+        t.record("GET", "/foo")
         t.reset()
         assert t.was_inspected("GET", "/foo") is False
 
@@ -108,50 +94,40 @@ class TestCheckCallPolicy:
         allowed, reason = check_call_policy("GET", "/monitoring/v2/aps")
         assert allowed is False
         assert reason is not None
-        assert "get_api_endpoint_detail" in reason
+        # Block message must point the agent at describe_endpoint_for_device,
+        # the only remaining schema-inspection tool.
+        assert "describe_endpoint_for_device" in reason
         assert "/monitoring/v2/aps" in reason
-        # Hint must mention glossary as the alternative satisfier.
-        assert "get_api_endpoint_glossary" in reason
 
-    def test_allowed_after_skeleton_inspection(self):
-        get_tracker().record("GET", "/monitoring/v2/aps", "skeleton")
+    def test_allowed_after_inspection(self):
+        get_tracker().record("GET", "/monitoring/v2/aps")
         allowed, reason = check_call_policy("GET", "/monitoring/v2/aps")
         assert allowed is True
         assert reason is None
 
-    def test_allowed_after_glossary_inspection(self):
-        # Glossary alone satisfies the gate (per design).
-        get_tracker().record("GET", "/monitoring/v2/aps", "glossary")
-        allowed, _ = check_call_policy("GET", "/monitoring/v2/aps")
-        assert allowed is True
-
     def test_inspection_is_per_endpoint_not_global(self):
-        get_tracker().record("GET", "/monitoring/v2/aps", "skeleton")
+        get_tracker().record("GET", "/monitoring/v2/aps")
         allowed, _ = check_call_policy("GET", "/monitoring/v2/switches")
         assert allowed is False
 
     def test_inspection_is_per_method(self):
-        get_tracker().record("GET", "/config/v1/vlans", "skeleton")
+        get_tracker().record("GET", "/config/v1/vlans")
         allowed, _ = check_call_policy("POST", "/config/v1/vlans")
         assert allowed is False
 
 
-# ── End-to-end: detail/glossary tools record inspections ────────────
+# ── End-to-end: describe_endpoint_for_device records inspection ─────
 
 
 @pytest.fixture
 def catalog_tools(tmp_path):
-    """Build a FastMCP server with the catalog + api_call tools registered.
-
-    Reuses the in-memory graph fixture from ``test_api_catalog.py``.
-    Uses pytest's ``tmp_path`` so the temporary DB and script library are
-    cleaned up automatically after the test, even on failure.
-    """
+    """Build a FastMCP server with catalog + describe + api_call tools."""
     from mcp.server.fastmcp import FastMCP
 
     from hpe_networking_central_mcp.config import Settings
     from hpe_networking_central_mcp.graph.manager import GraphManager
     from hpe_networking_central_mcp.tools.api_catalog import register_catalog_tools
+    from hpe_networking_central_mcp.tools.describe import register_describe_tools
     from hpe_networking_central_mcp.tools.api_call import (
         register_api_call_tools,
         register_greenlake_api_call_tools,
@@ -161,46 +137,48 @@ def catalog_tools(tmp_path):
     gm = GraphManager(db_path)
     gm.initialize()
 
-    skeleton = {
-        "method": "GET",
-        "path": "/monitoring/v2/aps",
-        "summary": "List APs",
-        "operation_id": "listAPs",
-        "tags": [],
-        "deprecated": False,
-        "parameters": [],
-        "request_body": None,
-        "required_paths": [],
-        "responses": {"200": {"schema": {"type": "object"}}},
-    }
-    glossary = {
-        "method": "GET",
-        "path": "/monitoring/v2/aps",
-        "components": {},
-    }
-
-    def _esc(s: str) -> str:
-        return s.replace("\\", "\\\\").replace("'", "\\'")
-
-    skel_json = json.dumps(skeleton)
-    gloss_json = json.dumps(glossary)
+    # Endpoint with a request body that decomposes into Properties.
     gm.execute(
         "CREATE (e:ApiEndpoint {"
-        "  endpoint_id: $eid, method: $m, path: $p,"
-        "  summary: $sum, description: '',"
-        "  operationId: $op, category: 'monitoring',"
-        "  deprecated: false, parameters: '[]',"
-        "  requestBody: '', responses: '',"
-        f"  bodySkeletonJson: '{_esc(skel_json)}',"
-        f"  bodyGlossaryJson: '{_esc(gloss_json)}'"
+        "  endpoint_id: 'POST:/config/v1/widgets', method: 'POST',"
+        "  path: '/config/v1/widgets', summary: 'Create widget',"
+        "  description: '', operationId: 'createWidget',"
+        "  category: 'config', deprecated: false, tags: [],"
+        "  parameters: '', requestBody: '', responses: ''"
         "})",
-        {
-            "eid": "GET:/monitoring/v2/aps",
-            "m": "GET", "p": "/monitoring/v2/aps",
-            "sum": "List APs", "op": "listAPs",
-        },
     )
-    gm.create_fts_indexes()
+    # Add a request body with properties so describe_endpoint can find them.
+    gm.execute(
+        "CREATE (rb:RequestBody {request_body_id: 'rb1', endpoint_id: "
+        "'POST:/config/v1/widgets', content_type: 'application/json', "
+        "required: true, root_component_ref: 'Widget'})"
+    )
+    gm.execute(
+        "MATCH (e:ApiEndpoint {endpoint_id: 'POST:/config/v1/widgets'}), "
+        "(rb:RequestBody {request_body_id: 'rb1'}) "
+        "CREATE (e)-[:HAS_REQUEST_BODY]->(rb)"
+    )
+    gm.execute(
+        "CREATE (c:SchemaComponent {component_id: 'c1', name: 'Widget', "
+        "section: 'schemas', spec_source: 'central', bodyJson: '{}'})"
+    )
+    gm.execute(
+        "MATCH (rb:RequestBody {request_body_id: 'rb1'}), "
+        "(c:SchemaComponent {component_id: 'c1'}) "
+        "CREATE (rb)-[:BODY_REFERENCES]->(c)"
+    )
+    gm.execute(
+        "CREATE (p:Property {property_id: 'p1', parent_component_id: 'c1', "
+        "name: 'name', type: 'string', format: '', required: true, "
+        "readOnly: false, enumValues: [], description: 'Widget name', "
+        "supportedDeviceTypes: [], yangPath: '', inheritedFrom: '', "
+        "extensionsJson: ''})"
+    )
+    gm.execute(
+        "MATCH (c:SchemaComponent {component_id: 'c1'}), "
+        "(p:Property {property_id: 'p1'}) "
+        "CREATE (c)-[:HAS_PROPERTY]->(p)"
+    )
 
     settings = Settings(
         central_base_url="https://test.example.com",
@@ -211,10 +189,8 @@ def catalog_tools(tmp_path):
 
     mcp = FastMCP("test")
     register_catalog_tools(mcp, settings, gm)
+    register_describe_tools(mcp, settings, gm)
 
-    # Mock the Central client so call_central_api can be invoked without
-    # touching the network. The gate runs before _make_api_call, so the
-    # blocked-path tests never reach this mock.
     mock_client = MagicMock()
     mock_client._request.return_value = {"items": []}
     register_api_call_tools(mcp, settings, mock_client)
@@ -231,52 +207,37 @@ class TestEndToEndGate:
         from mcp.server.fastmcp.exceptions import ToolError
 
         with pytest.raises(ToolError) as exc:
-            tools["call_central_api"](path="/monitoring/v2/aps")
-        # The gate should inline the endpoint skeleton (registered by
-        # register_catalog_tools via set_skeleton_fetcher) so the agent
-        # has the schema in hand without a second round-trip.
+            tools["call_central_api"](path="/config/v1/widgets", method="POST")
         msg = str(exc.value)
         assert "schema not consulted" in msg.lower()
-        assert "/monitoring/v2/aps" in msg
-        assert "listAPs" in msg, "skeleton should be inlined in block message"
+        assert "/config/v1/widgets" in msg
+        # The fetcher should inline the property summary so the agent has
+        # the field list in hand without a second tool round-trip.
+        assert '"name"' in msg, f"property summary should be inlined: {msg[:500]}"
         client._request.assert_not_called()
 
     def test_blocked_call_auto_records_inspection_for_retry(self, catalog_tools):
         tools, client = catalog_tools
         from mcp.server.fastmcp.exceptions import ToolError
 
-        # First call blocks but inlines the skeleton — agent has the schema.
         with pytest.raises(ToolError):
-            tools["call_central_api"](path="/monitoring/v2/aps")
-        # Immediate retry must succeed without an explicit
-        # get_api_endpoint_detail call: the gate auto-records the
-        # inspection when it inlines the skeleton.
-        out = tools["call_central_api"](path="/monitoring/v2/aps")
+            tools["call_central_api"](path="/config/v1/widgets", method="POST")
+        # Retry must succeed: gate auto-records when it inlines the summary.
+        out = tools["call_central_api"](path="/config/v1/widgets", method="POST", body={"name": "x"})
         assert "items" in out
         client._request.assert_called_once()
 
-    def test_call_central_api_allowed_after_get_api_endpoint_detail(self, catalog_tools):
+    def test_call_central_api_allowed_after_describe_endpoint_for_device(self, catalog_tools):
         tools, client = catalog_tools
 
-        # Inspect the endpoint first.
         result = json.loads(
-            tools["get_api_endpoint_detail"](
-                method="GET", path="/monitoring/v2/aps"
+            tools["describe_endpoint_for_device"](
+                method="POST", path="/config/v1/widgets"
             )
         )
-        assert result["operation_id"] == "listAPs"
+        assert result["properties"], "describe_endpoint_for_device must return properties"
 
-        # Now the call must succeed (and reach the mocked client).
-        out = tools["call_central_api"](path="/monitoring/v2/aps")
-        assert "items" in out
-        client._request.assert_called_once()
-
-    def test_call_central_api_allowed_after_get_api_endpoint_glossary(self, catalog_tools):
-        tools, client = catalog_tools
-        tools["get_api_endpoint_glossary"](
-            method="GET", path="/monitoring/v2/aps"
-        )
-        out = tools["call_central_api"](path="/monitoring/v2/aps")
+        out = tools["call_central_api"](path="/config/v1/widgets", method="POST", body={"name": "x"})
         assert "items" in out
         client._request.assert_called_once()
 
@@ -288,39 +249,18 @@ class TestEndToEndGate:
             tools["call_greenlake_api"](path="/monitoring/v2/aps")
         assert "schema not consulted" in str(exc.value).lower()
 
-    def test_inspection_for_one_endpoint_does_not_unlock_another(self, catalog_tools):
-        tools, _ = catalog_tools
-        from mcp.server.fastmcp.exceptions import ToolError
-
-        tools["get_api_endpoint_detail"](
-            method="GET", path="/monitoring/v2/aps"
-        )
-
-        with pytest.raises(ToolError) as exc:
-            tools["call_central_api"](path="/monitoring/v2/switches")
-        # /switches is not in the test graph, so the fetcher returns None
-        # and we fall back to the explicit-instruction message.
-        assert "get_api_endpoint_detail" in str(exc.value)
-
 
 # ── Template-aware matching ──────────────────────────────────────────
 
 
 class TestTemplateMatching:
-    """The gate must resolve concrete paths back to catalog templates.
-
-    Without this, every device-specific path (``.../{serial-number}/...``
-    substituted with a real serial) would look like an uninspected
-    endpoint to the gate even after the agent inspected the template.
-    """
 
     def test_concrete_path_allowed_after_template_inspection(self):
         register_endpoints({
             "GET": ["/monitoring/v2/aps/{serial-number}/ports"],
         })
-        # Agent inspected the template, as catalog tools record it.
         get_tracker().record(
-            "GET", "/monitoring/v2/aps/{serial-number}/ports", "skeleton"
+            "GET", "/monitoring/v2/aps/{serial-number}/ports"
         )
 
         allowed, reason = check_call_policy(
@@ -336,14 +276,12 @@ class TestTemplateMatching:
             "GET", "/monitoring/v2/aps/DL0006948/ports"
         )
         assert allowed is False
-        # Block message must reference the *template*, not the concrete path.
         assert "{serial-number}" in (reason or "")
 
     def test_unknown_concrete_path_falls_through_to_literal_check(self):
-        # No templates registered; behaviour matches the original literal-only gate.
         allowed, _ = check_call_policy("GET", "/foo/bar")
         assert allowed is False
-        get_tracker().record("GET", "/foo/bar", "skeleton")
+        get_tracker().record("GET", "/foo/bar")
         allowed, _ = check_call_policy("GET", "/foo/bar")
         assert allowed is True
 
@@ -352,20 +290,17 @@ class TestTemplateMatching:
             "GET": ["/devices/{id}"],
             "POST": ["/devices/{id}"],
         })
-        get_tracker().record("GET", "/devices/{id}", "skeleton")
-        # GET on a concrete path resolves to the GET template — allowed.
+        get_tracker().record("GET", "/devices/{id}")
         ok_get, _ = check_call_policy("GET", "/devices/abc")
         assert ok_get is True
-        # POST on the same concrete path resolves to the POST template
-        # which has *not* been inspected — blocked.
         ok_post, _ = check_call_policy("POST", "/devices/abc")
         assert ok_post is False
 
 
-# ── Skeleton inlining seam ───────────────────────────────────────────
+# ── Property-summary inlining seam ───────────────────────────────────
 
 
-class TestSkeletonFetcherSeam:
+class TestPropertySummaryFetcherSeam:
 
     def test_fetcher_invoked_with_template_path(self):
         register_endpoints({"GET": ["/x/{id}/y"]})
@@ -373,9 +308,9 @@ class TestSkeletonFetcherSeam:
 
         def fetcher(method: str, template: str) -> str | None:
             seen.append((method, template))
-            return '{"operation_id": "demo"}'
+            return '{"properties": [{"name": "demo"}]}'
 
-        set_skeleton_fetcher(fetcher)
+        set_property_summary_fetcher(fetcher)
         allowed, reason = check_call_policy("GET", "/x/123/y")
         assert allowed is False
         assert seen == [("GET", "/x/{id}/y")]
@@ -383,10 +318,10 @@ class TestSkeletonFetcherSeam:
 
     def test_fetcher_returning_none_falls_back_to_legacy_message(self):
         register_endpoints({"GET": ["/x/{id}/y"]})
-        set_skeleton_fetcher(lambda m, p: None)
+        set_property_summary_fetcher(lambda m, p: None)
         allowed, reason = check_call_policy("GET", "/x/123/y")
         assert allowed is False
-        assert "get_api_endpoint_detail" in (reason or "")
+        assert "describe_endpoint_for_device" in (reason or "")
 
     def test_fetcher_exceptions_are_swallowed(self):
         register_endpoints({"GET": ["/x/{id}/y"]})
@@ -394,11 +329,10 @@ class TestSkeletonFetcherSeam:
         def boom(method: str, template: str) -> str | None:
             raise RuntimeError("graph offline")
 
-        set_skeleton_fetcher(boom)
+        set_property_summary_fetcher(boom)
         allowed, reason = check_call_policy("GET", "/x/123/y")
-        # Fetcher errors must not break the gate — fall back to legacy text.
         assert allowed is False
-        assert "get_api_endpoint_detail" in (reason or "")
+        assert "describe_endpoint_for_device" in (reason or "")
 
 
 # ── EndpointRegistry primitives ──────────────────────────────────────
@@ -419,7 +353,6 @@ class TestEndpointRegistry:
     def test_no_cross_segment_matching(self):
         r = EndpointRegistry()
         r.register("GET", ["/a/{x}"])
-        # ``{x}`` must not span ``/`` — ``/a/1/2`` should NOT match.
         assert r.match("GET", "/a/1/2") is None
 
     def test_method_lookup_is_isolated(self):
@@ -432,4 +365,3 @@ class TestEndpointRegistry:
         r.register("GET", ["/a/{x}"])
         r.reset()
         assert r.match("GET", "/a/1") is None
-

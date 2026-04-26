@@ -4,7 +4,7 @@ Covers:
 - Settings parses the READ_ONLY env var (truthy/falsy variants).
 - BaseHTTPClient._request refuses non-GET when READ_ONLY is set in env.
 - call_central_api / call_greenlake_api refuse non-GET when settings.read_only.
-- API catalog tools (unified_search, list_api_categories,
+- API catalog tools (list_api, list_api_categories,
   get_api_endpoint_detail) hide non-GET endpoints when settings.read_only.
 - _build_env propagates READ_ONLY to the script subprocess.
 - The MCP instructions string contains the READ_ONLY banner when active.
@@ -161,9 +161,6 @@ def gm_catalog(tmp_path_factory):
     db_path = tmp_path_factory.mktemp("ro_catalog") / "test.db"
     gm = GraphManager(db_path)
     gm.initialize()
-    skel_get = json.dumps({"method": "GET", "path": "/c/v1/things"})
-    skel_post = json.dumps({"method": "POST", "path": "/c/v1/things"})
-    skel_del = json.dumps({"method": "DELETE", "path": "/c/v1/things/{id}"})
     gm.execute(
         "CREATE (e:ApiEndpoint {"
         "  endpoint_id: 'GET:/c/v1/things',"
@@ -171,9 +168,7 @@ def gm_catalog(tmp_path_factory):
         "  summary: 'List things', description: 'd',"
         "  operationId: 'listThings', category: 'cfg',"
         "  deprecated: false,"
-        "  parameters: '[]', requestBody: '', responses: '',"
-        f"  bodySkeletonJson: '{_esc(skel_get)}',"
-        "  bodyGlossaryJson: ''"
+        "  parameters: '[]', requestBody: '', responses: ''"
         "})"
     )
     gm.execute(
@@ -183,9 +178,7 @@ def gm_catalog(tmp_path_factory):
         "  summary: 'Create a thing', description: 'd',"
         "  operationId: 'createThing', category: 'cfg',"
         "  deprecated: false,"
-        "  parameters: '[]', requestBody: '{}', responses: '{}',"
-        f"  bodySkeletonJson: '{_esc(skel_post)}',"
-        "  bodyGlossaryJson: ''"
+        "  parameters: '[]', requestBody: '{}', responses: '{}'"
         "})"
     )
     gm.execute(
@@ -195,9 +188,7 @@ def gm_catalog(tmp_path_factory):
         "  summary: 'Delete a thing', description: 'd',"
         "  operationId: 'deleteThing', category: 'cfg',"
         "  deprecated: false,"
-        "  parameters: '[]', requestBody: '', responses: '',"
-        f"  bodySkeletonJson: '{_esc(skel_del)}',"
-        "  bodyGlossaryJson: ''"
+        "  parameters: '[]', requestBody: '', responses: ''"
         "})"
     )
     gm.create_fts_indexes()
@@ -219,17 +210,6 @@ def _make_tools(gm, *, read_only: bool):
 
 
 class TestApiCatalogReadOnly:
-
-    def test_get_endpoint_detail_blocks_non_get_in_readonly(self, gm_catalog):
-        tools = _make_tools(gm_catalog, read_only=True)
-        result = json.loads(tools["get_api_endpoint_detail"](method="POST", path="/c/v1/things"))
-        assert "error" in result
-        assert "READ_ONLY" in result["error"].upper()
-
-    def test_get_endpoint_detail_allows_get_in_readonly(self, gm_catalog):
-        tools = _make_tools(gm_catalog, read_only=True)
-        result = json.loads(tools["get_api_endpoint_detail"](method="GET", path="/c/v1/things"))
-        assert result.get("method") == "GET"
 
     def test_list_api_excludes_mutating_methods_in_readonly(self, gm_catalog):
         tools_ro = _make_tools(gm_catalog, read_only=True)

@@ -1,7 +1,7 @@
 """Policy gate for API-call tools.
 
 Tracks which API endpoints an agent has inspected (via
-``get_api_endpoint_detail`` or ``get_api_endpoint_glossary``) before allowing
+``describe_endpoint_for_device``) before allowing
 ``call_central_api`` / ``call_greenlake_api`` to dispatch a request.
 
 The gate is **template-aware**: an inspection of
@@ -12,10 +12,10 @@ endpoints by template, so this is the only sane key to track inspections
 against; without it the gate forces an impossible inspection of every
 concrete URL.
 
-When the gate blocks a call it inlines the matched endpoint's skeleton into
-the error response (RFC 7807 / actionable-error style) so the agent can
-correct course in a single turn instead of round-tripping back to
-``get_api_endpoint_detail``.
+When the gate blocks a call it inlines the matched endpoint's property
+summary into the error response (RFC 7807 / actionable-error style) so the
+agent can correct course in a single turn instead of round-tripping back to
+``describe_endpoint_for_device``.
 
 **Process scope.** Each MCP server runs as a single OS process — the stdio
 transport spawns one server process per Claude session. Module-level state
@@ -24,22 +24,13 @@ independent processes with independent trackers. If the transport is ever
 changed to SSE or HTTP (one process serving many concurrent clients), this
 module must be reworked to key state on a per-connection identifier from
 the FastMCP request context.
-
-**Extension seam.** :func:`check_call_policy` is the single pre-call
-decision point. A future ``check_response_policy`` (post-call) can hook the
-same ``_make_api_call`` path to warn on missing filters, oversized
-responses, or other post-hoc conditions; the registry below already gives
-that future hook access to the matched template, which is the correct key
-for per-endpoint heuristics.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Callable, Literal
-
-InspectionKind = Literal["skeleton", "glossary"]
+from typing import Callable
 
 
 def normalise_path(path: str) -> str:
@@ -75,12 +66,7 @@ class _CompiledTemplate:
 
 @dataclass
 class EndpointRegistry:
-    """Tracks known endpoint templates per HTTP method.
-
-    Concrete paths (without ``{name}`` segments) compile to a regex that
-    matches only themselves, so non-parameterised endpoints flow through
-    the same lookup without a special case.
-    """
+    """Tracks known endpoint templates per HTTP method."""
 
     _by_method: dict[str, list[_CompiledTemplate]] = field(default_factory=dict)
 
@@ -107,14 +93,6 @@ class EndpointRegistry:
 
 
 @dataclass
-class InspectionRecord:
-    """Per-endpoint inspection state. Extend with new flags for new policies."""
-
-    skeleton: bool = False
-    glossary: bool = False
-
-
-@dataclass
 class InspectionTracker:
     """In-process record of which endpoints have been inspected.
 
@@ -123,66 +101,41 @@ class InspectionTracker:
     template before lookup.
     """
 
-    _records: dict[str, InspectionRecord] = field(default_factory=dict)
+    _records: set[str] = field(default_factory=set)
 
-    def record(self, method: str, path: str, kind: InspectionKind) -> None:
-        """Mark ``method``/``path`` as inspected with the given kind.
+    def record(self, method: str, path: str) -> None:
+        """Mark ``method``/``path`` as inspected."""
+        self._records.add(_eid(method, path))
 
-        ``path`` should normally be the template form; passing a concrete
-        path is harmless for non-parameterised endpoints.
-
-        Raises:
-            ValueError: If ``kind`` is not a known :data:`InspectionKind`.
-        """
-        eid = _eid(method, path)
-        rec = self._records.setdefault(eid, InspectionRecord())
-        if kind == "skeleton":
-            rec.skeleton = True
-        elif kind == "glossary":
-            rec.glossary = True
-        else:
-            raise ValueError(
-                f"Unknown inspection kind: {kind!r}. "
-                "Expected one of: 'skeleton', 'glossary'."
-            )
-
-    def was_inspected(
-        self,
-        method: str,
-        path: str,
-        *,
-        kinds: tuple[InspectionKind, ...] = ("skeleton", "glossary"),
-    ) -> bool:
-        """Return True if any of ``kinds`` has been recorded for the endpoint."""
-        rec = self._records.get(_eid(method, path))
-        if rec is None:
-            return False
-        return any(getattr(rec, k) for k in kinds)
+    def was_inspected(self, method: str, path: str) -> bool:
+        """Return True if the endpoint has been recorded as inspected."""
+        return _eid(method, path) in self._records
 
     def reset(self) -> None:
         """Clear all recorded inspections. Test helper."""
         self._records.clear()
 
 
-# ── Skeleton fetcher (for inlining into block messages) ─────────────
+# ── Property-summary fetcher (for inlining into block messages) ─────
 
 
-SkeletonFetcher = Callable[[str, str], str | None]
-"""``(method, template_path) -> skeleton_json_text`` or ``None`` if unavailable."""
+PropertySummaryFetcher = Callable[[str, str], str | None]
+"""``(method, template_path) -> property_summary_json`` or ``None``."""
 
-_skeleton_fetcher: SkeletonFetcher | None = None
+_property_summary_fetcher: PropertySummaryFetcher | None = None
 
 
-def set_skeleton_fetcher(fn: SkeletonFetcher | None) -> None:
-    """Register a callback that the gate uses to inline endpoint schemas.
+def set_property_summary_fetcher(fn: PropertySummaryFetcher | None) -> None:
+    """Register a callback that the gate uses to inline endpoint property
+    summaries.
 
     Decoupled from the catalog tool to keep this module free of graph
     imports. The callback should return a compact JSON string (or ``None``
-    if no skeleton is available); the gate falls back to a plain
+    if no property summary is available); the gate falls back to a plain
     instruction in that case.
     """
-    global _skeleton_fetcher
-    _skeleton_fetcher = fn
+    global _property_summary_fetcher
+    _property_summary_fetcher = fn
 
 
 # ── Module singletons ──────────────────────────────────────────────
@@ -214,19 +167,17 @@ def check_call_policy(method: str, path: str) -> tuple[bool, str | None]:
     """Decide whether ``call_central_api`` / ``call_greenlake_api`` may dispatch.
 
     Returns ``(True, None)`` if the call is permitted, otherwise
-    ``(False, error_message)`` with an inlined endpoint skeleton (when
+    ``(False, error_message)`` with an inlined property summary (when
     available) so the agent can correct course in a single turn.
 
     Resolution order:
-      1. Literal eid match (fast path; covers non-parameterised endpoints
-         and cases where the agent inspected a concrete URL).
-      2. Template match — find the catalog template that the concrete
-         path instantiates, then check whether that template was inspected.
+      1. Literal eid match (fast path).
+      2. Template match.
 
-    On block, if a skeleton is available, the inspection is auto-recorded
-    against the matched template — the agent has been given the schema in
-    the response, so a follow-up ``get_api_endpoint_detail`` round-trip is
-    redundant.
+    On block, if a property summary is available, the inspection is
+    auto-recorded against the matched template — the agent has been given
+    the field list in the response, so a follow-up
+    ``describe_endpoint_for_device`` round-trip is redundant.
     """
     method_u = method.upper()
     norm_path = normalise_path(path)
@@ -239,12 +190,12 @@ def check_call_policy(method: str, path: str) -> tuple[bool, str | None]:
         return True, None
 
     inspect_path = template or norm_path
-    skeleton_text: str | None = None
-    if _skeleton_fetcher is not None:
+    summary_text: str | None = None
+    if _property_summary_fetcher is not None:
         try:
-            skeleton_text = _skeleton_fetcher(method_u, inspect_path)
+            summary_text = _property_summary_fetcher(method_u, inspect_path)
         except Exception:  # noqa: BLE001 — best-effort enrichment
-            skeleton_text = None
+            summary_text = None
 
     lines = ["Endpoint schema not consulted before calling.", ""]
     if template is not None and template != norm_path:
@@ -255,30 +206,36 @@ def check_call_policy(method: str, path: str) -> tuple[bool, str | None]:
             "",
         ]
 
-    if skeleton_text:
+    if summary_text:
         lines += [
-            "Endpoint skeleton (consult before retrying):",
+            "Endpoint property summary (consult before retrying):",
             "",
-            skeleton_text,
+            summary_text,
             "",
             "Re-call this tool with the same arguments — the gate will "
-            "allow it on the next attempt now that the skeleton has been "
-            "shown.",
+            "allow it on the next attempt now that the property summary "
+            "has been shown.",
+            "",
+            "For ad-hoc structural questions, query the graph directly "
+            "with `query_graph` (Property / SchemaComponent / Parameter "
+            "node tables) or call "
+            f"describe_endpoint_for_device(method={method_u!r}, "
+            f"path={inspect_path!r}, deviceType=...) to filter by device "
+            "type.",
         ]
-        # Auto-record now that the skeleton is in the response. Saves a
-        # round-trip and keeps the gate at exactly one block per endpoint.
-        _tracker.record(method_u, inspect_path, "skeleton")
+        _tracker.record(method_u, inspect_path)
     else:
         lines += [
             "Inspect it first with:",
             "",
-            f"  get_api_endpoint_detail(method={method_u!r}, path={inspect_path!r})",
+            f"  describe_endpoint_for_device(method={method_u!r}, path={inspect_path!r})",
             "",
-            "This reveals every parameter, required field, and response "
-            "shape. For semantic context on parameter meanings (e.g. OData "
-            "filter syntax, enum semantics), additionally call "
-            f"get_api_endpoint_glossary(method={method_u!r}, "
-            f"path={inspect_path!r}).",
+            "This returns one record per leaf property of the endpoint's "
+            "request body (or 200 response): name, type, format, required, "
+            "readOnly, enumValues, description, supportedDeviceTypes, "
+            "yangPath, inheritedFrom, and the full extensions dict. For "
+            "ad-hoc structural questions, use `query_graph` against the "
+            "Property / SchemaComponent / Parameter node tables.",
         ]
 
     return False, "\n".join(lines)

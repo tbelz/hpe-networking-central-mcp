@@ -109,10 +109,6 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         parameters     STRING,
         requestBody    STRING,
         responses      STRING,
-        bodySkeletonJson     STRING,
-        bodyGlossaryJson     STRING,
-        bodyComponentsJson   STRING,
-        embedding      FLOAT[384],
         PRIMARY KEY (endpoint_id)
     )
     """,
@@ -131,7 +127,6 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         content    STRING,
         source     STRING,
         url        STRING,
-        embedding  FLOAT[384],
         PRIMARY KEY (section_id)
     )
     """,
@@ -148,10 +143,99 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         PRIMARY KEY (filename)
     )
     """,
+    # ── Schema subgraph (ADR 009) ────────────────────────────────────
+    # Decomposes per-endpoint OAS blobs into queryable Cypher entities so
+    # ``query_graph`` can serve as the primary API-discovery surface.
+    """
+    CREATE NODE TABLE IF NOT EXISTS Parameter (
+        parameter_id STRING,
+        endpoint_id  STRING,
+        name         STRING,
+        location     STRING,
+        required     BOOLEAN,
+        type         STRING,
+        format       STRING,
+        enumValues   STRING[],
+        pattern      STRING,
+        inferredHint STRING,
+        description  STRING,
+        PRIMARY KEY (parameter_id)
+    )
+    """,
+    """
+    CREATE NODE TABLE IF NOT EXISTS RequestBody (
+        request_body_id     STRING,
+        endpoint_id         STRING,
+        content_type        STRING,
+        required            BOOLEAN,
+        root_component_ref  STRING,
+        PRIMARY KEY (request_body_id)
+    )
+    """,
+    """
+    CREATE NODE TABLE IF NOT EXISTS Response (
+        response_id         STRING,
+        endpoint_id         STRING,
+        status              STRING,
+        content_type        STRING,
+        root_component_ref  STRING,
+        PRIMARY KEY (response_id)
+    )
+    """,
+    """
+    CREATE NODE TABLE IF NOT EXISTS SchemaComponent (
+        component_id   STRING,
+        spec_source    STRING,
+        section        STRING,
+        name           STRING,
+        type           STRING,
+        kind           STRING,
+        required       STRING[],
+        enumValues     STRING[],
+        bodyJson       STRING,
+        PRIMARY KEY (component_id)
+    )
+    """,
+    # ── Property-level subgraph (ADR 009 Phase 2C) ────────────────────
+    # First-class node per leaf field so vendor extensions like
+    # x-supportedDeviceType / x-path become Cypher-queryable. allOf
+    # branches are flattened into HAS_PROPERTY edges with
+    # ``inheritedFrom`` provenance so the agent can ask "what fields
+    # can I send to this endpoint, restricted to Switch CX?" in one
+    # query without parsing JSON skeletons.
+    """
+    CREATE NODE TABLE IF NOT EXISTS Property (
+        property_id          STRING,
+        parent_component_id  STRING,
+        name                 STRING,
+        type                 STRING,
+        format               STRING,
+        required             BOOLEAN,
+        enumValues           STRING[],
+        description          STRING,
+        supportedDeviceTypes STRING[],
+        yangPath             STRING,
+        extensionsJson       STRING,
+        inheritedFrom        STRING,
+        readOnly             BOOLEAN,
+        PRIMARY KEY (property_id)
+    )
+    """,
 ]
 
 KNOWLEDGE_REL_TABLES: list[str] = [
     "CREATE REL TABLE IF NOT EXISTS BELONGS_TO_CATEGORY (FROM ApiEndpoint TO ApiCategory)",
+    # ── Schema subgraph relationships (ADR 009) ──────────────────────
+    "CREATE REL TABLE IF NOT EXISTS HAS_PARAMETER (FROM ApiEndpoint TO Parameter)",
+    "CREATE REL TABLE IF NOT EXISTS HAS_REQUEST_BODY (FROM ApiEndpoint TO RequestBody)",
+    "CREATE REL TABLE IF NOT EXISTS HAS_RESPONSE (FROM ApiEndpoint TO Response)",
+    "CREATE REL TABLE IF NOT EXISTS BODY_REFERENCES (FROM RequestBody TO SchemaComponent)",
+    "CREATE REL TABLE IF NOT EXISTS RESPONSE_REFERENCES (FROM Response TO SchemaComponent)",
+    "CREATE REL TABLE IF NOT EXISTS REFERENCES (FROM SchemaComponent TO SchemaComponent, via STRING)",
+    # ── Property-level edges (ADR 009 Phase 2C) ──────────────────────
+    "CREATE REL TABLE IF NOT EXISTS HAS_PROPERTY (FROM SchemaComponent TO Property)",
+    "CREATE REL TABLE IF NOT EXISTS PROPERTY_OF_TYPE (FROM Property TO SchemaComponent)",
+    "CREATE REL TABLE IF NOT EXISTS COMPOSED_OF (FROM SchemaComponent TO SchemaComponent, kind STRING)",
 ]
 
 # ── Relationship table DDL ───────────────────────────────────────────
