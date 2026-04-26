@@ -97,22 +97,30 @@ direct API reads and reusable Python scripts.
 Read docs://script-writing-guide for the script template and authentication pattern.
 Scripts use `from central_helpers import api, glp, graph` — no OAuth2 boilerplate needed.
 
-## Choosing the right search tool
+## Choosing the right discovery tool
 
 - **API Endpoint Catalog (`api://endpoint-catalog` resource, or in-context below)**:
   The authoritative list of every API endpoint. Read the resource or scan the
   embedded catalog to find a `METHOD /path`, then call
-  `get_api_endpoint_detail(...)` for the structural skeleton, and (rarely)
-  `get_api_endpoint_glossary(...)` if a field name is ambiguous.
-- **unified_search(query, scope="data")**: Quick keyword lookup in graph nodes (devices,
-  sites, config profiles). Use when you know a name fragment but not the full identifier.
-- **unified_search(query, scope="docs")**: Search documentation sections.
+  `get_api_endpoint_detail(...)` for the structural skeleton, and
+  `get_api_endpoint_glossary(...)` for parameter semantics (filter syntax,
+  enum meanings) when the names alone are ambiguous.
 - **query_graph(cypher)**: Structured Cypher queries for topology traversal, filtering by
   properties, aggregations, or following relationships. Use when you need precise graph
-  navigation (e.g., "all devices at site X", "effective config for device Y").
+  navigation (e.g., "all devices at site X", "effective config for device Y"). Also use
+  it for keyword lookups on graph nodes (devices, sites) — e.g.
+  `MATCH (d:Device) WHERE d.name CONTAINS 'Switch-01' RETURN d`.
 
-When in doubt: use `unified_search(scope="data")` for keyword lookups and `query_graph()`
-for relationship traversals or property filters.
+## API call gate (enforced)
+
+Before `call_central_api` or `call_greenlake_api` will dispatch a request,
+you MUST have called `get_api_endpoint_detail` or `get_api_endpoint_glossary`
+for that exact `METHOD /path` in the current session. Calls without prior
+inspection are rejected with a prescriptive error pointing you at the right
+lookup. This exists because skipping the schema lookup is the single most
+common cause of wrong-parameter / oversized-response failures — a quick
+detail call surfaces every server-side filter and saves pulling and locally
+truncating large payloads.
 
 ## MCP Resources
 

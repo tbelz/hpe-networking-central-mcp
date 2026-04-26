@@ -16,6 +16,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from ..config import Settings
+from .api_call_policy import get_tracker
 from .search import fts_search, contains_search
 
 if TYPE_CHECKING:
@@ -31,7 +32,13 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
     global _graph_manager
     _graph_manager = graph_manager
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+    # NOTE: ``unified_search`` is intentionally NOT registered as an MCP tool.
+    # The implementation below is retained in-source purely so the tool can
+    # be re-enabled by restoring the @mcp.tool decorator once the underlying
+    # VSG / docs corpus is populated — it is defined inside this closure and
+    # is not exposed as an importable symbol. Until then, agents should
+    # navigate via the graph (``query_graph``) and the API endpoint catalog
+    # (``api://endpoint-catalog`` / ``get_api_endpoint_detail``).
     def unified_search(
         query: str,
         scope: str = "data",
@@ -294,6 +301,14 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
             d.setdefault("category", r.get("e.category", ""))
             details_by_eid[eid_key] = d
 
+        # Record inspection for the policy gate. Any endpoint the DB
+        # actually returned a row for counts as inspected — even if the
+        # skeleton blob is corrupt, the agent has demonstrably looked it up.
+        tracker = get_tracker()
+        for eid_key in found_eids:
+            method_val, _, path_val = eid_key.partition(":")
+            tracker.record(method_val, path_val, "skeleton")
+
         if not is_bulk:
             eid = eids[0]
             if eid not in details_by_eid:
@@ -466,6 +481,12 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
                     if name in wanted_components
                 }
             details_by_eid[eid_key] = d
+
+        # Record inspection for the policy gate (see get_api_endpoint_detail).
+        tracker = get_tracker()
+        for eid_key in found_eids:
+            method_val, _, path_val = eid_key.partition(":")
+            tracker.record(method_val, path_val, "glossary")
 
         if not is_bulk:
             eid = eids[0]

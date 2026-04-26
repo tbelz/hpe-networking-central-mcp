@@ -186,49 +186,29 @@ def tools(gm, settings):
     return tool_map
 
 
-# ── unified_search ──────────────────────────────────────────────────
+# ── unified_search (hidden tool) ────────────────────────────────────
 
 
-class TestUnifiedSearch:
+class TestUnifiedSearchHidden:
+    """``unified_search`` is intentionally not registered as an MCP tool.
 
-    def test_search_data_scope_finds_device(self, gm, tools):
-        gm.execute(
-            "CREATE (d:Device {"
-            "  serial: 'CAT-SN001', name: 'Cat-Switch-01', model: 'Aruba 6300',"
-            "  deviceType: 'SWITCH', status: 'Up'"
-            "})"
-        )
-        gm.create_fts_indexes()
-        result = json.loads(tools["unified_search"](query="Cat-Switch", scope="data"))
-        assert result["total"] >= 1
-        assert result["scope"] == "data"
+    The function body is preserved in :mod:`tools.api_catalog` (so the tool
+    can be re-enabled by restoring the ``@mcp.tool`` decorator once a real
+    docs / VSG corpus is available) but it must not appear in the registered
+    tool surface — agents should reach for ``query_graph`` for keyword
+    lookups against graph data, and the API endpoint catalog for endpoint
+    discovery.
+    """
 
-    def test_search_default_scope_is_data(self, tools):
-        result = json.loads(tools["unified_search"](query="anything"))
-        assert result["scope"] == "data"
+    def test_unified_search_not_registered_as_tool(self, tools):
+        assert "unified_search" not in tools
 
-    def test_empty_query_errors(self, tools):
-        result = json.loads(tools["unified_search"](query=""))
-        assert "error" in result
 
-    def test_invalid_scope_errors(self, tools):
-        result = json.loads(tools["unified_search"](query="x", scope="invalid"))
-        assert "error" in result
-
-    def test_api_scope_no_longer_supported(self, tools):
-        result = json.loads(tools["unified_search"](query="x", scope="api"))
-        assert "error" in result
-        assert "api://endpoint-catalog" in result["error"]
-
-    def test_limit_is_clamped_silently(self, tools):
-        # No error when limit > 50; tool clamps to 50.
-        result = json.loads(tools["unified_search"](query="x", limit=999))
-        assert "scope" in result
-
-    def test_docs_scope_accepted(self, tools):
-        result = json.loads(tools["unified_search"](query="x", scope="docs"))
-        assert "error" not in result
-        assert result["scope"] == "docs"
+# ── unified_search (implementation retained for future re-enablement) ─
+# The original behavioural tests have been removed because the
+# implementation is no longer reachable through ``mcp._tool_manager`` and
+# is defined inside ``register_catalog_tools`` (not importable as a
+# module-level symbol). Restore them when the tool is re-registered.
 
 
 # ── list_api ─────────────────────────────────────────────────────────
@@ -354,26 +334,33 @@ class TestGetApiEndpointGlossary:
 
 
 class TestGraphUnavailable:
+    """``get_api_endpoint_detail`` / ``_glossary`` must degrade gracefully
+    when the graph database is not yet loaded (e.g. server start-up race)."""
 
-    def test_unified_search_no_graph(self, settings):
+    def test_detail_and_glossary_report_graph_unavailable(self, settings):
         from mcp.server.fastmcp import FastMCP
         from hpe_networking_central_mcp.tools import api_catalog
 
+        # ``register_catalog_tools`` sets the module-level ``_graph_manager``.
+        # Save and restore so we don't poison the module-scoped ``tools``
+        # fixture used by other test classes.
         original = api_catalog._graph_manager
-        api_catalog._graph_manager = None
-
-        mcp = FastMCP("test2")
-        api_catalog.register_catalog_tools(mcp, settings, MagicMock(is_available=False))
-        api_catalog._graph_manager = None
         try:
-            tool_fn = None
-            for t in mcp._tool_manager._tools.values():
-                if t.name == "unified_search":
-                    tool_fn = t.fn
-                    break
-            assert tool_fn is not None
-            result = json.loads(tool_fn(query="test"))
-            assert "error" in result
+            mcp = FastMCP("test_no_graph")
+            api_catalog.register_catalog_tools(
+                mcp, settings, MagicMock(is_available=False)
+            )
+
+            tool_map = {t.name: t.fn for t in mcp._tool_manager._tools.values()}
+
+            for name in ("get_api_endpoint_detail", "get_api_endpoint_glossary"):
+                result = json.loads(
+                    tool_map[name](method="GET", path="/monitoring/v2/aps")
+                )
+                assert "error" in result, f"{name} did not return an error"
+                assert "graph" in result["error"].lower(), (
+                    f"{name} error did not mention the graph: {result['error']!r}"
+                )
         finally:
             api_catalog._graph_manager = original
 
