@@ -33,9 +33,10 @@ def register_catalog_tools(mcp: FastMCP, settings: Settings, graph_manager: Grap
     _graph_manager = graph_manager
 
     # NOTE: ``unified_search`` is intentionally NOT registered as an MCP tool.
-    # The function body is preserved (and still callable from Python) so the
-    # tool can be re-enabled by restoring the @mcp.tool decorator once the
-    # underlying VSG / docs corpus is populated. Until then, agents should
+    # The implementation below is retained in-source purely so the tool can
+    # be re-enabled by restoring the @mcp.tool decorator once the underlying
+    # VSG / docs corpus is populated — it is defined inside this closure and
+    # is not exposed as an importable symbol. Until then, agents should
     # navigate via the graph (``query_graph``) and the API endpoint catalog
     # (``api://endpoint-catalog`` / ``get_api_endpoint_detail``).
     def unified_search(

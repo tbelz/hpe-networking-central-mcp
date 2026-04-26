@@ -204,10 +204,11 @@ class TestUnifiedSearchHidden:
         assert "unified_search" not in tools
 
 
-# ── unified_search (function still importable, kept for re-enablement) ─
-# The original behavioural tests below have been removed because the
-# function is no longer reachable through ``mcp._tool_manager``. Restore
-# them when the tool is re-registered.
+# ── unified_search (implementation retained for future re-enablement) ─
+# The original behavioural tests have been removed because the
+# implementation is no longer reachable through ``mcp._tool_manager`` and
+# is defined inside ``register_catalog_tools`` (not importable as a
+# module-level symbol). Restore them when the tool is re-registered.
 
 
 # ── list_api ─────────────────────────────────────────────────────────
@@ -333,24 +334,33 @@ class TestGetApiEndpointGlossary:
 
 
 class TestGraphUnavailable:
+    """``get_api_endpoint_detail`` / ``_glossary`` must degrade gracefully
+    when the graph database is not yet loaded (e.g. server start-up race)."""
 
-    def test_unified_search_no_graph(self, settings):
-        # ``unified_search`` is no longer registered as an MCP tool (the
-        # function body is preserved in api_catalog for future re-enablement).
-        # See TestUnifiedSearchHidden above.
+    def test_detail_and_glossary_report_graph_unavailable(self, settings):
         from mcp.server.fastmcp import FastMCP
         from hpe_networking_central_mcp.tools import api_catalog
 
-        # ``register_catalog_tools`` sets the module-level ``_graph_manager``
-        # to whatever is passed in. Save and restore so we don't poison the
-        # module-scoped ``tools`` fixture used by other test classes.
+        # ``register_catalog_tools`` sets the module-level ``_graph_manager``.
+        # Save and restore so we don't poison the module-scoped ``tools``
+        # fixture used by other test classes.
         original = api_catalog._graph_manager
         try:
-            mcp = FastMCP("test2")
-            api_catalog.register_catalog_tools(mcp, settings, MagicMock(is_available=False))
-            assert not any(
-                t.name == "unified_search" for t in mcp._tool_manager._tools.values()
+            mcp = FastMCP("test_no_graph")
+            api_catalog.register_catalog_tools(
+                mcp, settings, MagicMock(is_available=False)
             )
+
+            tool_map = {t.name: t.fn for t in mcp._tool_manager._tools.values()}
+
+            for name in ("get_api_endpoint_detail", "get_api_endpoint_glossary"):
+                result = json.loads(
+                    tool_map[name](method="GET", path="/monitoring/v2/aps")
+                )
+                assert "error" in result, f"{name} did not return an error"
+                assert "graph" in result["error"].lower(), (
+                    f"{name} error did not mention the graph: {result['error']!r}"
+                )
         finally:
             api_catalog._graph_manager = original
 

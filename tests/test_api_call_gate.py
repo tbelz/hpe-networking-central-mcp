@@ -132,10 +132,12 @@ class TestCheckCallPolicy:
 
 
 @pytest.fixture
-def catalog_tools():
+def catalog_tools(tmp_path):
     """Build a FastMCP server with the catalog + api_call tools registered.
 
     Reuses the in-memory graph fixture from ``test_api_catalog.py``.
+    Uses pytest's ``tmp_path`` so the temporary DB and script library are
+    cleaned up automatically after the test, even on failure.
     """
     from mcp.server.fastmcp import FastMCP
 
@@ -147,10 +149,7 @@ def catalog_tools():
         register_greenlake_api_call_tools,
     )
 
-    import tempfile
-
-    tmpdir = tempfile.mkdtemp()
-    db_path = Path(tmpdir) / "gate.db"
+    db_path = tmp_path / "gate.db"
     gm = GraphManager(db_path)
     gm.initialize()
 
@@ -199,7 +198,7 @@ def catalog_tools():
         central_base_url="https://test.example.com",
         central_client_id="cid",
         central_client_secret="csec",
-        script_library_path=Path(tmpdir) / "lib",
+        script_library_path=tmp_path / "lib",
     )
 
     mcp = FastMCP("test")

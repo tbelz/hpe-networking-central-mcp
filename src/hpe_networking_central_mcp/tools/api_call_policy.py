@@ -52,13 +52,26 @@ class InspectionTracker:
     _records: dict[str, InspectionRecord] = field(default_factory=dict)
 
     def record(self, method: str, path: str, kind: InspectionKind) -> None:
-        """Mark ``method``/``path`` as inspected with the given kind."""
+        """Mark ``method``/``path`` as inspected with the given kind.
+
+        Raises:
+            ValueError: If ``kind`` is not a known :data:`InspectionKind`.
+                The ``Literal`` type is not enforced at runtime, so an
+                accidental typo (e.g. ``"skelton"``) would otherwise silently
+                no-op and leave the gate permanently blocked for that
+                endpoint — fail fast instead.
+        """
         eid = _eid(method, path)
         rec = self._records.setdefault(eid, InspectionRecord())
         if kind == "skeleton":
             rec.skeleton = True
         elif kind == "glossary":
             rec.glossary = True
+        else:
+            raise ValueError(
+                f"Unknown inspection kind: {kind!r}. "
+                "Expected one of: 'skeleton', 'glossary'."
+            )
 
     def was_inspected(
         self,
