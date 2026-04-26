@@ -376,6 +376,50 @@ class TestScriptRuntimeHttpxGuard:
         assert result.returncode == 0
         assert "WRONGLY_BLOCKED" not in result.stdout
 
+    def test_sso_token_post_not_blocked_when_readonly(self, tmp_path):
+        """POST to the HPE SSO token endpoint must NOT be blocked in READ_ONLY
+        mode — central_helpers needs it to acquire a bearer token before
+        issuing any GET request to Central/GreenLake.
+        """
+        runtime_dir = (
+            Path(__file__).parent.parent
+            / "src"
+            / "hpe_networking_central_mcp"
+            / "script_runtime"
+        )
+
+        script = tmp_path / "token_post.py"
+        script.write_text(
+            "import sys, httpx\n"
+            "TOKEN_URL = 'https://sso.common.cloud.hpe.com/as/token.oauth2'\n"
+            "try:\n"
+            "    httpx.Client(timeout=0.1).post(TOKEN_URL, data={'grant_type': 'client_credentials'})\n"
+            "except httpx.HTTPError as e:\n"
+            "    if 'READ_ONLY' in str(e):\n"
+            "        print('WRONGLY_BLOCKED'); sys.exit(1)\n"
+            "    # Any other HTTP/network error (ConnectError, timeout) is fine.\n"
+            "    print('OK_NETWORK_ERROR'); sys.exit(0)\n"
+            "print('OK_RESPONSE'); sys.exit(0)\n",
+            encoding="utf-8",
+        )
+
+        import subprocess
+        env = os.environ.copy()
+        env["READ_ONLY"] = "true"
+        env["PYTHONPATH"] = str(runtime_dir) + os.pathsep + env.get("PYTHONPATH", "")
+        result = subprocess.run(
+            [sys.executable, str(script)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        assert result.returncode == 0, (
+            f"SSO token POST should not be blocked in READ_ONLY mode; "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "WRONGLY_BLOCKED" not in result.stdout
+
 
 # ── Server instructions banner ──────────────────────────────────────
 

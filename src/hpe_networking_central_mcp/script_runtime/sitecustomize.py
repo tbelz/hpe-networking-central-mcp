@@ -18,6 +18,14 @@ import os
 _TRUTHY = {"1", "true", "yes", "on"}
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
+# URLs that are always allowed regardless of method, because they are
+# required infrastructure even for read-only workflows.  The HPE SSO
+# token endpoint must be reachable so that ``central_helpers`` can
+# obtain a bearer token before issuing any GET requests.
+_SAFE_URLS = {
+    "https://sso.common.cloud.hpe.com/as/token.oauth2",
+}
+
 
 def _read_only() -> bool:
     return os.environ.get("READ_ONLY", "").strip().lower() in _TRUTHY
@@ -34,7 +42,8 @@ def _install_httpx_guard() -> None:
 
     def _guarded_send(self, request, *args, **kwargs):  # type: ignore[no-redef]
         method = (request.method or "").upper()
-        if _read_only() and method not in _SAFE_METHODS:
+        url = str(request.url)
+        if _read_only() and method not in _SAFE_METHODS and url not in _SAFE_URLS:
             raise httpx.HTTPError(
                 f"READ_ONLY mode: refusing {method} {request.url}. "
                 "The MCP server is in READ_ONLY mode; mutating HTTP "
@@ -44,7 +53,8 @@ def _install_httpx_guard() -> None:
 
     async def _guarded_async_send(self, request, *args, **kwargs):  # type: ignore[no-redef]
         method = (request.method or "").upper()
-        if _read_only() and method not in _SAFE_METHODS:
+        url = str(request.url)
+        if _read_only() and method not in _SAFE_METHODS and url not in _SAFE_URLS:
             raise httpx.HTTPError(
                 f"READ_ONLY mode: refusing {method} {request.url}. "
                 "The MCP server is in READ_ONLY mode; mutating HTTP "
