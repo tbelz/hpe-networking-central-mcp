@@ -444,6 +444,7 @@ def _populate_schema_subgraph(db: lb.Database, specs: list[dict]) -> dict:
         "request_bodies": 0,
         "responses": 0,
         "components": 0,
+        "properties": 0,
         "references": 0,
         "skeletons": 0,
     }
@@ -633,6 +634,7 @@ def main() -> None:
         f"  Schema subgraph: {schema_stats['endpoints']} endpoints, "
         f"{schema_stats['parameters']} parameters, "
         f"{schema_stats['components']} components, "
+        f"{schema_stats['properties']} properties, "
         f"{schema_stats['references']} REFERENCES edges, "
         f"{schema_stats['skeletons']} skeleton blobs"
     )
@@ -663,7 +665,7 @@ def main() -> None:
     import time
     manifest = {
         "version": time.strftime("knowledge-db-%Y%m%d-%H%M%S", time.gmtime()),
-        "schema_version": 5,
+        "schema_version": 6,
         "endpoint_count": endpoint_count,
         "category_count": len(index.categories),
         "doc_count": doc_count,

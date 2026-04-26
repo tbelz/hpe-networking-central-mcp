@@ -208,6 +208,30 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         PRIMARY KEY (endpoint_id)
     )
     """,
+    # ── Property-level subgraph (ADR 009 Phase 2C) ────────────────────
+    # First-class node per leaf field so vendor extensions like
+    # x-supportedDeviceType / x-path become Cypher-queryable. allOf
+    # branches are flattened into HAS_PROPERTY edges with
+    # ``inheritedFrom`` provenance so the agent can ask "what fields
+    # can I send to this endpoint, restricted to Switch CX?" in one
+    # query without parsing JSON skeletons.
+    """
+    CREATE NODE TABLE IF NOT EXISTS Property (
+        property_id          STRING,
+        parent_component_id  STRING,
+        name                 STRING,
+        type                 STRING,
+        format               STRING,
+        required             BOOLEAN,
+        enumValues           STRING[],
+        description          STRING,
+        supportedDeviceTypes STRING[],
+        yangPath             STRING,
+        extensionsJson       STRING,
+        inheritedFrom        STRING,
+        PRIMARY KEY (property_id)
+    )
+    """,
 ]
 
 KNOWLEDGE_REL_TABLES: list[str] = [
@@ -220,6 +244,10 @@ KNOWLEDGE_REL_TABLES: list[str] = [
     "CREATE REL TABLE IF NOT EXISTS RESPONSE_REFERENCES (FROM Response TO SchemaComponent)",
     "CREATE REL TABLE IF NOT EXISTS REFERENCES (FROM SchemaComponent TO SchemaComponent, via STRING)",
     "CREATE REL TABLE IF NOT EXISTS HAS_SKELETON (FROM ApiEndpoint TO ApiEndpointSkeleton)",
+    # ── Property-level edges (ADR 009 Phase 2C) ──────────────────────
+    "CREATE REL TABLE IF NOT EXISTS HAS_PROPERTY (FROM SchemaComponent TO Property)",
+    "CREATE REL TABLE IF NOT EXISTS PROPERTY_OF_TYPE (FROM Property TO SchemaComponent)",
+    "CREATE REL TABLE IF NOT EXISTS COMPOSED_OF (FROM SchemaComponent TO SchemaComponent, kind STRING)",
 ]
 
 # ── Relationship table DDL ───────────────────────────────────────────

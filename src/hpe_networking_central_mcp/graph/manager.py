@@ -414,6 +414,17 @@ required fields without ever materialising a full skeleton.
   parameters, requestBodies, responses). Properties: `component_id` (PK),
   `spec_source`, `section`, `name`, `type`, `kind`, `required`,
   `enumValues`, `bodyJson` (full serialised component for deep inspection).
+- `Property` — one row per leaf property of a `SchemaComponent`
+  (including properties flattened from `allOf` branches). Properties:
+  `property_id` (PK), `parent_component_id`, `name`, `type`, `format`,
+  `required`, `enumValues`, `description`, `supportedDeviceTypes`
+  (typed list extracted from the `x-supportedDeviceType` vendor
+  extension — first-class for filtering), `yangPath` (typed extraction
+  of the `x-path` vendor extension), `extensionsJson` (the **full**
+  set of `x-*` vendor extensions for that property as a JSON string,
+  including the typed-extracted ones), `inheritedFrom` (empty for
+  properties defined directly on the component, or the name of the
+  `allOf` branch component when the property was flattened up).
 - `ApiEndpointSkeleton` — large pre-rendered JSON blobs (skeleton +
   glossary) kept off the hot path. Reached via `HAS_SKELETON`.
 
@@ -422,6 +433,15 @@ required fields without ever materialising a full skeleton.
 - `(ApiEndpoint)-[:HAS_REQUEST_BODY]->(RequestBody)`
 - `(ApiEndpoint)-[:HAS_RESPONSE {statusCode}]->(Response)`
 - `(RequestBody|Response)-[:OF_TYPE]->(SchemaComponent)`
+- `(SchemaComponent)-[:HAS_PROPERTY]->(Property)` — every leaf
+  property reachable from the component (direct or flattened from an
+  `allOf` branch).
+- `(Property)-[:PROPERTY_OF_TYPE]->(SchemaComponent)` — when a
+  property's value is itself a named component (`$ref` or
+  `items.$ref`).
+- `(SchemaComponent)-[:COMPOSED_OF {kind}]->(SchemaComponent)` —
+  records `allOf` / `oneOf` / `anyOf` composition; `kind` is the
+  composition keyword.
 - `(SchemaComponent)-[:REFERENCES {role, fieldName}]->(SchemaComponent)`
   — captures `$ref` edges between components (role is e.g. "property",
   "items", "allOf").
@@ -467,6 +487,36 @@ RETURN r.fieldName, r.role, target.section, target.name, target.type
 MATCH (e:ApiEndpoint)-[:HAS_RESPONSE {statusCode: '200'}]->(:Response)
       -[:OF_TYPE]->(c:SchemaComponent {name: $name})
 RETURN e.method, e.path
+```
+
+```cypher
+// Headline use case: which fields of an NTP profile apply to Switch CX?
+MATCH (c:SchemaComponent {name: $componentName})-[:HAS_PROPERTY]->(p:Property)
+WHERE 'Switch CX' IN p.supportedDeviceTypes
+RETURN p.name, p.type, p.required, p.yangPath, p.inheritedFrom
+ORDER BY p.name
+```
+
+```cypher
+// Find an API field by its YANG path (helps map legacy CLI/YANG configs
+// to the right OpenAPI body field)
+MATCH (p:Property {yangPath: $yp})<-[:HAS_PROPERTY]-(c:SchemaComponent)
+      <-[:OF_TYPE]-(:RequestBody)<-[:HAS_REQUEST_BODY]-(e:ApiEndpoint)
+RETURN e.method, e.path, c.name AS component, p.name AS field
+```
+
+```cypher
+// Show the allOf composition tree of a component
+MATCH (c:SchemaComponent {name: $name})-[r:COMPOSED_OF {kind: 'allOf'}]->(b:SchemaComponent)
+RETURN b.name, b.section
+```
+
+```cypher
+// Inherited vs directly-defined properties on a composite component
+MATCH (c:SchemaComponent {name: $name})-[:HAS_PROPERTY]->(p:Property)
+RETURN p.name, p.type, p.required,
+       CASE WHEN p.inheritedFrom = '' THEN 'direct' ELSE p.inheritedFrom END AS source
+ORDER BY source, p.name
 ```
 
 When you need the full pre-rendered skeleton/glossary blob (rarely — most
