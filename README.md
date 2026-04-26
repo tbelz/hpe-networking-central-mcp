@@ -21,11 +21,11 @@ The agent manages network devices through a combination of direct API calls and 
 │   MCP Server (FastMCP)  │
 │                         │
 │  Tools:                 │
-│  ├─ call_central_api    │──► Central REST API (monitoring, config, etc.)
-│  ├─ call_greenlake_api  │──► GreenLake Platform API (devices, subscriptions)
-│  ├─ unified_search      │──► Search APIs, docs, and data by keyword (BM25/FTS)
+│  ├─ call_central_api    │──► Central REST API (monitoring, config, etc.) — gated on prior get_api_endpoint_detail / get_api_endpoint_glossary
+│  ├─ call_greenlake_api  │──► GreenLake Platform API (devices, subscriptions) — same gate
 │  ├─ list_api            │──► Return the full nested API tree (fallback)
-│  ├─ get_api_endpoint_detail ──► Full parameter/schema detail for any endpoint
+│  ├─ get_api_endpoint_detail ──► Structural skeleton (params, schemas, responses)
+│  ├─ get_api_endpoint_glossary ──► Prose descriptions for params and components
 │  ├─ query_graph         │──► Cypher queries against the configuration graph
 │  ├─ write_graph         │──► Write Cypher to enrich the graph (CREATE, MERGE, SET)
 │  ├─ list_scripts        │──► Browse automation script library
@@ -197,7 +197,7 @@ GREENLAKE_CLIENT_SECRET=your_glp_client_secret
 | `GREENLAKE_CLIENT_SECRET` | No | Central client secret | GreenLake Platform client secret |
 | `GLP_BASE_URL` | No | `https://global.api.greenlake.hpe.com` | GreenLake API base URL |
 | `GLP_INCLUDED_SLUGS` | No | — | Comma-separated service slugs to include (or empty for default set) |
-| `READ_ONLY` | No | `false` | When set to `true`/`1`/`yes`/`on` (case-insensitive), the server refuses any non-GET Central / GreenLake API call (both via tools and from inside scripts) and hides mutating endpoints from `unified_search`, `list_api`, and `get_api_endpoint_detail`. Local operations (`write_graph`, `save_script`, `execute_script`) remain available. |
+| `READ_ONLY` | No | `false` | When set to `true`/`1`/`yes`/`on` (case-insensitive), the server refuses any non-GET Central / GreenLake API call (both via tools and from inside scripts) and hides mutating endpoints from `list_api`, `get_api_endpoint_detail`, and `get_api_endpoint_glossary`. Local operations (`write_graph`, `save_script`, `execute_script`) remain available. |
 
 ### Read-Only Mode
 
@@ -208,9 +208,9 @@ Start the container with `READ_ONLY=true` to lock the server into a
   and `DELETE` with a `READ_ONLY` error.
 - The same restriction is enforced inside scripts — `api.post(...)` and
   friends fail with `CentralAPIError(403, "READ_ONLY", ...)`.
-- Mutating endpoints are filtered out of `unified_search`,
-  `list_api`, and `get_api_endpoint_detail` so the model never
-  sees them.
+- Mutating endpoints are filtered out of `list_api`,
+  `get_api_endpoint_detail`, and `get_api_endpoint_glossary` so the model
+  never sees them.
 - A banner is prepended to the MCP system prompt so the assistant knows it
   must not attempt configuration changes.
 - Local-only operations (graph writes, saving / editing scripts, executing
@@ -298,11 +298,11 @@ the `GREENLAKE_*` lines if you're only using Central APIs.
 
 | Tool | Description |
 |------|-------------|
-| `call_central_api` | Make authenticated requests to any Central API endpoint |
-| `call_greenlake_api` | Make authenticated requests to any GreenLake Platform API endpoint (only available when GreenLake credentials are configured) |
-| `unified_search` | Search APIs, docs, and graph data by keyword (BM25/FTS with scope filtering) |
+| `call_central_api` | Make authenticated requests to any Central API endpoint. Gated: requires a prior `get_api_endpoint_detail` or `get_api_endpoint_glossary` call for the target `METHOD /path` in the same session. |
+| `call_greenlake_api` | Make authenticated requests to any GreenLake Platform API endpoint (only available when GreenLake credentials are configured). Same gate as above. |
 | `list_api` | Return the full nested API tree (fallback for clients that don't surface the catalog via instructions or the `api://endpoint-catalog` resource) |
-| `get_api_endpoint_detail` | Get full parameter and schema details for a specific endpoint |
+| `get_api_endpoint_detail` | Get the structural skeleton (parameters, schemas, response shapes) for one or more endpoints. Records inspection for the call gate. |
+| `get_api_endpoint_glossary` | Get prose descriptions for parameters and components (filter syntax, enum semantics, units). Also records inspection for the call gate. |
 | `query_graph` | Execute read-only Cypher queries against the configuration graph |
 | `write_graph` | Execute write Cypher to enrich the graph (CREATE, MERGE, SET, DELETE) |
 | `list_scripts` | List all scripts in the automation library |

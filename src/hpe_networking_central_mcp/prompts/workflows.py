@@ -90,8 +90,9 @@ Follow this workflow:
    ```
 
 4. **Live Diagnostics**: Use call_central_api() for real-time monitoring data.
-   Use unified_search(query) to find relevant monitoring endpoints,
-   then get_api_endpoint_detail(method, path) for parameter details.
+   Find the relevant `METHOD /path` in the API endpoint catalog
+   (`api://endpoint-catalog` or `list_api()`), then call
+   `get_api_endpoint_detail(method, path)` for parameter details.
 
 5. **Check Script Library**: Call list_scripts(tag="troubleshooting") for existing diagnostic scripts.
 
@@ -110,11 +111,10 @@ Follow this workflow:
 
 Follow this workflow:
 
-1. **Discover Config Categories**: Use the API to find available config categories:
-   ```
-   unified_search("config category", scope="api")
-   ```
-   Then use `get_api_endpoint_detail(method, path)` to understand the endpoints.
+1. **Discover Config Categories**: Browse the API endpoint catalog
+   (`api://endpoint-catalog` resource, or `list_api()`) for endpoints under
+   `network-config/...`, then call `get_api_endpoint_detail(method, path)` to
+   understand the endpoint's parameters and response shape.
 
 2. **Understand the Hierarchy**: Query the graph for scope structure:
    ```cypher
@@ -153,7 +153,7 @@ Follow this workflow:
         """Guide: write a Python automation script for a given task.
 
         Provides the script-writing template and instructs the agent to discover
-        API endpoints via unified_search() instead of embedding the full catalog.
+        API endpoints via the API endpoint catalog instead of embedding the full catalog.
 
         Args:
             task_description: What the script should accomplish.
@@ -166,11 +166,15 @@ Follow this workflow:
 ## Step 1 — Discover Endpoints
 
 Before writing ANY code you MUST:
-1. Call `unified_search(query)` with keywords relevant to the task to find candidate endpoints.
+1. Find candidate `METHOD /path` combinations in the API endpoint catalog
+   (`api://endpoint-catalog` resource, or call `list_api()` if your client
+   does not show the catalog in the system instructions).
 2. Call `get_api_endpoint_detail(method, path)` for each endpoint you plan to use — get exact
-   parameter names, types, and request/response schemas.
-3. Call `list_api()` if your client doesn't show the catalog in the system
-   instructions or via `api://endpoint-catalog`.
+   parameter names, types, and request/response schemas. This is also required
+   before any subsequent direct `call_central_api` invocation — the server
+   refuses calls to endpoints whose schema you have not inspected.
+3. Add `get_api_endpoint_glossary(method, path)` for endpoints with non-trivial
+   filter parameters or ambiguous field names.
 
 NEVER guess or hardcode API paths — always discover them first.
 
@@ -236,7 +240,7 @@ except CentralAPIError as e:
 
 ## Rules
 
-1. Use ONLY endpoints discovered via unified_search — NEVER guess API paths.
+1. Use ONLY endpoints discovered via the API endpoint catalog — NEVER guess API paths.
 2. Use `api.paginate()` for any list/collection endpoint.
 3. Always handle errors with try/except CentralAPIError.
 4. Print results as JSON to stdout.

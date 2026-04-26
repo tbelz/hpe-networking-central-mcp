@@ -384,7 +384,7 @@ Org  (= Global scope — config here applies to ALL devices)
 
 ### Effective Config (API-only)
 There are no config profile nodes in the graph.  Use the Central API directly:
-- Discover categories via `unified_search("config", scope="api")`
+- Discover categories from the API endpoint catalog (`api://endpoint-catalog` or `list_api()`)
 - Read effective config: `GET network-config/v1alpha1/{category}?effective=true&detailed=true`
 - The `detailed=true` response includes provenance annotations showing which scope each setting comes from.
 

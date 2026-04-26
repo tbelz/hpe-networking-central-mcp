@@ -11,6 +11,7 @@ from mcp.types import ToolAnnotations
 
 from ..central_client import BaseAPIClient, CentralAPIError, CentralClient, GreenLakeClient
 from ..config import Settings
+from .api_call_policy import check_call_policy
 
 logger = structlog.get_logger("tools.api_call")
 
@@ -130,6 +131,10 @@ def register_api_call_tools(mcp, settings: Settings, client: CentralClient):
                 "Network-side configuration changes are disabled."
             )
 
+        allowed, reason = check_call_policy(method, path)
+        if not allowed:
+            raise ToolError(reason or "API call blocked by policy.")
+
         return _make_api_call(client, "central", path, method, query_params, body)
 
 
@@ -183,5 +188,9 @@ def register_greenlake_api_call_tools(mcp, settings: Settings, glp_client: Green
                 f"Server is in READ_ONLY mode; {method.upper()} requests are not permitted. "
                 "Network-side configuration changes are disabled."
             )
+
+        allowed, reason = check_call_policy(method, path)
+        if not allowed:
+            raise ToolError(reason or "API call blocked by policy.")
 
         return _make_api_call(glp_client, "greenlake", path, method, query_params, body)

@@ -229,14 +229,17 @@ Base URL: `https://global.api.greenlake.hpe.com`
 
 All endpoints from both platforms are indexed in a single unified catalog.
 
-1. `unified_search(query)` — search for endpoints by keyword. Returns compact results
-   (method, path, summary). GreenLake categories appear as "HPE GreenLake APIs for ...".
-2. `list_api()` — return the full nested API tree (fallback for clients that
-   don't surface the catalog via instructions or the `api://endpoint-catalog`
-   resource).
-3. `get_api_endpoint_detail(method, path)` — full parameter schemas, request/response bodies.
+1. `api://endpoint-catalog` resource (or `list_api()` as a fallback) — the
+   authoritative `METHOD /path` listing for both platforms, grouped by
+   category. GreenLake categories appear as "HPE GreenLake APIs for ...".
+2. `get_api_endpoint_detail(method, path)` — full parameter schemas,
+   request/response bodies. **Required** before `call_central_api` /
+   `call_greenlake_api` will dispatch a request to that endpoint.
+3. `get_api_endpoint_glossary(method, path)` — prose descriptions for
+   parameters and components (filter syntax, enum semantics, units).
 
-Always discover endpoints via search before writing scripts or making API calls.
+Always consult the catalog and call `get_api_endpoint_detail` before writing
+scripts or making API calls.
 
 ## Authentication
 
@@ -270,10 +273,13 @@ pre-authenticated API clients. No OAuth2 boilerplate needed.
 ## IMPORTANT: Discover endpoints first
 
 Before writing any script, you MUST:
-1. `unified_search(query)` to find relevant endpoints
+1. Find candidate `METHOD /path` combinations in the API endpoint catalog
+   (`api://endpoint-catalog` resource, or `list_api()`)
 2. `get_api_endpoint_detail(method, path)` to get exact parameter schemas
+3. `get_api_endpoint_glossary(method, path)` for parameter semantics on
+   endpoints with non-trivial filters or ambiguous field names
 
-Never guess or hardcode API paths — always discover them via search.
+Never guess or hardcode API paths — always discover them via the catalog.
 
 ## Template
 

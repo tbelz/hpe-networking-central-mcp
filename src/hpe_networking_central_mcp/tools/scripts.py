@@ -170,7 +170,8 @@ def register_script_tools(mcp, settings: Settings, graph_manager: GraphManager):
 
         BEFORE calling this tool you MUST have:
         1. Called list_scripts() to check for existing scripts
-        2. Called unified_search(query) to discover API endpoints
+        2. Read the API endpoint catalog (`api://endpoint-catalog` or `list_api()`)
+           for relevant `METHOD /path` combinations
         3. Called get_api_endpoint_detail() for parameter schemas
 
         Scripts should use ``from central_helpers import api`` for all API calls.
