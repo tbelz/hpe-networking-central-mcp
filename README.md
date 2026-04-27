@@ -71,7 +71,7 @@ layers:
 ### Domain layer
 
 ```mermaid
-graph LR
+flowchart LR
     Org -->|HAS_COLLECTION| SiteCollection
     Org -->|HAS_SITE| Site
     SiteCollection -->|CONTAINS_SITE| Site
@@ -85,7 +85,7 @@ graph LR
 ### API discovery subgraph (knowledge layer)
 
 ```mermaid
-graph LR
+flowchart LR
     ApiEndpoint -->|BELONGS_TO_CATEGORY| ApiCategory
     ApiEndpoint -->|HAS_PARAMETER| Parameter
     ApiEndpoint -->|HAS_REQUEST_BODY| RequestBody
