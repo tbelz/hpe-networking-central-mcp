@@ -39,8 +39,18 @@ def normalise_path(path: str) -> str:
     return p if p.startswith("/") else f"/{p}"
 
 
-def _eid(method: str, path: str) -> str:
+def eid_for(method: str, path: str) -> str:
+    """Canonical endpoint id: ``METHOD:/path``.
+
+    Used by the gate's inspection tracker and by the explicit-bypass
+    parameter on ``call_central_api`` / ``call_greenlake_api`` so both
+    sides agree on what counts as "the same endpoint".
+    """
     return f"{method.upper()}:{normalise_path(path)}"
+
+
+# Internal alias kept for the existing private call sites in this module.
+_eid = eid_for
 
 
 # ── Template registry ───────────────────────────────────────────────

@@ -1254,3 +1254,93 @@ def _emit_one_property(
         )
         if target_id:
             batch.add_property_of_type(property_id, target_id)
+            return
+        # $ref could not be resolved (missing component) — fall through to
+        # inline materialisation so we don't strand the schema entirely.
+
+    # Inline schema (no $ref): materialise as a synthetic SchemaComponent so
+    # that nested fields (e.g. NTP `servers[].address`) are reachable from
+    # the property graph instead of stranded inside opaque `bodyJson`.
+    items = prop_body.get("items") if isinstance(prop_body.get("items"), dict) else None
+    inline_body: dict | None = None
+    inline_kind: str = ""
+    # Only materialise array-item objects that have decomposable structure the
+    # downstream recursion (``_emit_property_subgraph``) actually walks —
+    # ``properties`` / ``allOf`` / ``oneOf`` / ``anyOf``. Nested arrays
+    # (``items.items``) would mint a synthetic component whose inner schema
+    # would not be decomposed, so we skip them here.
+    if items is not None and (
+        isinstance(items.get("properties"), dict)
+        or items.get("allOf") or items.get("oneOf") or items.get("anyOf")
+    ):
+        inline_body = items
+        inline_kind = "items"
+    elif isinstance(prop_body.get("properties"), dict):
+        inline_body = prop_body
+        inline_kind = "object"
+
+    if inline_body is not None:
+        synth_id = f"{property_id}#{inline_kind}"
+        synth_name = f"{prop_name}[{inline_kind}]"
+        _ensure_inline_component(
+            batch,
+            spec_source=spec_source,
+            synth_id=synth_id,
+            synth_name=synth_name,
+            body=inline_body,
+            full_components=full_components,
+            stats=stats,
+        )
+        batch.add_property_of_type(property_id, synth_id)
+
+
+def _ensure_inline_component(
+    batch: _Batch,
+    *,
+    spec_source: str,
+    synth_id: str,
+    synth_name: str,
+    body: dict,
+    full_components: dict,
+    stats: dict,
+) -> None:
+    """Materialise an inline schema (no `$ref`) as a SchemaComponent and
+    recurse into its property subgraph.
+
+    Synthetic ids carry an ``#items`` / ``#object`` suffix derived from the
+    enclosing ``property_id``, which guarantees uniqueness across specs and
+    prevents collisions with named-component ids (which use ``::``
+    separators). Dedupe via ``batch._seen_components`` makes recursion
+    cycle-safe.
+    """
+    if synth_id in batch._seen_components:
+        return
+
+    stripped = _strip_skeleton_keys(body)
+    body_json = json.dumps(stripped)
+    enum_vals = [v for v in (body.get("enum") or []) if isinstance(v, str)]
+    _req = body.get("required")
+    required = [v for v in (_req if isinstance(_req, list) else []) if isinstance(v, str)]
+
+    batch.add_component({
+        "component_id": synth_id,
+        "spec_source": spec_source,
+        "section": "inline",
+        "name": synth_name,
+        "type": str(body.get("type") or ""),
+        "kind": _component_kind(body),
+        "required": required,
+        "enumValues": enum_vals,
+        "bodyJson": body_json,
+    })
+    stats["components"] = stats.get("components", 0) + 1
+
+    _emit_property_subgraph(
+        batch,
+        spec_source=spec_source,
+        parent_component_id=synth_id,
+        parent_component_name=synth_name,
+        body=body,
+        full_components=full_components,
+        stats=stats,
+    )
