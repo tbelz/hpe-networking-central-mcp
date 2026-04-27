@@ -183,3 +183,81 @@ def test_returns_false_when_archive_has_no_knowledge_db_dir(tmp_path, monkeypatc
 
     _install_transport(monkeypatch, handler)
     assert download_knowledge_db("owner/repo", tmp_path / "kdb") is False
+
+
+# --- resume-on-restart / offline behaviour ---------------------------------
+
+
+def test_skips_download_when_local_tag_matches_release(tmp_path, monkeypatch):
+    """A second cold start that finds a manifest with the latest release_tag
+    must not re-download the multi-MB tarball — the slow download is what
+    blew Claude's MCP ``initialize`` budget on cold start."""
+    db_path = tmp_path / "kdb"
+    db_path.mkdir()
+    (db_path / "db.kuzu").write_bytes(b"existing")
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"release_tag": "knowledge-db-test", "schema_version": 8})
+    )
+
+    download_calls: list[str] = []
+
+    def handler(request):
+        url = str(request.url)
+        if "api.github.com" in url:
+            return httpx.Response(
+                200,
+                json=_release_payload(
+                    "https://example.invalid/knowledge_db.tar.gz",
+                    tag="knowledge-db-test",
+                ),
+            )
+        download_calls.append(url)
+        return httpx.Response(200, content=_make_tarball())
+
+    _install_transport(monkeypatch, handler)
+    # Returns False because no install was performed; existing DB remains.
+    assert download_knowledge_db("owner/repo", db_path) is False
+    assert download_calls == [], "must not hit the asset URL when local matches"
+    assert (db_path / "db.kuzu").read_bytes() == b"existing"
+
+
+def test_falls_back_to_local_when_release_api_unreachable(tmp_path, monkeypatch):
+    """Spotty network: GitHub API call raises. With a local DB on disk,
+    keep using it instead of failing startup."""
+    db_path = tmp_path / "kdb"
+    db_path.mkdir()
+    (db_path / "db.kuzu").write_bytes(b"existing")
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"release_tag": "knowledge-db-old", "schema_version": 8})
+    )
+
+    def handler(request):
+        raise httpx.ConnectError("network unreachable")
+
+    _install_transport(monkeypatch, handler)
+    # Returns False (no install) but does NOT raise; existing DB preserved.
+    assert download_knowledge_db("owner/repo", db_path) is False
+    assert (db_path / "db.kuzu").read_bytes() == b"existing"
+
+
+def test_install_writes_release_tag_into_manifest(tmp_path, monkeypatch):
+    """The downloader must stamp the GitHub release ``tag_name`` into the
+    on-disk manifest so the next cold start can short-circuit."""
+    asset_url = "https://example.invalid/knowledge_db.tar.gz"
+
+    def handler(request):
+        if "api.github.com" in str(request.url):
+            return httpx.Response(
+                200, json=_release_payload(asset_url, tag="knowledge-db-stamped")
+            )
+        return httpx.Response(200, content=_make_tarball())
+
+    _install_transport(monkeypatch, handler)
+    db_path = tmp_path / "kdb"
+    assert download_knowledge_db("owner/repo", db_path) is True
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["release_tag"] == "knowledge-db-stamped"
+    # Original schema_version field from the tarball manifest preserved.
+    assert manifest["schema_version"] == 3
+
