@@ -5,12 +5,15 @@ Given a normalised spec and a list of ``(method, path)`` endpoints, this
 populates the following node + relationship tables (created by
 ``graph/schema.py``):
 
-  Parameter, RequestBody, Response, SchemaComponent
+  Parameter, RequestBody, Response, SchemaComponent, Property
   HAS_PARAMETER, HAS_REQUEST_BODY, HAS_RESPONSE,
-  BODY_REFERENCES, RESPONSE_REFERENCES, REFERENCES
+  BODY_REFERENCES, RESPONSE_REFERENCES,
+  HAS_PROPERTY, PROPERTY_OF_TYPE, COMPOSED_OF, REFERENCES
 
-The helper is idempotent: it issues ``MERGE`` statements keyed on
-deterministic IDs, so re-running on the same spec does not double-insert.
+The helper is idempotent: rows are bulk-loaded via ``COPY FROM`` with
+primary-key deduplication done in Python (``_Batch._seen_*``) before
+the COPY runs, and ``populate_schema_graph`` preseeds those sets from
+the DB so re-running on the same spec does not double-insert.
 
 It does **not** create the underlying ``ApiEndpoint`` rows — those are
 populated separately by ``scripts/build_knowledge_db.py``.  The helper
@@ -21,6 +24,7 @@ build ordering does not become a hard constraint.
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 from typing import Any
@@ -45,11 +49,21 @@ _JSON_BLOB_PREFIX = "b64:"
 
 
 def decode_json_blob(stored: str) -> str:
-    """Return the JSON text for ``stored``; tolerates legacy b64 blobs."""
+    """Return the JSON text for ``stored``; tolerates legacy b64 blobs.
+
+    A malformed legacy blob (corrupt base64 or non-UTF8 payload) falls
+    back to the raw stored string so a single bad row never breaks a
+    runtime describe call.
+    """
     if not stored:
         return ""
     if stored.startswith(_JSON_BLOB_PREFIX):
-        return base64.b64decode(stored[len(_JSON_BLOB_PREFIX):]).decode("utf-8")
+        try:
+            return base64.b64decode(
+                stored[len(_JSON_BLOB_PREFIX):]
+            ).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError):
+            return stored
     return stored
 
 
