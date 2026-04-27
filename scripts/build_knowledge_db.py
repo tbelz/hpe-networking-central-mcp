@@ -36,7 +36,12 @@ from hpe_networking_central_mcp.oas_index import OASIndex  # noqa: E402
 from hpe_networking_central_mcp.oas_normalize import (  # noqa: E402
     normalize as normalize_spec,
 )
-from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph  # noqa: E402
+from hpe_networking_central_mcp.oas_schema_graph import (  # noqa: E402
+    collect_into_batch,
+    flush_batch,
+    new_batch,
+    query_existing_eids,
+)
 from hpe_networking_central_mcp.oas_scraper import ReadMeSpecProvider  # noqa: E402
 from hpe_networking_central_mcp.vsg_scraper import VsgDocProvider  # noqa: E402
 
@@ -335,12 +340,20 @@ def _sync_docs(cache_dir: Path) -> tuple[list, dict]:
 
 
 def _populate_schema_subgraph(db: lb.Database, specs: list[dict]) -> dict:
-    """Walk every spec and populate Parameter/RequestBody/Response/SchemaComponent
-    nodes, plus REFERENCES edges.
+    """Walk every spec, collect Parameter/RequestBody/Response/SchemaComponent
+    /Property rows + REFERENCES edges into a single global batch, then
+    bulk-load via ``COPY ... FROM $df`` (one COPY per table).
+
+    Bulk path is required because LadybugDB issue #285 (UNWIND+MERGE
+    bulk insert) is upstream-WONTFIX. Collection is pure Python (no DB
+    I/O), so per-spec progress prints reflect parse cost only and the
+    final flush is dominated by O(num_rows) COPY work.
 
     ``specs`` must already be normalized and tagged with ``_spec_source``
     (set in ``_sync_specs``).
     """
+    import time as _time
+
     conn = lb.Connection(db)
     totals = {
         "endpoints": 0,
@@ -350,10 +363,16 @@ def _populate_schema_subgraph(db: lb.Database, specs: list[dict]) -> dict:
         "components": 0,
         "properties": 0,
         "references": 0,
-        "skeletons": 0,
     }
+    timings: list[tuple[float, str]] = []
+    total_specs = len(specs)
+
+    # Pre-compute existing endpoint IDs across ALL specs in one query.
+    all_eids: list[str] = []
+    spec_endpoints: list[tuple[dict, str, str, list[tuple[str, str]]]] = []
     for spec in specs:
         spec_source = spec.get("_spec_source") or "central"
+        title = (spec.get("info") or {}).get("title", "?")
         endpoints: list[tuple[str, str]] = []
         for path, path_item in (spec.get("paths") or {}).items():
             if not isinstance(path_item, dict):
@@ -363,28 +382,78 @@ def _populate_schema_subgraph(db: lb.Database, specs: list[dict]) -> dict:
                     endpoints.append((method.upper(), path))
         if not endpoints:
             continue
+        spec_endpoints.append((spec, spec_source, title, endpoints))
+        for m, p in endpoints:
+            all_eids.append(f"{m.upper()}:{p}")
+
+    print(f"    [3b/6] resolving {len(all_eids)} endpoint IDs across {len(spec_endpoints)} specs…", flush=True)
+    t_eids = _time.monotonic()
+    existing_eids = query_existing_eids(conn, all_eids)
+    print(
+        f"    [3b/6] {len(existing_eids)}/{len(all_eids)} endpoints exist "
+        f"in DB (lookup {_time.monotonic() - t_eids:.2f}s)",
+        flush=True,
+    )
+
+    batch = new_batch()
+    t_collect = _time.monotonic()
+    for idx, (spec, spec_source, title, endpoints) in enumerate(spec_endpoints, 1):
+        t0 = _time.monotonic()
         try:
-            stats = populate_schema_graph(
-                conn,
+            stats = collect_into_batch(
+                batch,
                 spec_source=spec_source,
                 spec=spec,
                 endpoints=endpoints,
-                # GLP specs are large platform APIs without HPE vendor
-                # extensions (x-supportedDeviceType / x-path); skipping
-                # property-subgraph writes for them keeps build time under
-                # 10 min while preserving full coverage for Central specs.
+                existing_eids=existing_eids,
+                # Skip Property nodes for GreenLake specs: they carry no
+                # ``x-supportedDeviceType`` / ``x-path`` extensions, so the
+                # property-level subgraph adds no query value while bloating
+                # writes. Preserves prior build-time/size envelope.
                 emit_property_subgraph=(spec_source != "glp"),
             )
         except Exception as exc:  # pragma: no cover — defensive
             print(
-                f"    ⚠ populate_schema_graph failed for "
-                f"{(spec.get('info') or {}).get('title', '?')!r}: {exc}",
+                f"    ⚠ collect_into_batch failed for "
+                f"{title!r}: {exc}",
                 file=sys.stderr,
             )
             continue
+        dt = _time.monotonic() - t0
         for k, v in stats.items():
             if k in totals:
                 totals[k] += v
+        ep = stats.get("endpoints", 0)
+        cmp_ = stats.get("components", 0)
+        props = stats.get("properties", 0)
+        print(
+            f"    [3b/6] {idx}/{len(spec_endpoints)} ({spec_source}/{title}): "
+            f"{ep} ep • {cmp_} cmp • {props} props parsed in {dt:.2f}s",
+            flush=True,
+        )
+        timings.append((dt, f"{spec_source}/{title}"))
+
+    print(
+        f"    [3b/6] collection complete in "
+        f"{_time.monotonic() - t_collect:.2f}s; "
+        f"buffered {len(batch.params)} params, {len(batch.request_bodies)} bodies, "
+        f"{len(batch.responses)} responses, {len(batch.components)} components, "
+        f"{len(batch.properties)} properties, {len(batch.has_param)} HAS_PARAMETER, "
+        f"{len(batch.references)} REFERENCES — starting COPY…",
+        flush=True,
+    )
+    t_flush = _time.monotonic()
+    flush_batch(conn, batch)
+    print(
+        f"    [3b/6] flush complete in {_time.monotonic() - t_flush:.2f}s",
+        flush=True,
+    )
+
+    if timings:
+        timings.sort(reverse=True)
+        print("    Top slow specs (parse only):")
+        for dt, label in timings[:10]:
+            print(f"      {dt:6.2f}s  {label}")
     return totals
 
 
@@ -515,7 +584,10 @@ def main() -> None:
 
     # 1. Create DB and apply schema
     print("[1/6] Creating database and applying schema...")
-    db = lb.Database(str(db_path))
+    # Cap buffer pool at 2 GB so the build doesn't claim ~80% of system
+    # memory by default (real_ladybug's autosize on a workstation can
+    # easily reserve 12+ GB and starve the parser/scrapers).
+    db = lb.Database(str(db_path), buffer_pool_size=2 * 1024 * 1024 * 1024)
     _apply_schema(db)
 
     # 2. Sync API specs
@@ -544,8 +616,7 @@ def main() -> None:
         f"{schema_stats['parameters']} parameters, "
         f"{schema_stats['components']} components, "
         f"{schema_stats['properties']} properties, "
-        f"{schema_stats['references']} REFERENCES edges, "
-        f"{schema_stats['skeletons']} skeleton blobs"
+        f"{schema_stats['references']} REFERENCES edges"
     )
 
     # 4. Sync and populate VSG documentation

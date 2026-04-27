@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from hpe_networking_central_mcp.config import Settings
 from hpe_networking_central_mcp.graph.manager import GraphManager
