@@ -478,6 +478,44 @@ class TestEndpointIdBypass:
         client._request.assert_not_called()
 
 
+class TestEndpointIdTemplateAware:
+    """The bypass must record inspections against the catalog template (when
+    one is registered) so subsequent calls to other concrete instantiations
+    of the same template are allowed — mirroring ``check_call_policy``'s
+    auto-record behaviour. See PR #34 review."""
+
+    def test_concrete_path_records_against_template(self, catalog_tools):
+        tools, client = catalog_tools
+        register_endpoints({"GET": ["/foo/{id}/bar"]})
+
+        # Bypass with concrete path + concrete endpoint_id; tracker should
+        # record the matched template, not the concrete path.
+        out = tools["call_central_api"](
+            path="/foo/123/bar",
+            method="GET",
+            endpoint_id="GET:/foo/123/bar",
+        )
+        assert "items" in out
+        assert get_tracker().was_inspected("GET", "/foo/{id}/bar") is True
+
+        # Different concrete instantiation of the same template must now be
+        # allowed without supplying endpoint_id.
+        tools["call_central_api"](path="/foo/456/bar", method="GET")
+        assert client._request.call_count == 2
+
+    def test_template_endpoint_id_for_concrete_path_is_accepted(self, catalog_tools):
+        tools, client = catalog_tools
+        register_endpoints({"GET": ["/foo/{id}/bar"]})
+
+        out = tools["call_central_api"](
+            path="/foo/789/bar",
+            method="GET",
+            endpoint_id="GET:/foo/{id}/bar",
+        )
+        assert "items" in out
+        client._request.assert_called_once()
+
+
 # ── eid_for helper ───────────────────────────────────────────────────
 
 

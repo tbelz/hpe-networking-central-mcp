@@ -45,22 +45,30 @@ direct API reads and reusable Python scripts.
    request body. This is also the mechanism the call gate uses (see below).
 
 3. **API call gate (enforced)**: Before `call_central_api` or `call_greenlake_api`
-   will dispatch a request, you MUST have inspected the endpoint's schema in the
-   current session — either by calling `describe_endpoint_for_device` for that
-   exact `METHOD /path`, or by reading its `Parameter` / `RequestBody` /
-   `Property` nodes via `query_graph`. Calls without prior inspection are
-   rejected with a prescriptive error that *also embeds the property summary
-   inline*, so a single retry with corrected arguments will succeed.
+   will dispatch a request, the gate must have a recorded inspection of the
+   endpoint in the current session. Inspections are recorded in three ways:
 
-   **Bypass for graph-driven workflows**: If you've already explored the
-   endpoint with `query_graph` (or any other means), pass
-   `endpoint_id="METHOD:/path"` to `call_central_api` /
-   `call_greenlake_api` — it skips the redundant property-summary block.
-   The id must match the request exactly (e.g.
-   `endpoint_id="GET:/network-notifications/v1/alerts"` for a GET to
-   `network-notifications/v1/alerts`); any mismatch falls through to the
-   normal gate. This gate exists because skipping the schema lookup is the
-   single most common cause of wrong-parameter / oversized-response failures.
+   - calling `describe_endpoint_for_device` for that exact `METHOD /path`;
+   - the gate's auto-record on the first blocked call (the prescriptive error
+     embeds the property summary inline, so a single retry with corrected
+     arguments will then succeed); or
+   - passing the explicit `endpoint_id="METHOD:/path"` attestation parameter
+     (see below) — this is what you should use after exploring the endpoint
+     via `query_graph`. Reading `Parameter` / `RequestBody` / `Property` nodes
+     does not by itself flip the gate; pair it with `endpoint_id` on the call.
+
+   **Bypass for graph-driven workflows**: pass
+   `endpoint_id="METHOD:/path"` to `call_central_api` / `call_greenlake_api`
+   to attest that you have already consulted the schema. The id must match
+   `method` and `path` (e.g. `endpoint_id="GET:/network-notifications/v1/alerts"`
+   for a GET to `network-notifications/v1/alerts`). The bypass is template-
+   aware: passing the template form (e.g.
+   `endpoint_id="GET:/.../{serial-number}/dhcp-pools"`) for a concrete path
+   like `/.../DL0006948/dhcp-pools` is accepted and unblocks subsequent calls
+   to other concrete instantiations of the same template. Any mismatch falls
+   through to the normal gate. This gate exists because skipping the schema
+   lookup is the single most common cause of wrong-parameter / oversized-
+   response failures.
 
 4. **Quick reads**: For any direct API call, first identify the endpoint via
    `list_api` / the catalog, then run `describe_endpoint_for_device(...)` to

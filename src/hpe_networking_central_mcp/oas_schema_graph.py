@@ -1254,7 +1254,9 @@ def _emit_one_property(
         )
         if target_id:
             batch.add_property_of_type(property_id, target_id)
-        return
+            return
+        # $ref could not be resolved (missing component) — fall through to
+        # inline materialisation so we don't strand the schema entirely.
 
     # Inline schema (no $ref): materialise as a synthetic SchemaComponent so
     # that nested fields (e.g. NTP `servers[].address`) are reachable from
@@ -1262,9 +1264,13 @@ def _emit_one_property(
     items = prop_body.get("items") if isinstance(prop_body.get("items"), dict) else None
     inline_body: dict | None = None
     inline_kind: str = ""
+    # Only materialise array-item objects that have decomposable structure the
+    # downstream recursion (``_emit_property_subgraph``) actually walks —
+    # ``properties`` / ``allOf`` / ``oneOf`` / ``anyOf``. Nested arrays
+    # (``items.items``) would mint a synthetic component whose inner schema
+    # would not be decomposed, so we skip them here.
     if items is not None and (
         isinstance(items.get("properties"), dict)
-        or isinstance(items.get("items"), dict)
         or items.get("allOf") or items.get("oneOf") or items.get("anyOf")
     ):
         inline_body = items

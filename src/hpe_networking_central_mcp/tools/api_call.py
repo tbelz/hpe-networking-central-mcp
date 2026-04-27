@@ -11,11 +11,34 @@ from mcp.types import ToolAnnotations
 
 from ..central_client import BaseAPIClient, CentralAPIError, CentralClient, GreenLakeClient
 from ..config import Settings
-from .api_call_policy import check_call_policy, eid_for, get_tracker
+from .api_call_policy import check_call_policy, eid_for, get_registry, get_tracker
 
 logger = structlog.get_logger("tools.api_call")
 
 _WRITE_METHODS = {"POST", "PATCH", "PUT", "DELETE"}
+
+
+def _try_endpoint_id_bypass(method: str, path: str, endpoint_id: str | None) -> bool:
+    """Template-aware bypass for the schema gate.
+
+    Returns ``True`` and records the inspection (against the matched template
+    when one exists, otherwise against the normalised concrete path) when
+    ``endpoint_id`` matches either the concrete eid or the registered template
+    eid for ``method``/``path``. Mirrors the recording semantics of
+    :func:`check_call_policy` so a bypass on ``/foo/123/bar`` also unblocks
+    follow-up calls to other concrete instantiations of ``/foo/{id}/bar``.
+    """
+    if not endpoint_id:
+        return False
+    eid = endpoint_id.strip()
+    if not eid:
+        return False
+    template = get_registry().match(method, path)
+    inspect_path = template if template is not None else path
+    if eid == eid_for(method, path) or (template is not None and eid == eid_for(method, template)):
+        get_tracker().record(method, inspect_path)
+        return True
+    return False
 
 
 def _api_error_hint(exc: CentralAPIError, path: str, method: str) -> str:
@@ -143,9 +166,10 @@ def register_api_call_tools(mcp, settings: Settings, client: CentralClient):
 
         # Explicit attestation: agent has already inspected this endpoint via
         # query_graph / describe_endpoint_for_device. Record + skip the gate.
-        if endpoint_id and endpoint_id.strip() == eid_for(method, path):
-            get_tracker().record(method, path)
-        else:
+        # Template-aware: passing the template eid for a concrete path is
+        # accepted and records the inspection against the template, matching
+        # ``check_call_policy``'s auto-record semantics.
+        if not _try_endpoint_id_bypass(method, path, endpoint_id):
             allowed, reason = check_call_policy(method, path)
             if not allowed:
                 raise ToolError(reason or "API call blocked by policy.")
@@ -212,9 +236,7 @@ def register_greenlake_api_call_tools(mcp, settings: Settings, glp_client: Green
                 "Network-side configuration changes are disabled."
             )
 
-        if endpoint_id and endpoint_id.strip() == eid_for(method, path):
-            get_tracker().record(method, path)
-        else:
+        if not _try_endpoint_id_bypass(method, path, endpoint_id):
             allowed, reason = check_call_policy(method, path)
             if not allowed:
                 raise ToolError(reason or "API call blocked by policy.")
