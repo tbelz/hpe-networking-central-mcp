@@ -162,14 +162,14 @@ def test_reading_resource_when_graph_manager_is_none_returns_message():
 
 
 def test_reading_resource_when_query_raises_returns_error_message():
-    boom = RuntimeError("kuzu connection lost")
+    boom = RuntimeError("ladybug connection lost")
     mcp = _build_server(_StubGraphManager(rows=[], raise_on_query=boom))
 
     text = _read(mcp, "api://endpoint-catalog")
 
     assert "unavailable" in text.lower()
     # Internal exception text must NOT leak to the resource consumer.
-    assert "kuzu connection lost" not in text
+    assert "ladybug connection lost" not in text
 
 
 def test_read_only_filters_mutating_methods_from_catalog():

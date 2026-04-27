@@ -2,9 +2,15 @@
 
 ## Status
 
-Proposed (2026-05-…). Builds on ADR 007 (skeleton + glossary) and
-ADR 008 (lazy components index). Supersedes the “must inspect before
-calling” session gate introduced informally alongside ADR 008.
+Accepted (Phase 2E shipped). Builds on ADR 007 (skeleton + glossary) and
+ADR 008 (lazy components index), and supersedes both. The endpoint-scoped
+tools `get_api_endpoint_detail`, `get_api_endpoint_glossary`,
+`get_schema_component`, `unified_search`, and `search_related_apis` have
+been removed; `describe_endpoint_for_device(method, path, deviceType?)`
+is the body-assembly entry point, `query_graph` is the primary discovery
+surface, and the call gate is enforced via the stateless
+`check_call_policy` registry plus an `endpoint_id` attestation parameter
+on `call_central_api` / `call_greenlake_api`.
 
 ## Context
 

@@ -92,7 +92,9 @@ Follow this workflow:
 4. **Live Diagnostics**: Use call_central_api() for real-time monitoring data.
    Find the relevant `METHOD /path` in the API endpoint catalog
    (`api://endpoint-catalog` or `list_api()`), then call
-   `get_api_endpoint_detail(method, path)` for parameter details.
+   `describe_endpoint_for_device(method, path, deviceType=...)` for the
+   field-by-field guide (parameters + body), or `query_graph` for any
+   deeper structural question.
 
 5. **Check Script Library**: Call list_scripts(tag="troubleshooting") for existing diagnostic scripts.
 
@@ -113,8 +115,11 @@ Follow this workflow:
 
 1. **Discover Config Categories**: Browse the API endpoint catalog
    (`api://endpoint-catalog` resource, or `list_api()`) for endpoints under
-   `network-config/...`, then call `get_api_endpoint_detail(method, path)` to
-   understand the endpoint's parameters and response shape.
+   `network-config/...`, then call
+   `describe_endpoint_for_device(method, path, deviceType=...)` to
+   understand the endpoint's parameters and body shape (or use
+   `query_graph` to inspect `Parameter` / `RequestBody` / `Response`
+   nodes directly).
 
 2. **Understand the Hierarchy**: Query the graph for scope structure:
    ```cypher
@@ -169,12 +174,13 @@ Before writing ANY code you MUST:
 1. Find candidate `METHOD /path` combinations in the API endpoint catalog
    (`api://endpoint-catalog` resource, or call `list_api()` if your client
    does not show the catalog in the system instructions).
-2. Call `get_api_endpoint_detail(method, path)` for each endpoint you plan to use — get exact
-   parameter names, types, and request/response schemas. This is also required
-   before any subsequent direct `call_central_api` invocation — the server
-   refuses calls to endpoints whose schema you have not inspected.
-3. Add `get_api_endpoint_glossary(method, path)` for endpoints with non-trivial
-   filter parameters or ambiguous field names.
+2. Call `describe_endpoint_for_device(method, path, deviceType=...)` for
+   each endpoint you plan to use — get exact parameter names, types,
+   request-body fields, and per-device support. This inspection is also
+   what unlocks `call_central_api` for that endpoint in the same session.
+3. Use `query_graph` for any deeper structural question (cross-endpoint
+   comparisons, transitive `$ref` walks, all properties supporting a
+   given device type).
 
 NEVER guess or hardcode API paths — always discover them first.
 

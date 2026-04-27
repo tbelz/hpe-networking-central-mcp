@@ -7,77 +7,71 @@
 
 MCP Server for **HPE Aruba Networking Central** and the **HPE GreenLake Platform**.
 
-The agent manages network devices through a combination of direct API calls and reusable Python scripts, with full access to both the Central API and GreenLake Platform API.
+The agent manages network devices through a combination of direct API calls and
+reusable Python scripts, with full access to both the Central API and the
+GreenLake Platform API. The OpenAPI surface of both platforms is decomposed
+into a LadybugDB graph at build time, so `query_graph` (Cypher) is the primary
+tool for endpoint and schema discovery — the agent walks `ApiEndpoint`,
+`Parameter`, `RequestBody`, `Response`, `SchemaComponent`, and `Property`
+nodes instead of paging through raw OpenAPI blobs.
 
 ## Architecture
 
 ```
 ┌─────────────────────────┐
-│     MCP Client          │
+│      MCP Client         │
 │  (VS Code / Claude)     │
 └──────────┬──────────────┘
            │ stdio (JSON-RPC)
-┌──────────▼──────────────┐
-│   MCP Server (FastMCP)  │
-│                         │
-│  Tools:                 │
-│  ├─ call_central_api    │──► Central REST API (monitoring, config, etc.) — gated on prior get_api_endpoint_detail / get_api_endpoint_glossary
-│  ├─ call_greenlake_api  │──► GreenLake Platform API (devices, subscriptions) — same gate
-│  ├─ list_api            │──► Return the full nested API tree (fallback)
-│  ├─ get_api_endpoint_detail ──► Structural skeleton (params, schemas, responses)
-│  ├─ get_api_endpoint_glossary ──► Prose descriptions for params and components
-│  ├─ query_graph         │──► Cypher queries against the configuration graph
-│  ├─ write_graph         │──► Write Cypher to enrich the graph (CREATE, MERGE, SET)
-│  ├─ list_scripts        │──► Browse automation script library
-│  ├─ save_script         │──► Save Python scripts for reuse
-│  ├─ get_script_content  │──► Read script source code
-│  └─ execute_script      │──► Run scripts (central_helpers SDK injected)
-│                         │
-│  Resources:             │
-│  ├─ graph://schema      │──► Live schema introspection
-│  ├─ graph://seed-status │──► Startup seed execution results
-│  ├─ docs://central/overview  │
-│  ├─ docs://script-writing-guide │
-│  ├─ docs://config-workflows │
-│  └─ script://seeds      │
-│                         │
-│  Prompts:               │
-│  ├─ analyze_inventory   │
-│  ├─ analyze_config      │
-│  ├─ troubleshoot_device │
-│  └─ write_script        │
-└─────────────────────────┘
+┌──────────▼─────────────────────────────────────────────────────────────┐
+│   MCP Server (FastMCP)                                                 │
+│                                                                        │
+│  Tools                                                                 │
+│  ├─ list_api                       Category-grouped METHOD /path       │
+│  ├─ describe_endpoint_for_device   Body / parameter guide for one      │
+│  │                                  endpoint, device-aware             │
+│  ├─ query_graph                    Cypher reads against LadybugDB      │
+│  ├─ write_graph                    Cypher writes to enrich the graph   │
+│  ├─ call_central_api               Central REST API (gated)            │
+│  ├─ call_greenlake_api             GreenLake Platform API (gated)      │
+│  ├─ list_scripts / get_script_content / save_script                    │
+│  └─ execute_script                 Run scripts with central_helpers    │
+│                                                                        │
+│  Resources                                                             │
+│  ├─ api://endpoint-catalog         Same catalog as list_api            │
+│  ├─ docs://endpoint-catalog        Alias for clients filtering api://  │
+│  ├─ graph://schema                 Live LadybugDB schema + Cypher      │
+│  ├─ graph://seed-status            Startup seed execution results      │
+│  ├─ docs://central/overview        Central + GreenLake API overview    │
+│  ├─ docs://script-writing-guide    Script template + helpers ref       │
+│  ├─ docs://config-workflows        Hierarchy / scope / effective cfg   │
+│  ├─ docs://vsg/list, docs://vsg/{id}  Validated Solution Guide pages   │
+│  └─ script://seeds                 Pre-built seed scripts metadata     │
+│                                                                        │
+│  Prompts                                                               │
+│  └─ analyze_inventory · analyze_config · troubleshoot_device · write_script │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Knowledge Graph
+## Knowledge Graph (LadybugDB)
 
-The server maintains a LadybugDB (Kùzu) graph database with two layers:
+The server ships with a pre-built LadybugDB graph database that is updated
+nightly by GitHub Actions and downloaded on first launch. It contains two
+layers:
 
-1. **Knowledge layer** — API endpoints, categories, documentation, and scripts (populated at build time from OpenAPI specs)
-2. **Domain layer** — live network state (devices, sites, config profiles) populated at runtime by seed scripts calling Central APIs
+1. **Knowledge layer** — the entire OpenAPI surface of Central and GreenLake
+   modelled as a structured subgraph: `ApiEndpoint`, `Parameter`,
+   `RequestBody`, `Response`, `SchemaComponent`, `Property`, plus
+   `ApiCategory`, `DocSection`, and `Script`. Populated at build time from
+   the upstream OpenAPI specs.
+2. **Domain layer** — live network state (`Org`, `SiteCollection`, `Site`,
+   `Device`, `DeviceGroup`, `UnmanagedDevice`) populated at runtime by seed
+   scripts that call the Central APIs.
 
-### Graph Schema
+### Domain layer
 
 ```mermaid
 graph LR
-    subgraph Knowledge Layer
-        ApiEndpoint
-        ApiCategory
-        DocSection
-        Script
-    end
-
-    subgraph Domain Layer
-        Org
-        SiteCollection
-        Site
-        Device
-        DeviceGroup
-        UnmanagedDevice
-    end
-
-    ApiEndpoint -->|BELONGS_TO_CATEGORY| ApiCategory
-
     Org -->|HAS_COLLECTION| SiteCollection
     Org -->|HAS_SITE| Site
     SiteCollection -->|CONTAINS_SITE| Site
@@ -88,36 +82,30 @@ graph LR
     Device -->|LINKED_TO| UnmanagedDevice
 ```
 
-### Search Architecture
+### API discovery subgraph (knowledge layer)
 
 ```mermaid
-graph TD
-    Q[unified_search query, scope, limit] --> FTS{FTS available?}
-    FTS -->|Yes| BM25[BM25 ranked search]
-    FTS -->|No| CONTAINS[CONTAINS fallback]
-    BM25 --> Merge[Merge & rank results]
-    CONTAINS --> Merge
-    Merge --> Results[JSON results]
-
-    subgraph "FTS Indexes"
-        api_fts["api_fts (ApiEndpoint)"]
-        doc_fts["doc_fts (DocSection)"]
-        device_fts["device_fts (Device)"]
-        site_fts["site_fts (Site)"]
-        script_fts["script_fts (Script)"]
-    end
+graph LR
+    ApiEndpoint -->|BELONGS_TO_CATEGORY| ApiCategory
+    ApiEndpoint -->|HAS_PARAMETER| Parameter
+    ApiEndpoint -->|HAS_REQUEST_BODY| RequestBody
+    ApiEndpoint -->|HAS_RESPONSE| Response
+    RequestBody -->|BODY_REFERENCES| SchemaComponent
+    Response -->|RESPONSE_REFERENCES| SchemaComponent
+    SchemaComponent -->|HAS_PROPERTY| Property
+    SchemaComponent -->|COMPOSED_OF| SchemaComponent
+    SchemaComponent -->|REFERENCES| SchemaComponent
+    Property -->|PROPERTY_OF_TYPE| SchemaComponent
 ```
 
-Scopes filter which indexes/tables are searched: `all`, `api`, `docs`, `data`.
+`Property` nodes carry the `x-supportedDeviceType` extension as a typed list
+(`supportedDeviceTypes`) and the YANG mapping (`yangPath`) as first-class
+properties, so a single Cypher query answers questions like *"which fields of
+the NTP profile apply to Switch CX, and what is their YANG path?"*.
 
-### Documentation Pipeline
-
-The `DocSection` node table and `doc_fts` FTS index are defined in the schema
-and ready for use, but **no doc sync pipeline actively populates them from
-prose yet**.  The existing fetchers (`oas_scraper.py`, `glp_spec_provider.py`)
-pull OpenAPI references and populate `ApiEndpoint` nodes — they do not extract
-prose documentation.  A future iteration will add a doc chunking pipeline to
-populate `DocSection` nodes from ReadMe.io or other documentation sources.
+See [docs/adr/009-graph-as-primary-api-discovery.md](docs/adr/009-graph-as-primary-api-discovery.md)
+for the rationale; the full canned-Cypher pattern set is embedded in
+`graph://schema`.
 
 ## Prerequisites
 
@@ -197,7 +185,18 @@ GREENLAKE_CLIENT_SECRET=your_glp_client_secret
 | `GREENLAKE_CLIENT_SECRET` | No | Central client secret | GreenLake Platform client secret |
 | `GLP_BASE_URL` | No | `https://global.api.greenlake.hpe.com` | GreenLake API base URL |
 | `GLP_INCLUDED_SLUGS` | No | — | Comma-separated service slugs to include (or empty for default set) |
-| `READ_ONLY` | No | `false` | When set to `true`/`1`/`yes`/`on` (case-insensitive), the server refuses any non-GET Central / GreenLake API call (both via tools and from inside scripts) and hides mutating endpoints from `list_api`, `get_api_endpoint_detail`, and `get_api_endpoint_glossary`. Local operations (`write_graph`, `save_script`, `execute_script`) remain available. |
+| `READ_ONLY` | No | `false` | When set to `true` / `1` / `yes` / `on`, the server refuses any non-GET Central / GreenLake API call (both via tools and from inside scripts) and hides mutating endpoints from `list_api`. Local operations (`write_graph`, `save_script`, `execute_script`) remain available. |
+
+### Startup behaviour
+
+On first launch the server downloads the latest pre-built knowledge DB
+tarball published by the
+[`update-knowledge-db`](.github/workflows/update-knowledge-db.yml) workflow.
+The on-disk manifest records the GitHub release tag, so subsequent launches
+short-circuit the download when the local DB is already current — typical
+warm-start latency is well under a second. If GitHub is unreachable but a
+local DB exists, the server keeps using it (logged as
+`knowledge_db_offline_using_local`) instead of falling back to an empty DB.
 
 ### Read-Only Mode
 
@@ -208,9 +207,8 @@ Start the container with `READ_ONLY=true` to lock the server into a
   and `DELETE` with a `READ_ONLY` error.
 - The same restriction is enforced inside scripts — `api.post(...)` and
   friends fail with `CentralAPIError(403, "READ_ONLY", ...)`.
-- Mutating endpoints are filtered out of `list_api`,
-  `get_api_endpoint_detail`, and `get_api_endpoint_glossary` so the model
-  never sees them.
+- Mutating endpoints are filtered out of `list_api` and the embedded API
+  catalog so the model never sees them.
 - A banner is prepended to the MCP system prompt so the assistant knows it
   must not attempt configuration changes.
 - Local-only operations (graph writes, saving / editing scripts, executing
@@ -228,17 +226,18 @@ Start the container with `READ_ONLY=true` to lock the server into a
 > script that uses `urllib`, `requests`, or raw sockets could still issue
 > mutating calls — do not expose READ_ONLY mode to untrusted authors.
 
-## Claude Desktop Configuration
+## Claude Desktop / Claude Code Configuration
 
 Claude Desktop reads its MCP servers from
 `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or
 `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS).
+Claude Code reads `~/.config/claude-code/config.json` and uses the same
+schema.
 
 Paste the snippet below into the `mcpServers` block, replace the five
-placeholders, and restart Claude Desktop. No `.env` file is needed —
-secrets are passed inline via Docker `-e` flags. The included
-`*-readonly` entry runs the same image with `READ_ONLY=true` for
-inspection-only sessions.
+placeholders, and restart the client. No `.env` file is needed — secrets
+are passed inline via Docker `-e` flags. The included `*-readonly` entry
+runs the same image with `READ_ONLY=true` for inspection-only sessions.
 
 ```json
 {
@@ -289,26 +288,31 @@ inspection-only sessions.
 }
 ```
 
-The same `env` / `-e` pattern works for **Claude Code** (`~/.config/claude-code/config.json`)
-and any other MCP client that supports the standard `command` + `args` + `env`
-schema. Drop the second entry if you don't need a read-only profile, or drop
-the `GREENLAKE_*` lines if you're only using Central APIs.
+The same `env` / `-e` pattern works for any other MCP client that supports
+the standard `command` + `args` + `env` schema. Drop the second entry if you
+don't need a read-only profile, or drop the `GREENLAKE_*` lines if you're
+only using Central APIs.
 
 ## Tools
 
 | Tool | Description |
 |------|-------------|
-| `call_central_api` | Make authenticated requests to any Central API endpoint. Gated: requires a prior `get_api_endpoint_detail` or `get_api_endpoint_glossary` call for the target `METHOD /path` in the same session. |
-| `call_greenlake_api` | Make authenticated requests to any GreenLake Platform API endpoint (only available when GreenLake credentials are configured). Same gate as above. |
-| `list_api` | Return the full nested API tree (fallback for clients that don't surface the catalog via instructions or the `api://endpoint-catalog` resource) |
-| `get_api_endpoint_detail` | Get the structural skeleton (parameters, schemas, response shapes) for one or more endpoints. Records inspection for the call gate. |
-| `get_api_endpoint_glossary` | Get prose descriptions for parameters and components (filter syntax, enum semantics, units). Also records inspection for the call gate. |
-| `query_graph` | Execute read-only Cypher queries against the configuration graph |
-| `write_graph` | Execute write Cypher to enrich the graph (CREATE, MERGE, SET, DELETE) |
-| `list_scripts` | List all scripts in the automation library |
-| `get_script_content` | Read the source code of a script |
-| `save_script` | Save a Python script to the library for reuse |
-| `execute_script` | Execute a script with Central/GreenLake credentials injected |
+| `list_api` | Category-grouped path-tree of every available `METHOD /path` for Central and GreenLake. Same content as the `api://endpoint-catalog` resource. |
+| `describe_endpoint_for_device` | Field-by-field guide for one endpoint: parameters (path / query / header) plus every leaf property of the request body (or `200` response if no body), already flattened across `allOf` branches. Optional `deviceType` filter uses the `x-supportedDeviceType` extension. Recording an inspection here is what unlocks `call_central_api` for that endpoint. |
+| `query_graph` | Read-only Cypher against the LadybugDB graph. Primary tool for cross-endpoint structural questions, hierarchy navigation, and `$ref` traversal. Soft cap 200 rows / hard cap 2000. Accepts a `parameters` JSON-string for parameterised queries. |
+| `write_graph` | Cypher writes (`CREATE`, `MERGE`, `SET`, `DELETE`) to enrich the domain layer of the graph from runtime discoveries. |
+| `call_central_api` | Make authenticated requests to any Central API endpoint. Gated on a prior `describe_endpoint_for_device` call (or an explicit `endpoint_id="METHOD:/path"` attestation) for the target endpoint in the same session. |
+| `call_greenlake_api` | Same as `call_central_api`, against the GreenLake Platform API. Only registered when GreenLake credentials are configured. |
+| `list_scripts` | List all scripts in the automation library, optionally filtered by tag. |
+| `get_script_content` | Read the source code of a script. |
+| `save_script` | Save a Python script to the library for reuse. |
+| `execute_script` | Execute a script with Central / GreenLake credentials and the `central_helpers` SDK injected. |
+
+The call gate is template-aware: inspecting
+`/.../gateways/{serial-number}/dhcp-pools` authorises any concrete
+instantiation such as `/.../gateways/DL0006948/dhcp-pools`. When a call is
+blocked, the gate inlines the matched endpoint's property summary into the
+error response, so the agent recovers in a single turn.
 
 ## Development
 
@@ -321,7 +325,16 @@ uv sync
 
 # Run locally (without Docker)
 uv run hpe-networking-central-mcp
+
+# Run the test suite (no creds needed for unit tests; live_api is auto-skipped)
+uv run pytest -m "unit and not slow"
+uv run pytest                       # full suite (skips live_api without creds)
+uv run pytest -m live_api           # requires .env with Central / GLP creds
 ```
+
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for build pipeline details
+and the test-marker reference, and the [docs/adr/](docs/adr/) directory
+for architectural decisions.
 
 ### Building Locally
 

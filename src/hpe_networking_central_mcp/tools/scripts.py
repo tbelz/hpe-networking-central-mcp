@@ -172,7 +172,8 @@ def register_script_tools(mcp, settings: Settings, graph_manager: GraphManager):
         1. Called list_scripts() to check for existing scripts
         2. Read the API endpoint catalog (`api://endpoint-catalog` or `list_api()`)
            for relevant `METHOD /path` combinations
-        3. Called get_api_endpoint_detail() for parameter schemas
+        3. Called describe_endpoint_for_device(method, path, deviceType?) for the
+           field-by-field guide of every endpoint the script will call
 
         Scripts should use ``from central_helpers import api`` for all API calls.
         Use ``api.paginate()`` for collection endpoints, ``api.get()`` for single-item lookups.

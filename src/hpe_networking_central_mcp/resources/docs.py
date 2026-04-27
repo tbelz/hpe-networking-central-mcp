@@ -51,7 +51,7 @@ def register_api_catalog_resource(mcp, settings: Settings, graph_manager: "Graph
     def api_endpoint_catalog() -> str:
         """Full API Endpoint Catalog — every available METHOD /path for Central and GreenLake.
 
-        Read this resource **before** calling get_api_endpoint_detail(),
+        Read this resource **before** calling describe_endpoint_for_device(),
         call_central_api(), or call_greenlake_api() to find the correct
         METHOD and exact path. The catalog is grouped by API category with
         nested path-tree indentation. A trailing ``!`` marks deprecated
@@ -232,14 +232,19 @@ All endpoints from both platforms are indexed in a single unified catalog.
 1. `api://endpoint-catalog` resource (or `list_api()` as a fallback) — the
    authoritative `METHOD /path` listing for both platforms, grouped by
    category. GreenLake categories appear as "HPE GreenLake APIs for ...".
-2. `get_api_endpoint_detail(method, path)` — full parameter schemas,
-   request/response bodies. **Required** before `call_central_api` /
-   `call_greenlake_api` will dispatch a request to that endpoint.
-3. `get_api_endpoint_glossary(method, path)` — prose descriptions for
-   parameters and components (filter syntax, enum semantics, units).
+2. `describe_endpoint_for_device(method, path, deviceType=...)` — the
+   field-by-field guide for one endpoint (parameters + every leaf body
+   property, flattened across `allOf`, optionally device-filtered).
+   **Required** before `call_central_api` / `call_greenlake_api` will
+   dispatch a request to that endpoint.
+3. `query_graph(cypher)` — for everything else: cross-endpoint structural
+   questions, `$ref` traversal, finding all properties that support a
+   given device type, and so on. Read `graph://schema` for the full
+   API discovery subgraph (`ApiEndpoint`, `Parameter`, `RequestBody`,
+   `Response`, `SchemaComponent`, `Property`).
 
-Always consult the catalog and call `get_api_endpoint_detail` before writing
-scripts or making API calls.
+Always consult the catalog and call `describe_endpoint_for_device` before
+writing scripts or making API calls.
 
 ## Authentication
 
@@ -275,9 +280,11 @@ pre-authenticated API clients. No OAuth2 boilerplate needed.
 Before writing any script, you MUST:
 1. Find candidate `METHOD /path` combinations in the API endpoint catalog
    (`api://endpoint-catalog` resource, or `list_api()`)
-2. `get_api_endpoint_detail(method, path)` to get exact parameter schemas
-3. `get_api_endpoint_glossary(method, path)` for parameter semantics on
-   endpoints with non-trivial filters or ambiguous field names
+2. `describe_endpoint_for_device(method, path, deviceType=...)` to get the
+   field-by-field guide (parameters + body) for each endpoint.
+3. Use `query_graph` for any deeper structural question — transitive
+   `$ref` walks, cross-endpoint comparisons, or filtering by
+   `supportedDeviceTypes`.
 
 Never guess or hardcode API paths — always discover them via the catalog.
 

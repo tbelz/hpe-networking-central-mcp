@@ -20,10 +20,12 @@ def _ep(method: str, path: str, category: str = "Test", deprecated: bool = False
 def test_empty_endpoints_returns_fallback():
     text = render_path_tree([])
     assert "unavailable" in text.lower()
-    # Fallback must NOT steer callers toward the deprecated unified_search tool.
+    # Fallback must NOT steer callers toward retired tools.
     assert "unified_search" not in text
+    assert "get_api_endpoint_detail" not in text
+    assert "get_api_endpoint_glossary" not in text
     # Should mention the still-working alternative.
-    assert "get_api_endpoint_detail" in text
+    assert "describe_endpoint_for_device" in text
 
 
 def test_read_only_filters_to_empty_returns_fallback():

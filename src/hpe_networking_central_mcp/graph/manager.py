@@ -114,7 +114,7 @@ class GraphManager:
 
     @staticmethod
     def _check_ladybug_compat(conn: lb.Connection) -> None:
-        """Log diagnostic warnings for known LadybugDB/Kuzu bugs.
+        """Log diagnostic warnings for known LadybugDB bugs.
 
         This runs once at startup and reports which workarounds are still
         needed so they can be removed when upstream fixes land.

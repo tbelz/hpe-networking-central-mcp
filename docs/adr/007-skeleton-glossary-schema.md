@@ -2,8 +2,11 @@
 
 ## Status
 
-Accepted (2026-04-25, supersedes the four-view detail surface introduced
-informally in 2024).
+Superseded by [ADR 009](009-graph-as-primary-api-discovery.md) (Phase 2E
+removed both `get_api_endpoint_detail` and `get_api_endpoint_glossary`;
+`describe_endpoint_for_device` is the body-assembly entry point and the
+schema is now exposed as a first-class subgraph queried via `query_graph`).
+The original decision and rationale below are kept for historical context.
 
 ## Context
 

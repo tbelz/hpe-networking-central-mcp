@@ -50,7 +50,7 @@ def _api_error_hint(exc: CentralAPIError, path: str, method: str) -> str:
         return (
             "\n\nHint: Central config APIs require a valid scopeId and scopeType. "
             "Use query_graph to find scopeId values from Site, SiteCollection, or Device nodes. "
-            "Use get_api_endpoint_detail() to check required parameters."
+            "Use describe_endpoint_for_device(method, path) to check required parameters."
         )
 
     # 404 — wrong path
@@ -58,13 +58,13 @@ def _api_error_hint(exc: CentralAPIError, path: str, method: str) -> str:
         return (
             "\n\nHint: Endpoint not found. Read the api://endpoint-catalog resource "
             "for the full list of valid METHOD /path combinations, then use "
-            "get_api_endpoint_detail() to verify the exact path and parameters. "
+            "describe_endpoint_for_device(method, path) to verify the exact path and parameters. "
             "Guessing paths without consulting the catalog has a near-zero chance of success."
         )
 
     # 400 — bad request
     if exc.status_code == 400:
-        return "\n\nHint: Check parameters with get_api_endpoint_detail(method, path)."
+        return "\n\nHint: Check parameters with describe_endpoint_for_device(method, path)."
 
     return ""
 
@@ -125,7 +125,8 @@ def register_api_call_tools(mcp, settings: Settings, client: CentralClient):
 
         **Before calling this tool**, read the ``api://endpoint-catalog`` resource (or
         scan the API Endpoint Catalog in the system instructions) to find the correct
-        ``METHOD /path``. Then call ``get_api_endpoint_detail()`` to verify parameters.
+        ``METHOD /path``. Then call ``describe_endpoint_for_device(method, path, deviceType?)``
+        to verify parameters and inspect the body shape.
         Guessing paths without consulting the catalog has a near-zero chance of success.
 
         For config APIs (network-config/), you need a scopeId — find it via

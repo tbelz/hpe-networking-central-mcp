@@ -2,9 +2,13 @@
 
 ## Status
 
-Proposed (2026-04-26).  Companion to the slim-skeleton split shipped in
-the same change (see `oas_normalize.project_skeleton` /
-`project_components` and the new `get_schema_component` tool).
+Superseded by [ADR 009](009-graph-as-primary-api-discovery.md). The
+subgraph proposed here landed in production (`Parameter`, `RequestBody`,
+`Response`, `SchemaComponent`, `Property` node tables); ADR 009 then
+removed the per-endpoint JSON blobs (`bodySkeletonJson`,
+`bodyGlossaryJson`, `bodyComponentsJson`) and the `get_schema_component`
+tool in favour of `query_graph` directly. The motivation and design notes
+below are retained for historical context.
 
 ## Context
 

@@ -32,7 +32,7 @@ def _make_tarball(members: dict[str, bytes] | None = None) -> bytes:
     """
     if members is None:
         members = {
-            "knowledge_db/db.kuzu": b"binary-db-bytes",
+            "knowledge_db/db.lbd": b"binary-db-bytes",
             "manifest.json": json.dumps({"schema_version": 3}).encode(),
         }
     buf = io.BytesIO()
@@ -113,7 +113,7 @@ def test_happy_path_extracts_db_and_manifest(tmp_path, monkeypatch):
     db_path = tmp_path / "kdb"
     assert download_knowledge_db("owner/repo", db_path) is True
     assert db_path.exists() and db_path.is_dir()
-    assert (db_path / "db.kuzu").read_bytes() == b"binary-db-bytes"
+    assert (db_path / "db.lbd").read_bytes() == b"binary-db-bytes"
     # manifest must be copied next to the db
     manifest = (tmp_path / "manifest.json")
     assert manifest.exists()
@@ -136,14 +136,14 @@ def test_happy_path_replaces_existing_db_dir(tmp_path, monkeypatch):
     _install_transport(monkeypatch, handler)
     assert download_knowledge_db("owner/repo", db_path) is True
     assert not (db_path / "stale.txt").exists(), "stale dir contents must be wiped"
-    assert (db_path / "db.kuzu").exists()
+    assert (db_path / "db.lbd").exists()
 
 
 def test_rejects_path_traversal_in_tar_member(tmp_path, monkeypatch):
     """Security: tar member with `..` must be rejected without extraction."""
     bad_tarball = _make_tarball({
         "../etc/passwd": b"pwned",
-        "knowledge_db/db.kuzu": b"x",
+        "knowledge_db/db.lbd": b"x",
     })
     asset_url = "https://example.invalid/bad.tar.gz"
 
@@ -194,7 +194,7 @@ def test_skips_download_when_local_tag_matches_release(tmp_path, monkeypatch):
     blew Claude's MCP ``initialize`` budget on cold start."""
     db_path = tmp_path / "kdb"
     db_path.mkdir()
-    (db_path / "db.kuzu").write_bytes(b"existing")
+    (db_path / "db.lbd").write_bytes(b"existing")
     (tmp_path / "manifest.json").write_text(
         json.dumps({"release_tag": "knowledge-db-test", "schema_version": 8})
     )
@@ -218,7 +218,7 @@ def test_skips_download_when_local_tag_matches_release(tmp_path, monkeypatch):
     # Returns False because no install was performed; existing DB remains.
     assert download_knowledge_db("owner/repo", db_path) is False
     assert download_calls == [], "must not hit the asset URL when local matches"
-    assert (db_path / "db.kuzu").read_bytes() == b"existing"
+    assert (db_path / "db.lbd").read_bytes() == b"existing"
 
 
 def test_falls_back_to_local_when_release_api_unreachable(tmp_path, monkeypatch):
@@ -226,7 +226,7 @@ def test_falls_back_to_local_when_release_api_unreachable(tmp_path, monkeypatch)
     keep using it instead of failing startup."""
     db_path = tmp_path / "kdb"
     db_path.mkdir()
-    (db_path / "db.kuzu").write_bytes(b"existing")
+    (db_path / "db.lbd").write_bytes(b"existing")
     (tmp_path / "manifest.json").write_text(
         json.dumps({"release_tag": "knowledge-db-old", "schema_version": 8})
     )
@@ -237,7 +237,7 @@ def test_falls_back_to_local_when_release_api_unreachable(tmp_path, monkeypatch)
     _install_transport(monkeypatch, handler)
     # Returns False (no install) but does NOT raise; existing DB preserved.
     assert download_knowledge_db("owner/repo", db_path) is False
-    assert (db_path / "db.kuzu").read_bytes() == b"existing"
+    assert (db_path / "db.lbd").read_bytes() == b"existing"
 
 
 def test_install_writes_release_tag_into_manifest(tmp_path, monkeypatch):
