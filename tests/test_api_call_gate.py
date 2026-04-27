@@ -365,3 +365,130 @@ class TestEndpointRegistry:
         r.register("GET", ["/a/{x}"])
         r.reset()
         assert r.match("GET", "/a/1") is None
+
+
+# ── endpoint_id explicit-bypass parameter ────────────────────────────
+
+
+class TestEndpointIdBypass:
+    """``endpoint_id="METHOD:/path"`` lets the agent attest it has already
+    inspected the schema (e.g. via ``query_graph``) so the gate skips the
+    redundant property summary."""
+
+    def test_matching_endpoint_id_skips_gate(self, catalog_tools):
+        tools, client = catalog_tools
+
+        out = tools["call_central_api"](
+            path="/config/v1/widgets",
+            method="POST",
+            body={"name": "x"},
+            endpoint_id="POST:/config/v1/widgets",
+        )
+        assert "items" in out
+        client._request.assert_called_once()
+
+    def test_matching_endpoint_id_records_inspection_for_followups(self, catalog_tools):
+        tools, client = catalog_tools
+
+        tools["call_central_api"](
+            path="/config/v1/widgets",
+            method="POST",
+            body={"name": "x"},
+            endpoint_id="POST:/config/v1/widgets",
+        )
+        # Subsequent call without endpoint_id must now succeed too.
+        tools["call_central_api"](
+            path="/config/v1/widgets",
+            method="POST",
+            body={"name": "y"},
+        )
+        assert client._request.call_count == 2
+
+    def test_matching_endpoint_id_normalises_path(self, catalog_tools):
+        # Path supplied to the tool has no leading slash; endpoint_id has one.
+        tools, client = catalog_tools
+
+        out = tools["call_central_api"](
+            path="config/v1/widgets",
+            method="POST",
+            body={"name": "x"},
+            endpoint_id="POST:/config/v1/widgets",
+        )
+        assert "items" in out
+        client._request.assert_called_once()
+
+    def test_mismatched_endpoint_id_falls_through_to_gate(self, catalog_tools):
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        tools, client = catalog_tools
+
+        with pytest.raises(ToolError) as exc:
+            tools["call_central_api"](
+                path="/config/v1/widgets",
+                method="POST",
+                body={"name": "x"},
+                endpoint_id="GET:/config/v1/widgets",  # wrong method
+            )
+        assert "schema not consulted" in str(exc.value).lower()
+        client._request.assert_not_called()
+
+    def test_mismatched_endpoint_id_path_falls_through(self, catalog_tools):
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        tools, client = catalog_tools
+
+        with pytest.raises(ToolError):
+            tools["call_central_api"](
+                path="/config/v1/widgets",
+                method="POST",
+                body={"name": "x"},
+                endpoint_id="POST:/config/v1/other",
+            )
+        client._request.assert_not_called()
+
+    def test_no_endpoint_id_unchanged_behaviour(self, catalog_tools):
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        tools, client = catalog_tools
+
+        with pytest.raises(ToolError):
+            tools["call_central_api"](path="/config/v1/widgets", method="POST")
+        client._request.assert_not_called()
+
+    def test_greenlake_matching_endpoint_id_skips_gate(self, catalog_tools):
+        tools, client = catalog_tools
+
+        out = tools["call_greenlake_api"](
+            path="/monitoring/v2/aps",
+            endpoint_id="GET:/monitoring/v2/aps",
+        )
+        assert "items" in out
+        client._request.assert_called_once()
+
+    def test_greenlake_mismatched_endpoint_id_blocks(self, catalog_tools):
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        tools, client = catalog_tools
+
+        with pytest.raises(ToolError):
+            tools["call_greenlake_api"](
+                path="/monitoring/v2/aps",
+                endpoint_id="POST:/monitoring/v2/aps",
+            )
+        client._request.assert_not_called()
+
+
+# ── eid_for helper ───────────────────────────────────────────────────
+
+
+class TestEidFor:
+
+    def test_canonical_form(self):
+        from hpe_networking_central_mcp.tools.api_call_policy import eid_for
+
+        assert eid_for("get", "monitoring/v1/aps") == "GET:/monitoring/v1/aps"
+
+    def test_idempotent_with_leading_slash(self):
+        from hpe_networking_central_mcp.tools.api_call_policy import eid_for
+
+        assert eid_for("POST", "/x/y") == eid_for("post", "x/y")

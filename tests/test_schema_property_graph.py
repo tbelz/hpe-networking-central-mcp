@@ -395,3 +395,211 @@ class TestAllOfFlattening:
         assert names == sorted(
             ["authenticate", "key-value", "server", "name", "vrf"]
         )
+
+
+# ── Inline schemas (no $ref) materialised as synthetic components ───
+
+
+def _make_inline_servers_spec() -> dict:
+    """Mimics NTP-style ``servers`` array with inline item schema (no $ref).
+
+    The shape that previously stranded sub-properties inside ``bodyJson``::
+
+        NtpServers
+          properties:
+            servers:
+              type: array
+              items:                      # <-- inline, NO $ref
+                type: object
+                properties:
+                  address: string
+                  prefer:  boolean
+            tags:
+              type: array
+              items:                      # inline scalar items must NOT
+                type: string              # mint a synthetic component
+            location:
+              type: object                # inline object property
+              properties:
+                lat: number
+                lon: number
+    """
+    components = {
+        "schemas": {
+            "NtpServers": {
+                "type": "object",
+                "properties": {
+                    "servers": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["address"],
+                            "properties": {
+                                "address": {
+                                    "type": "string",
+                                    "description": "NTP server hostname",
+                                    "x-supportedDeviceType": ["Switch CX"],
+                                },
+                                "prefer": {
+                                    "type": "boolean",
+                                    "description": "Mark as preferred",
+                                },
+                            },
+                        },
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "location": {
+                        "type": "object",
+                        "properties": {
+                            "lat": {"type": "number"},
+                            "lon": {"type": "number"},
+                        },
+                    },
+                },
+            }
+        }
+    }
+    return {
+        "openapi": "3.0.0",
+        "info": {"title": "NTP", "version": "1"},
+        "components": components,
+        "paths": {
+            "/v1/ntp-servers": {
+                "post": {
+                    "operationId": "putServers",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/NtpServers"}
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    }
+
+
+def _seed_inline(conn) -> None:
+    from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph
+
+    spec = _make_inline_servers_spec()
+    _seed_endpoint(conn, "POST", "/v1/ntp-servers")
+    populate_schema_graph(
+        conn,
+        spec_source="central",
+        spec=spec,
+        endpoints=[("POST", "/v1/ntp-servers")],
+    )
+
+
+class TestInlineSchemaMaterialisation:
+    """Inline ``items`` / ``properties`` (no ``$ref``) must appear in the
+    property subgraph, not be stranded inside opaque ``bodyJson``."""
+
+    def test_inline_array_items_become_synthetic_component(self, fresh_db):
+        _, conn = fresh_db
+        _seed_inline(conn)
+        rows = list(conn.execute(
+            "MATCH (sc:SchemaComponent {name: 'NtpServers'})"
+            "-[:HAS_PROPERTY]->(p:Property {name: 'servers'})"
+            "-[:PROPERTY_OF_TYPE]->(items:SchemaComponent) "
+            "RETURN items.component_id AS cid, items.section AS section"
+        ).rows_as_dict())
+        assert len(rows) == 1, rows
+        assert rows[0]["cid"].endswith("#items"), rows[0]
+        assert rows[0]["section"] == "inline"
+
+    def test_inline_array_item_subproperties_are_extracted(self, fresh_db):
+        _, conn = fresh_db
+        _seed_inline(conn)
+        rows = list(conn.execute(
+            "MATCH (sc:SchemaComponent {name: 'NtpServers'})"
+            "-[:HAS_PROPERTY]->(:Property {name: 'servers'})"
+            "-[:PROPERTY_OF_TYPE]->(:SchemaComponent)"
+            "-[:HAS_PROPERTY]->(child:Property) "
+            "RETURN child.name AS name, child.type AS type, child.required AS req "
+            "ORDER BY child.name"
+        ).rows_as_dict())
+        names = [(r["name"], r["type"], bool(r["req"])) for r in rows]
+        assert names == [
+            ("address", "string", True),
+            ("prefer", "boolean", False),
+        ]
+
+    def test_inline_array_item_extensions_preserved(self, fresh_db):
+        _, conn = fresh_db
+        _seed_inline(conn)
+        rows = list(conn.execute(
+            "MATCH (:Property {name: 'servers'})"
+            "-[:PROPERTY_OF_TYPE]->(:SchemaComponent)"
+            "-[:HAS_PROPERTY]->(p:Property {name: 'address'}) "
+            "RETURN p.supportedDeviceTypes AS sdt"
+        ).rows_as_dict())
+        assert rows[0]["sdt"] == ["Switch CX"]
+
+    def test_inline_object_property_becomes_synthetic_component(self, fresh_db):
+        _, conn = fresh_db
+        _seed_inline(conn)
+        rows = list(conn.execute(
+            "MATCH (:SchemaComponent {name: 'NtpServers'})"
+            "-[:HAS_PROPERTY]->(p:Property {name: 'location'})"
+            "-[:PROPERTY_OF_TYPE]->(obj:SchemaComponent)"
+            "-[:HAS_PROPERTY]->(child:Property) "
+            "RETURN child.name AS name ORDER BY child.name"
+        ).rows_as_dict())
+        assert [r["name"] for r in rows] == ["lat", "lon"]
+
+    def test_inline_scalar_array_items_do_not_mint_component(self, fresh_db):
+        # `tags: [string]` has no nested structure to extract.
+        _, conn = fresh_db
+        _seed_inline(conn)
+        rows = list(conn.execute(
+            "MATCH (:SchemaComponent {name: 'NtpServers'})"
+            "-[:HAS_PROPERTY]->(p:Property {name: 'tags'})"
+            "-[:PROPERTY_OF_TYPE]->(c:SchemaComponent) "
+            "RETURN c.component_id AS cid"
+        ).rows_as_dict())
+        assert rows == []
+
+    def test_synthetic_component_id_is_deterministic(self, fresh_db):
+        # Build the graph twice in the same DB; second run must dedupe and
+        # not raise primary-key violations on the synthetic SchemaComponent.
+        _, conn = fresh_db
+        _seed_inline(conn)
+        # Re-running populate against the same endpoint set must be a no-op
+        # for the synthetic node — second insert would crash on PK collision
+        # if the id were not deterministic.
+        from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph
+        populate_schema_graph(
+            conn,
+            spec_source="central",
+            spec=_make_inline_servers_spec(),
+            endpoints=[("POST", "/v1/ntp-servers")],
+        )
+        rows = list(conn.execute(
+            "MATCH (c:SchemaComponent) WHERE c.section = 'inline' "
+            "RETURN count(c) AS n"
+        ).rows_as_dict())
+        # exactly two synthetic components: servers#items and location#object
+        assert rows[0]["n"] == 2
+
+    def test_endpoint_to_inline_subproperty_traversal(self, fresh_db):
+        """End-to-end: starting from the endpoint, can the agent reach the
+        inline `servers[].address` field via pure graph traversal?"""
+        _, conn = fresh_db
+        _seed_inline(conn)
+        rows = list(conn.execute(
+            "MATCH (e:ApiEndpoint {endpoint_id: 'POST:/v1/ntp-servers'})"
+            "-[:HAS_REQUEST_BODY]->(:RequestBody)-[:BODY_REFERENCES]->"
+            "(:SchemaComponent)-[:HAS_PROPERTY]->(:Property {name: 'servers'})"
+            "-[:PROPERTY_OF_TYPE]->(:SchemaComponent)"
+            "-[:HAS_PROPERTY]->(p:Property) "
+            "RETURN p.name AS name ORDER BY p.name"
+        ).rows_as_dict())
+        assert [r["name"] for r in rows] == ["address", "prefer"]

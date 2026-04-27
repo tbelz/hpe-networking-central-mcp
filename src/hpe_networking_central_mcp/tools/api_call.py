@@ -11,7 +11,7 @@ from mcp.types import ToolAnnotations
 
 from ..central_client import BaseAPIClient, CentralAPIError, CentralClient, GreenLakeClient
 from ..config import Settings
-from .api_call_policy import check_call_policy
+from .api_call_policy import check_call_policy, eid_for, get_tracker
 
 logger = structlog.get_logger("tools.api_call")
 
@@ -92,6 +92,7 @@ def register_api_call_tools(mcp, settings: Settings, client: CentralClient):
         method: Literal["GET", "POST", "PATCH", "PUT", "DELETE"] = "GET",
         query_params: dict[str, str] | None = None,
         body: dict | None = None,
+        endpoint_id: str | None = None,
     ) -> str:
         """Make an authenticated request to any Central API endpoint.
 
@@ -109,12 +110,21 @@ def register_api_call_tools(mcp, settings: Settings, client: CentralClient):
 
         For multi-step workflows, write a script instead of chaining API calls.
 
+        **Bypassing the schema gate.** If you have already inspected the endpoint —
+        either via ``describe_endpoint_for_device`` or by querying ``Parameter`` /
+        ``RequestBody`` / ``Property`` nodes with ``query_graph`` — pass
+        ``endpoint_id="METHOD:/path"`` (e.g. ``"GET:/network-notifications/v1/alerts"``)
+        to skip the gate's redundant property-summary block. The id must match
+        ``method`` and ``path`` exactly; mismatches fall through to the standard gate.
+
         Args:
             path: API path (e.g., "network-monitoring/v1/device-inventory").
                   Do not include the base URL.
             method: HTTP method. Defaults to GET.
             query_params: Optional query parameters as key-value pairs.
             body: Optional JSON request body (for POST, PATCH, PUT).
+            endpoint_id: Optional ``"METHOD:/path"`` token attesting that the
+                endpoint schema has already been consulted (see above).
 
         Returns:
             JSON response from the Central API.
@@ -131,9 +141,14 @@ def register_api_call_tools(mcp, settings: Settings, client: CentralClient):
                 "Network-side configuration changes are disabled."
             )
 
-        allowed, reason = check_call_policy(method, path)
-        if not allowed:
-            raise ToolError(reason or "API call blocked by policy.")
+        # Explicit attestation: agent has already inspected this endpoint via
+        # query_graph / describe_endpoint_for_device. Record + skip the gate.
+        if endpoint_id and endpoint_id.strip() == eid_for(method, path):
+            get_tracker().record(method, path)
+        else:
+            allowed, reason = check_call_policy(method, path)
+            if not allowed:
+                raise ToolError(reason or "API call blocked by policy.")
 
         return _make_api_call(client, "central", path, method, query_params, body)
 
@@ -153,6 +168,7 @@ def register_greenlake_api_call_tools(mcp, settings: Settings, glp_client: Green
         method: Literal["GET", "POST", "PATCH", "PUT", "DELETE"] = "GET",
         query_params: dict[str, str] | None = None,
         body: dict | None = None,
+        endpoint_id: str | None = None,
     ) -> str:
         """Make an authenticated request to any HPE GreenLake Platform API endpoint.
 
@@ -166,12 +182,19 @@ def register_greenlake_api_call_tools(mcp, settings: Settings, glp_client: Green
         "HPE GreenLake APIs for ...". Guessing paths without consulting the catalog
         has a near-zero chance of success.
 
+        **Bypassing the schema gate.** Pass ``endpoint_id="METHOD:/path"`` to attest
+        that you have already inspected the endpoint via ``describe_endpoint_for_device``
+        or ``query_graph`` on the schema subgraph; mismatches fall through to the
+        standard gate.
+
         Args:
             path: API path (e.g., "devices/v1/devices").
                   Do not include the base URL.
             method: HTTP method. Defaults to GET.
             query_params: Optional query parameters as key-value pairs.
             body: Optional JSON request body (for POST, PATCH, PUT).
+            endpoint_id: Optional ``"METHOD:/path"`` token attesting that the
+                endpoint schema has already been consulted (see above).
 
         Returns:
             JSON response from the GreenLake API.
@@ -189,8 +212,11 @@ def register_greenlake_api_call_tools(mcp, settings: Settings, glp_client: Green
                 "Network-side configuration changes are disabled."
             )
 
-        allowed, reason = check_call_policy(method, path)
-        if not allowed:
-            raise ToolError(reason or "API call blocked by policy.")
+        if endpoint_id and endpoint_id.strip() == eid_for(method, path):
+            get_tracker().record(method, path)
+        else:
+            allowed, reason = check_call_policy(method, path)
+            if not allowed:
+                raise ToolError(reason or "API call blocked by policy.")
 
         return _make_api_call(glp_client, "greenlake", path, method, query_params, body)

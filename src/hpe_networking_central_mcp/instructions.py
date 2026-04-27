@@ -45,12 +45,22 @@ direct API reads and reusable Python scripts.
    request body. This is also the mechanism the call gate uses (see below).
 
 3. **API call gate (enforced)**: Before `call_central_api` or `call_greenlake_api`
-   will dispatch a request, you MUST have called `describe_endpoint_for_device`
-   for that exact `METHOD /path` in the current session. Calls without prior
-   inspection are rejected with a prescriptive error that *also embeds the
-   property summary inline*, so a single retry with corrected arguments will
-   succeed. This gate exists because skipping the schema lookup is the single
-   most common cause of wrong-parameter / oversized-response failures.
+   will dispatch a request, you MUST have inspected the endpoint's schema in the
+   current session — either by calling `describe_endpoint_for_device` for that
+   exact `METHOD /path`, or by reading its `Parameter` / `RequestBody` /
+   `Property` nodes via `query_graph`. Calls without prior inspection are
+   rejected with a prescriptive error that *also embeds the property summary
+   inline*, so a single retry with corrected arguments will succeed.
+
+   **Bypass for graph-driven workflows**: If you've already explored the
+   endpoint with `query_graph` (or any other means), pass
+   `endpoint_id="METHOD:/path"` to `call_central_api` /
+   `call_greenlake_api` — it skips the redundant property-summary block.
+   The id must match the request exactly (e.g.
+   `endpoint_id="GET:/network-notifications/v1/alerts"` for a GET to
+   `network-notifications/v1/alerts`); any mismatch falls through to the
+   normal gate. This gate exists because skipping the schema lookup is the
+   single most common cause of wrong-parameter / oversized-response failures.
 
 4. **Quick reads**: For any direct API call, first identify the endpoint via
    `list_api` / the catalog, then run `describe_endpoint_for_device(...)` to
