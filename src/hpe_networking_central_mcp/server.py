@@ -24,8 +24,6 @@ from .prompts.workflows import register_prompts
 from .resources.docs import register_api_catalog_resource, register_resources
 from .resources.graph import register_graph_resources
 from .tools.api_call import register_api_call_tools, register_greenlake_api_call_tools
-from .tools.api_catalog import register_catalog_tools
-from .tools.describe import register_describe_tools
 from .tools.execution import register_execution_tools, _run_script
 from .tools.graph import register_graph_tools
 from .tools.scripts import register_script_tools, sync_seeds_to_graph
@@ -75,7 +73,7 @@ graph_manager.create_fts_indexes()
 # Version 8 (ADR 009 Phase 2E) drops the skeleton/glossary/components
 # JSON blob columns and the ApiEndpointSkeleton node table — all API
 # discovery now flows through the Property/Parameter/SchemaComponent
-# subgraph and the ``describe_endpoint_for_device`` tool.
+# subgraph and the ``query_graph`` tool (see ADR 010).
 _KNOWLEDGE_SCHEMA_VERSION = 8
 
 
@@ -96,8 +94,8 @@ def _check_knowledge_schema_version() -> None:
             f"server-required version {_KNOWLEDGE_SCHEMA_VERSION}. "
             "Re-run scripts/build_knowledge_db.py or wait for the next "
             "knowledge-db release. Refusing to start to avoid serving "
-            "stale describe_endpoint_for_device / query_graph results "
-            "against an out-of-date schema."
+            "stale query_graph / pre-flight validator results against an "
+            "out-of-date schema."
         )
         logger.error("knowledge_schema_version_mismatch", expected=_KNOWLEDGE_SCHEMA_VERSION, found=found)
         raise SystemExit(msg)
@@ -304,11 +302,9 @@ def _bg_auto_run_seeds():
 register_execution_tools(mcp, settings)
 register_graph_tools(mcp, settings, graph_manager)
 register_script_tools(mcp, settings, graph_manager)
-register_catalog_tools(mcp, settings, graph_manager)
-register_describe_tools(mcp, settings, graph_manager)
-register_api_call_tools(mcp, settings, client)
+register_api_call_tools(mcp, settings, client, graph_manager)
 if glp_client is not None:
-    register_greenlake_api_call_tools(mcp, settings, glp_client)
+    register_greenlake_api_call_tools(mcp, settings, glp_client, graph_manager)
 else:
     logger.info("greenlake_tools_disabled", reason="GreenLake credentials not configured")
 register_resources(mcp, settings, graph_manager)

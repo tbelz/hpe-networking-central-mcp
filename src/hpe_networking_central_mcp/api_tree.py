@@ -125,8 +125,9 @@ def render_path_tree(
         return (
             "_API endpoint catalog is currently unavailable._\n"
             "Check the server startup logs for `api_tree_query_failed`. If you "
-            "already know a `METHOD /path`, you can still call "
-            "`describe_endpoint_for_device(method=..., path=...)` directly."
+            "already know a `METHOD /path`, you can still use `query_graph` "
+            "against the ApiEndpoint/Parameter/Property subgraph (see "
+            "`graph://schema`)."
         )
 
     by_cat: dict[str, list[dict]] = defaultdict(list)
@@ -139,7 +140,7 @@ def render_path_tree(
         "",
         "Format: `path/` (branch) or `segment  [METHODS]` (endpoint).",
         "A trailing `!` after the method list marks deprecated endpoints.",
-        "Use `describe_endpoint_for_device(method, path)` for the body / parameter guide for one endpoint, or `query_graph` for any structural question across endpoints.",
+        "Use `query_graph` against `ApiEndpoint`/`Parameter`/`RequestBody`/`Property` nodes for endpoint details — see `graph://schema` for canned patterns.",
         "",
     ]
 

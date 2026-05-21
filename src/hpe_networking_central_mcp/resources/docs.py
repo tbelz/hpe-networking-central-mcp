@@ -51,11 +51,10 @@ def register_api_catalog_resource(mcp, settings: Settings, graph_manager: "Graph
     def api_endpoint_catalog() -> str:
         """Full API Endpoint Catalog — every available METHOD /path for Central and GreenLake.
 
-        Read this resource **before** calling describe_endpoint_for_device(),
-        call_central_api(), or call_greenlake_api() to find the correct
-        METHOD and exact path. The catalog is grouped by API category with
-        nested path-tree indentation. A trailing ``!`` marks deprecated
-        endpoints.
+        Read this resource **before** calling ``call_central_api()`` or
+        ``call_greenlake_api()`` to find the correct METHOD and exact path.
+        The catalog is grouped by API category with nested path-tree
+        indentation. A trailing ``!`` marks deprecated endpoints.
 
         If you cannot see the API Endpoint Catalog in the system
         instructions, reading this resource is the authoritative fallback.
@@ -229,22 +228,21 @@ Base URL: `https://global.api.greenlake.hpe.com`
 
 All endpoints from both platforms are indexed in a single unified catalog.
 
-1. `api://endpoint-catalog` resource (or `list_api()` as a fallback) — the
-   authoritative `METHOD /path` listing for both platforms, grouped by
-   category. GreenLake categories appear as "HPE GreenLake APIs for ...".
-2. `describe_endpoint_for_device(method, path, deviceType=...)` — the
-   field-by-field guide for one endpoint (parameters + every leaf body
-   property, flattened across `allOf`, optionally device-filtered).
-   **Required** before `call_central_api` / `call_greenlake_api` will
-   dispatch a request to that endpoint.
-3. `query_graph(cypher)` — for everything else: cross-endpoint structural
-   questions, `$ref` traversal, finding all properties that support a
-   given device type, and so on. Read `graph://schema` for the full
-   API discovery subgraph (`ApiEndpoint`, `Parameter`, `RequestBody`,
-   `Response`, `SchemaComponent`, `Property`).
+1. `api://endpoint-catalog` resource — the authoritative `METHOD /path`
+   listing for both platforms, grouped by category. GreenLake categories
+   appear as "HPE GreenLake APIs for ...".
+2. `query_graph(cypher)` — the source of truth for parameter and body
+   details. Run Cypher against `ApiEndpoint`, `Parameter`, `RequestBody`,
+   `Response`, `SchemaComponent`, and `Property` nodes. `allOf` branches
+   are flattened at seed time, so a single `HAS_PROPERTY` traversal
+   returns every inherited leaf property. Read `graph://schema` for the
+   full subgraph and canned Cypher patterns.
 
-Always consult the catalog and call `describe_endpoint_for_device` before
-writing scripts or making API calls.
+Every `call_central_api` / `call_greenlake_api` invocation is pre-flight
+validated against the graph. Missing required query parameters and
+missing required top-level body fields (POST only) are rejected with a
+structured error containing a schema summary; unknown body keys appear
+as warnings on a successful response.
 
 ## Authentication
 
@@ -279,14 +277,15 @@ pre-authenticated API clients. No OAuth2 boilerplate needed.
 
 Before writing any script, you MUST:
 1. Find candidate `METHOD /path` combinations in the API endpoint catalog
-   (`api://endpoint-catalog` resource, or `list_api()`)
-2. `describe_endpoint_for_device(method, path, deviceType=...)` to get the
-   field-by-field guide (parameters + body) for each endpoint.
-3. Use `query_graph` for any deeper structural question — transitive
-   `$ref` walks, cross-endpoint comparisons, or filtering by
-   `supportedDeviceTypes`.
+   (`api://endpoint-catalog` resource).
+2. Use `query_graph` against the `Parameter`/`RequestBody`/`SchemaComponent`/
+   `Property` subgraph to get parameter names, types, required-ness, body
+   fields, and per-device support. See `graph://schema` for canned
+   Cypher patterns.
 
-Never guess or hardcode API paths — always discover them via the catalog.
+A pre-flight validator runs on every `call_central_api` /
+`call_greenlake_api` and will reject calls with missing required
+parameters or body fields. Never guess or hardcode API paths.
 
 ## Template
 
