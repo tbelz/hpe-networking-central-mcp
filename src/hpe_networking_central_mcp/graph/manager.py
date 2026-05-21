@@ -384,7 +384,7 @@ Org  (= Global scope — config here applies to ALL devices)
 
 ### Effective Config (API-only)
 There are no config profile nodes in the graph.  Use the Central API directly:
-- Discover categories from the API endpoint catalog (`api://endpoint-catalog` or `list_api()`)
+- Discover categories from the API endpoint catalog (`api://endpoint-catalog`)
 - Read effective config: `GET network-config/v1alpha1/{category}?effective=true&detailed=true`
 - The `detailed=true` response includes provenance annotations showing which scope each setting comes from.
 
@@ -519,12 +519,45 @@ RETURN p.name, p.type, p.required,
 ORDER BY source, p.name
 ```
 
-When you need a field-by-field guide for assembling a call body (request
-or 200 response), call `describe_endpoint_for_device(method, path,
-deviceType?)` — it returns the request parameters plus every leaf
-property of the body, already flattened across `allOf` branches and
-filterable by device type. For everything else (cross-spec lookups,
-category rollups, custom traversals) use `query_graph()` directly.
+When you need a field-by-field guide for assembling a call body
+(request or response), use the following canned patterns. `allOf`
+branches are flattened at seed time, so a single `HAS_PROPERTY`
+traversal returns every inherited leaf property.
+
+```cypher
+// Required parameters for a specific endpoint
+MATCH (e:ApiEndpoint {method: $m, path: $p})-[:HAS_PARAMETER]->(param:Parameter)
+RETURN param.name, param.location, param.required, param.type
+ORDER BY param.required DESC, param.name
+```
+
+```cypher
+// Request-body properties for an endpoint, optionally filtered by device type
+// (pass deviceType='' to skip the filter)
+MATCH (e:ApiEndpoint {method: $m, path: $p})
+      -[:HAS_REQUEST_BODY]->(:RequestBody)
+      -[:BODY_REFERENCES]->(c:SchemaComponent)
+      -[:HAS_PROPERTY]->(p:Property)
+WHERE $deviceType = ''
+   OR $deviceType IN p.supportedDeviceTypes
+   OR size(p.supportedDeviceTypes) = 0
+RETURN p.name, p.type, p.required, p.enumValues,
+       p.inheritedFrom, p.supportedDeviceTypes
+ORDER BY p.required DESC, p.name
+```
+
+```cypher
+// Required top-level fields of an endpoint's request body
+MATCH (e:ApiEndpoint {method: $m, path: $p})
+      -[:HAS_REQUEST_BODY]->(:RequestBody)
+      -[:BODY_REFERENCES]->(c:SchemaComponent)
+      -[:HAS_PROPERTY]->(p:Property {required: true})
+RETURN p.name, p.type, p.enumValues
+ORDER BY p.name
+```
+
+For everything else (cross-spec lookups, category rollups, custom
+traversals) use `query_graph()` directly.
 
 ## Tips
 - Use `list_scripts()` to find enrichment scripts (e.g., populate_base_graph, enrich_topology).

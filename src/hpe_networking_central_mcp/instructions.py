@@ -30,50 +30,33 @@ direct API reads and reusable Python scripts.
    and `Property` nodes. Read `graph://schema` for the full schema and canned Cypher
    patterns. Two complementary surfaces exist:
 
-     • `list_api` — a category-grouped path-tree of every available `METHOD /path`.
-       Use this (or the `api://endpoint-catalog` resource, or the embedded catalog
-       below) to find the right endpoint by name.
+     • The `api://endpoint-catalog` resource (also embedded below in these
+       instructions) — a category-grouped path-tree of every available
+       `METHOD /path`. Use it to find the right endpoint by name.
      • `query_graph(cypher)` — for any structural question about an endpoint
-       (parameters, request body fields, response shape, what device types support
-       a given Property, transitive `$ref` walks, cross-endpoint comparisons,
-       etc.). The graph is the source of truth.
+       (required parameters, request body fields, response shape, what device
+       types support a given Property, transitive `$ref` walks, cross-endpoint
+       comparisons, etc.). The graph is the source of truth. `allOf` branches
+       are flattened at seed time, so a single Cypher pattern returns every
+       inherited leaf property.
 
-   For the common case "I am about to call this endpoint on a device — what do I
-   send?", use `describe_endpoint_for_device(method, path, deviceType=...)`. It
-   returns a compact, device-filtered property summary (name, type, required,
-   enum, supportedDeviceTypes, yangPath, inheritedFrom) for parameters and the
-   request body. This is also the mechanism the call gate uses (see below).
+3. **Pre-flight validation (enforced)**: Every `call_central_api` and
+   `call_greenlake_api` invocation is validated against the graph before the
+   HTTP request is dispatched. Missing required query parameters and missing
+   required top-level body fields (POST only) cause the call to be rejected
+   with a structured error that inlines a compact schema summary, so a single
+   corrected retry typically succeeds. Unknown body keys on POST/PATCH/PUT
+   appear as non-blocking warnings on a successful response. There is no
+   per-session gate to satisfy and no inspection state to manage — the
+   validator is stateless. If the graph is unavailable the validator fails
+   open with a warning.
 
-3. **API call gate (enforced)**: Before `call_central_api` or `call_greenlake_api`
-   will dispatch a request, the gate must have a recorded inspection of the
-   endpoint in the current session. Inspections are recorded in three ways:
-
-   - calling `describe_endpoint_for_device` for that exact `METHOD /path`;
-   - the gate's auto-record on the first blocked call (the prescriptive error
-     embeds the property summary inline, so a single retry with corrected
-     arguments will then succeed); or
-   - passing the explicit `endpoint_id="METHOD:/path"` attestation parameter
-     (see below) — this is what you should use after exploring the endpoint
-     via `query_graph`. Reading `Parameter` / `RequestBody` / `Property` nodes
-     does not by itself flip the gate; pair it with `endpoint_id` on the call.
-
-   **Bypass for graph-driven workflows**: pass
-   `endpoint_id="METHOD:/path"` to `call_central_api` / `call_greenlake_api`
-   to attest that you have already consulted the schema. The id must match
-   `method` and `path` (e.g. `endpoint_id="GET:/network-notifications/v1/alerts"`
-   for a GET to `network-notifications/v1/alerts`). The bypass is template-
-   aware: passing the template form (e.g.
-   `endpoint_id="GET:/.../{serial-number}/dhcp-pools"`) for a concrete path
-   like `/.../DL0006948/dhcp-pools` is accepted and unblocks subsequent calls
-   to other concrete instantiations of the same template. Any mismatch falls
-   through to the normal gate. This gate exists because skipping the schema
-   lookup is the single most common cause of wrong-parameter / oversized-
-   response failures.
-
-4. **Quick reads**: For any direct API call, first identify the endpoint via
-   `list_api` / the catalog, then run `describe_endpoint_for_device(...)` to
-   confirm parameter names, types, enums, and the request body shape. Then call
-   `call_central_api(path, query_params)` with the correct parameters.
+4. **Quick reads**: For any direct API call: (a) consult the
+   `api://endpoint-catalog` resource (or the embedded catalog below) for the
+   right `METHOD /path`; (b) use `query_graph` against the
+   `Parameter`/`RequestBody`/`SchemaComponent`/`Property` subgraph if you
+   need parameter or body details; (c) call `call_central_api(path,
+   query_params)` with the correct arguments.
    Tip: Add `effective=true` to config endpoints for hierarchically merged config,
    and `detailed=true` for source annotations.
 
@@ -115,17 +98,15 @@ Scripts use `from central_helpers import api, glp, graph` — no OAuth2 boilerpl
 
 ## Choosing the right discovery tool
 
-- **list_api** / **`api://endpoint-catalog` resource** / **embedded catalog below**:
-  authoritative list of every `METHOD /path`. Start here when you need to find
-  an endpoint by name.
-- **describe_endpoint_for_device(method, path, deviceType=...)**: device-aware
-  property summary for one endpoint. Mandatory before `call_central_api` /
-  `call_greenlake_api`. Also the fastest answer to "what fields does this body
-  accept?".
-- **query_graph(cypher)**: for everything else — structural traversals
-  (cross-endpoint comparisons, `$ref` walks, all properties supporting a given
-  device type), graph navigation (Org/Site/Device hierarchy, topology), and
-  keyword lookups on graph nodes. Read `graph://schema` first.
+- **`api://endpoint-catalog` resource** / **embedded catalog below**:
+  authoritative list of every `METHOD /path`. Start here when you need to
+  find an endpoint by name.
+- **`query_graph(cypher)`**: the source of truth for everything else —
+  required parameters and body fields for a specific endpoint, cross-endpoint
+  structural comparisons, transitive `$ref` walks, all properties supporting
+  a given device type, and graph navigation (Org/Site/Device hierarchy,
+  topology). Read `graph://schema` first — it includes canned Cypher
+  patterns for the most common questions.
 
 ## MCP Resources
 
@@ -150,12 +131,10 @@ Before writing ANY script you MUST complete these steps IN ORDER:
 
 1. `list_scripts()` — check if a seed or saved script already solves the task.
 2. **Read the `api://endpoint-catalog` resource** (or scan it in the system
-   instructions below, or call `list_api`) for the right `METHOD /path`.
-   NEVER guess API paths.
-3. `describe_endpoint_for_device(method, path, deviceType=...)` — get the
-   device-filtered property summary (parameters + body) so you know exactly
-   which fields, types, and enums are valid. Use `query_graph` for any deeper
-   structural question (transitive refs, cross-endpoint comparisons, etc.).
+   instructions below) for the right `METHOD /path`. NEVER guess API paths.
+3. Use `query_graph` against the `Parameter`/`RequestBody`/`SchemaComponent`/
+   `Property` subgraph to learn the exact required parameters, body fields,
+   types, and enums. See `graph://schema` for canned patterns.
 4. Only THEN write the script using the discovered endpoints and schemas.
 
 Skipping these steps leads to wrong endpoints, wrong parameter names, and wasted iterations.
@@ -185,7 +164,7 @@ configuration changes are NOT permitted in this session:
   • The same restriction applies inside scripts you write or execute —
     `api.post(...)`, `api.delete(...)`, etc. will fail.
   • Mutating endpoints (POST/PUT/PATCH/DELETE) are hidden from
-    list_api and from the embedded API catalog.
+    the embedded API catalog.
 
 Local operations remain available for analysis: write_graph,
 save_script, and execute_script (as long as the script itself only

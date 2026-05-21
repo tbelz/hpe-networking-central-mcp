@@ -25,7 +25,7 @@ def test_empty_endpoints_returns_fallback():
     assert "get_api_endpoint_detail" not in text
     assert "get_api_endpoint_glossary" not in text
     # Should mention the still-working alternative.
-    assert "describe_endpoint_for_device" in text
+    assert "query_graph" in text
 
 
 def test_read_only_filters_to_empty_returns_fallback():

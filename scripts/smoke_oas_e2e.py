@@ -278,7 +278,6 @@ def test_search_detail_roundtrip():
     print(f"      Responses: {[r.status for r in detail.responses]}")
 
 
-run_test("list_api_categories returns all categories", test_list_categories)
 run_test("search -> detail round-trip works", test_search_detail_roundtrip)
 
 
@@ -377,8 +376,7 @@ else:
 
     # The MCP server initializes the catalog in a background thread.
     # With pre-populated cache it's fast, but the first tool call may still
-    # see an empty catalog. Test list_api first to warm up the
-    # server, then retry if catalog was still loading.
+    # see an empty catalog.
 
     def test_mcp_initialize():
         """Verify MCP handshake works."""
@@ -390,56 +388,6 @@ else:
         print(f"    -> Server: {info.get('name', '?')} v{info.get('version', '?')}")
         caps = resp["result"].get("capabilities", {})
         print(f"      Capabilities: {list(caps.keys())}")
-
-    def test_mcp_categories():
-        resp = _tool_call("list_api", {})
-        assert resp, "No response"
-        text = _get_text(resp)
-        # list_api now returns the rendered path tree as plain text
-        if "unavailable" in text.lower():
-            print(f"    -> Catalog still loading (background init), acceptable")
-            return
-        assert "API Endpoint Catalog" in text, f"Unexpected response: {text[:200]}"
-        print(f"    -> Catalog returned ({len(text)} chars)")
-
-    def test_mcp_search():
-        resp = _tool_call("unified_search", {"query": "vlan"})
-        assert resp is not None, "No response"
-        assert "result" in resp, f"Error: {json.dumps(resp)[:200]}"
-        data = json.loads(_get_text(resp))
-        if "error" in data and "empty" in data["error"]:
-            print(f"    -> Catalog still loading, acceptable")
-            return
-        assert data.get("returned_count", 0) > 0, f"Zero matches: {data}"
-        print(f"    -> {data['returned_count']} matches")
-
-    def test_mcp_detail():
-        resp = _tool_call("unified_search", {"query": "devices"})
-        assert resp, "search failed"
-        data = json.loads(_get_text(resp))
-        if "error" in data and "empty" in data["error"]:
-            print(f"    -> Catalog still loading, acceptable")
-            return
-        ep = data["endpoints"][0]
-        resp2 = _tool_call("get_api_endpoint_detail", {"method": ep["methods"][0], "path": ep["path"]})
-        assert resp2, "detail failed"
-        detail = json.loads(_get_text(resp2))
-        assert "method" in detail and "path" in detail
-        print(f"    -> {detail['method']} {detail['path']}")
-        if "parameters" in detail:
-            params = detail["parameters"]
-            print(f"      {len(params)} parameters")
-            # Verify full schema structure (not just names)
-            if params:
-                p = params[0]
-                assert "name" in p, f"Parameter missing 'name': {p}"
-                assert "in" in p, f"Parameter missing 'in': {p}"
-                assert "required" in p, f"Parameter missing 'required': {p}"
-                print(f"      First param: {p['name']} (in={p['in']}, required={p['required']})")
-        if "responses" in detail:
-            print(f"      {len(detail['responses'])} responses")
-        if "request_body" in detail:
-            print(f"      Has request body schema")
 
     def test_mcp_api_call():
         resp = _tool_call("call_central_api", {
@@ -470,9 +418,6 @@ else:
         print(f"    -> {len(text)} chars")
 
     run_test("MCP: initialize handshake", test_mcp_initialize)
-    run_test("MCP: list_api", test_mcp_categories)
-    run_test("MCP: unified_search('vlan')", test_mcp_search)
-    run_test("MCP: get_api_endpoint_detail", test_mcp_detail)
     run_test("MCP: call_central_api (real API)", test_mcp_api_call)
     run_test("MCP: refresh_inventory", test_mcp_inventory)
 

@@ -4,8 +4,6 @@ Covers:
 - Settings parses the READ_ONLY env var (truthy/falsy variants).
 - BaseHTTPClient._request refuses non-GET when READ_ONLY is set in env.
 - call_central_api / call_greenlake_api refuse non-GET when settings.read_only.
-- API catalog tools (list_api, list_api_categories,
-  get_api_endpoint_detail) hide non-GET endpoints when settings.read_only.
 - _build_env propagates READ_ONLY to the script subprocess.
 - The MCP instructions string contains the READ_ONLY banner when active.
 """
@@ -129,8 +127,8 @@ class TestApiCallToolsReadOnly:
                                settings.central_client_id,
                                settings.central_client_secret)
         mcp = FastMCP("test-ro")
-        register_api_call_tools(mcp, settings, client)
-        register_greenlake_api_call_tools(mcp, settings, client)  # use same client for test
+        register_api_call_tools(mcp, settings, client, None)
+        register_greenlake_api_call_tools(mcp, settings, client, None)  # use same client for test
         tools = {t.name: t.fn for t in mcp._tool_manager._tools.values()}
         return tools
 
@@ -147,80 +145,6 @@ class TestApiCallToolsReadOnly:
         with pytest.raises(ToolError) as exc_info:
             setup["call_greenlake_api"](path="some/path", method=method, body={"a": 1})
         assert "READ_ONLY" in str(exc_info.value).upper()
-
-
-# ── api_catalog filtering ───────────────────────────────────────────
-
-
-def _esc(s: str) -> str:
-    return s.replace("\\", "\\\\").replace("'", "\\'")
-
-
-@pytest.fixture(scope="module")
-def gm_catalog(tmp_path_factory):
-    db_path = tmp_path_factory.mktemp("ro_catalog") / "test.db"
-    gm = GraphManager(db_path)
-    gm.initialize()
-    gm.execute(
-        "CREATE (e:ApiEndpoint {"
-        "  endpoint_id: 'GET:/c/v1/things',"
-        "  method: 'GET', path: '/c/v1/things',"
-        "  summary: 'List things', description: 'd',"
-        "  operationId: 'listThings', category: 'cfg',"
-        "  deprecated: false,"
-        "  parameters: '[]', requestBody: '', responses: ''"
-        "})"
-    )
-    gm.execute(
-        "CREATE (e:ApiEndpoint {"
-        "  endpoint_id: 'POST:/c/v1/things',"
-        "  method: 'POST', path: '/c/v1/things',"
-        "  summary: 'Create a thing', description: 'd',"
-        "  operationId: 'createThing', category: 'cfg',"
-        "  deprecated: false,"
-        "  parameters: '[]', requestBody: '{}', responses: '{}'"
-        "})"
-    )
-    gm.execute(
-        "CREATE (e:ApiEndpoint {"
-        "  endpoint_id: 'DELETE:/c/v1/things/{id}',"
-        "  method: 'DELETE', path: '/c/v1/things/{id}',"
-        "  summary: 'Delete a thing', description: 'd',"
-        "  operationId: 'deleteThing', category: 'cfg',"
-        "  deprecated: false,"
-        "  parameters: '[]', requestBody: '', responses: ''"
-        "})"
-    )
-    gm.create_fts_indexes()
-    return gm
-
-
-def _make_tools(gm, *, read_only: bool):
-    from mcp.server.fastmcp import FastMCP
-    from hpe_networking_central_mcp.tools.api_catalog import register_catalog_tools
-    settings = Settings(
-        central_base_url="https://x",
-        central_client_id="cid",
-        central_client_secret="csec",
-        read_only=read_only,
-    )
-    mcp = FastMCP(f"test-cat-{read_only}")
-    register_catalog_tools(mcp, settings, gm)
-    return {t.name: t.fn for t in mcp._tool_manager._tools.values()}
-
-
-class TestApiCatalogReadOnly:
-
-    def test_list_api_excludes_mutating_methods_in_readonly(self, gm_catalog):
-        tools_ro = _make_tools(gm_catalog, read_only=True)
-        tools_rw = _make_tools(gm_catalog, read_only=False)
-        ro = tools_ro["list_api"]()
-        rw = tools_rw["list_api"]()
-        # Read-only renders fewer endpoints than read-write
-        assert "POST" not in ro
-        assert "DELETE" not in ro
-        # Read-write retains them somewhere in the rendered tree
-        assert "POST" in rw or "DELETE" in rw
 
 
 # ── _build_env propagation ──────────────────────────────────────────
