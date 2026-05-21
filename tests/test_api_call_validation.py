@@ -158,6 +158,20 @@ class TestRequestBody:
         result = validate_call(gm, "POST", "/things", None, {"name": "x"})
         assert result.ok
 
+    def test_post_with_no_body_still_blocks_on_required_field(self):
+        # body=None for POST must be treated as empty body so that
+        # required-field validation still fires.
+        gm = _FakeGraph(
+            {
+                "body_props": [
+                    {"name": "name", "required": True},
+                ]
+            }
+        )
+        result = validate_call(gm, "POST", "/things", None, None)
+        assert not result.ok
+        assert any("name" in e for e in result.errors)
+
     def test_patch_skips_required_body_check(self):
         gm = _FakeGraph(
             {
@@ -238,6 +252,35 @@ class TestSchemaSummaryOnError:
 
 
 # ── warnings rendering ───────────────────────────────────────────────
+
+
+class TestQueryExceptionWarnings:
+    class _BoomGraph:
+        is_available = True
+
+        def __init__(self, fail_on: str):
+            self.fail_on = fail_on
+
+        def query(self, cypher, params=None, read_only=True):
+            if self.fail_on in cypher:
+                raise RuntimeError("graph boom")
+            return []
+
+    def test_required_params_query_failure_warns(self):
+        gm = self._BoomGraph("HAS_PARAMETER")
+        result = validate_call(gm, "GET", "/x", None, None)
+        assert result.ok
+        assert any(
+            "required-parameter lookup" in w for w in result.warnings
+        )
+
+    def test_body_props_query_failure_warns(self):
+        gm = self._BoomGraph("HAS_REQUEST_BODY")
+        result = validate_call(gm, "POST", "/x", None, {"a": 1})
+        assert result.ok
+        assert any(
+            "request-body schema lookup" in w for w in result.warnings
+        )
 
 
 class TestWarningsHeader:

@@ -25,7 +25,11 @@ if TYPE_CHECKING:
 
 
 def normalise_path(path: str) -> str:
-    """Return ``path`` with exactly one leading slash and no surrounding space."""
+    """Return ``path`` trimmed of surrounding space and prefixed with a slash.
+
+    Internal slash structure is preserved as-is — callers are responsible
+    for collapsing accidental ``//`` if that matters to them.
+    """
     p = (path or "").strip()
     return p if p.startswith("/") else f"/{p}"
 
@@ -102,6 +106,11 @@ def validate_call(
         )
     except Exception:
         param_rows = []
+        result.warnings.append(
+            "Pre-flight validation partially skipped — required-parameter "
+            "lookup against the graph failed. Query parameters were not "
+            "checked against the schema."
+        )
 
     supplied_query = set((query_params or {}).keys())
     for row in param_rows or []:
@@ -113,13 +122,18 @@ def validate_call(
             result.errors.append(f"Missing required query parameter: {name!r}.")
 
     method_u = method.upper()
-    if body is not None and method_u in {"POST", "PUT", "PATCH"}:
+    if method_u in {"POST", "PUT", "PATCH"}:
         try:
             prop_rows = graph_manager.query(
                 _REQUEST_BODY_PROPS_QUERY, {"eid": eid}, read_only=True
             )
         except Exception:
             prop_rows = []
+            result.warnings.append(
+                "Pre-flight validation partially skipped — request-body "
+                "schema lookup against the graph failed. Body fields were "
+                "not checked against the schema."
+            )
         if prop_rows:
             known_names = {(r.get("name") or "") for r in prop_rows}
             known_names.discard("")
@@ -127,13 +141,14 @@ def validate_call(
                 (r.get("name") or "") for r in prop_rows if r.get("required")
             }
             required_names.discard("")
-            supplied_body = set(body.keys())
+            supplied_body = set((body or {}).keys())
 
-            for key in sorted(supplied_body - known_names):
-                result.warnings.append(
-                    f"Body field {key!r} is not declared in the schema for "
-                    f"{method_u} {normalise_path(path)}."
-                )
+            if body is not None:
+                for key in sorted(supplied_body - known_names):
+                    result.warnings.append(
+                        f"Body field {key!r} is not declared in the schema for "
+                        f"{method_u} {normalise_path(path)}."
+                    )
 
             if method_u == "POST":
                 for key in sorted(required_names - supplied_body):
