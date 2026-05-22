@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
@@ -36,6 +37,10 @@ ORDER BY size(e.path) ASC
 LIMIT 5
 """
 
+# True version segments like ``v1``, ``v2beta1`` — but NOT real path
+# segments that merely start with 'v' (vlan, vpn, vrf, virtual-networks).
+_VERSION_SEG_RE = re.compile(r"^v\d+([a-z]+\d*)?$", re.IGNORECASE)
+
 
 def _suggest_paths_for_404(
     graph_manager: "GraphManager | None", path: str
@@ -50,7 +55,10 @@ def _suggest_paths_for_404(
     if graph_manager is None or not getattr(graph_manager, "is_available", False):
         return []
 
-    parts = [p for p in path.strip("/").split("/") if p and not p.startswith("v")]
+    parts = [
+        p for p in path.strip("/").split("/")
+        if p and not _VERSION_SEG_RE.match(p)
+    ]
     parts.sort(key=len, reverse=True)
     seen: set[tuple[str, str]] = set()
     suggestions: list[dict] = []
@@ -241,9 +249,10 @@ def _make_api_call(
 ) -> str:
     """Shared implementation for single authenticated API calls.
 
-    Returns a JSON-encoded envelope ``{request, status, response, warnings}``
-    on success, prefixed with the validator warning header. On API failure
-    raises ``ToolError`` with the same hint pipeline used by batch mode.
+    Returns a JSON-encoded envelope ``{request, status, response}`` on
+    success, prefixed (as plain text) with ``warning_header`` when the
+    pre-flight validator produced warnings. On API failure raises
+    ``ToolError`` with the same hint pipeline used by batch mode.
     """
     clean_path = _validate_path(path)
     method_u = method.upper()

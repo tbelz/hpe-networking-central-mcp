@@ -47,10 +47,23 @@ _CONFIG_REL_DDLS = [
 ]
 
 
+_CONFIG_PROFILE_ALTERS = [
+    "ALTER TABLE ConfigProfile ADD lastSyncedAt TIMESTAMP",
+]
+
+
 def ensure_config_tables() -> None:
     graph.execute(CONFIG_PROFILE_DDL)
     for ddl in _CONFIG_REL_DDLS:
         graph.execute(ddl)
+    # Idempotent migrations for graphs created before lastSyncedAt existed.
+    for stmt in _CONFIG_PROFILE_ALTERS:
+        try:
+            graph.execute(stmt)
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "already exists" not in msg and "duplicate" not in msg and "already has" not in msg:
+                raise
 
 
 # ── Category discovery ───────────────────────────────────────────────

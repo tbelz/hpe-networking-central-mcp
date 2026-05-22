@@ -53,6 +53,7 @@ def main():
     print(f"Enriching topology for {len(site_ids)} sites...", file=sys.stderr)
 
     summary = {
+        "site_id_filter": args.site_id,
         "sites_processed": 0,
         "connected_to": 0,
         "linked_to": 0,

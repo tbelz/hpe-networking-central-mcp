@@ -267,12 +267,17 @@ def main():
                 {"sid": site_id, "serial": serial},
             )
 
-    # DeviceGroup -> Device
+    # DeviceGroup -> Device (respect the same filters used for the device pass)
     linked = 0
     for d in devices:
         serial = str(d.get("serialNumber", d.get("serial", "")))
         dg_id = str(d.get("deviceGroupId", "") or "")
+        site_id = str(d.get("siteId", d.get("site_id", "") or ""))
         if not serial or not dg_id:
+            continue
+        if site_filter and site_id != site_filter:
+            continue
+        if group_filter and dg_id != group_filter:
             continue
         graph.execute(
             "MATCH (dg:DeviceGroup {scopeId: $dgid}), (d:Device {serial: $serial}) "

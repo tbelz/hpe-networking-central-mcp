@@ -73,8 +73,11 @@ class GraphManager:
                 conn.execute(stmt)
             except Exception as exc:
                 msg = str(exc).lower()
-                if "already exists" not in msg and "duplicate" not in msg:
+                if "already exists" in msg or "duplicate" in msg or "already has" in msg:
                     logger.debug("alter_add_column_skipped", stmt=stmt, error=str(exc))
+                else:
+                    logger.error("alter_add_column_failed", stmt=stmt, error=str(exc))
+                    raise
 
         # Load the algo extension
         try:

@@ -20,6 +20,19 @@ logger = structlog.get_logger("tools.graph")
 # Column-name shape Kuzu uses for property projections, e.g. "d.status".
 _PROJ_RE = re.compile(r"^(?P<alias>[A-Za-z_][\w]*)\.(?P<prop>[A-Za-z_][\w]*)$")
 
+# Matches Cypher node patterns like "(d:Device)" or "(s :Site {scopeId: ...})".
+_ALIAS_LABEL_RE = re.compile(r"\(\s*([A-Za-z_]\w*)\s*:\s*([A-Za-z_]\w*)")
+
+# Matches the binder hint "for <alias>" in a 'Cannot find property X for d.' message.
+_FOR_ALIAS_RE = re.compile(r"\bfor\s+([A-Za-z_]\w*)\b", re.IGNORECASE)
+
+
+def _parse_alias_labels(cypher: str) -> dict[str, str]:
+    """Best-effort alias->label map from MATCH/CREATE/MERGE node patterns."""
+    if not cypher:
+        return {}
+    return {m.group(1): m.group(2) for m in _ALIAS_LABEL_RE.finditer(cypher)}
+
 
 def _default_stale_threshold_seconds() -> int:
     raw = os.environ.get("MCP_GRAPH_STALE_THRESHOLD_SECONDS", "900")
@@ -58,7 +71,7 @@ def _label_from_node(node: object) -> str | None:
 
 
 def _scan_freshness(
-    rows: list[dict], threshold_seconds: int
+    rows: list[dict], threshold_seconds: int, cypher: str = ""
 ) -> list[dict]:
     """Return freshness_warnings for any volatile fields present in rows.
 
@@ -76,86 +89,77 @@ def _scan_freshness(
         return []
 
     now = datetime.now(timezone.utc)
-    # Map label -> {"volatile_in_result": set[str], "max_age": int|None, "stamped": bool, "count": int}
+    # Map label -> {"volatile_in_result": set[str], "max_age": int|None, "stamped": bool, "row_ids": set[int]}
     findings: dict[str, dict] = {}
 
-    # Pre-compute label hints from projection aliases: row columns like
-    # "d.status" tell us *which property* is volatile, but not the label.
-    # We infer the label from any companion full-node column or fall back
-    # to scanning all VOLATILE_FIELDS labels.
     volatile_props_by_label: dict[str, set[str]] = {
         lbl: set(fields) for lbl, fields in VOLATILE_FIELDS.items()
     }
+    alias_to_label = _parse_alias_labels(cypher)
 
-    # Per-row pass.
-    for row in rows:
+    def _record(label: str, prop: str, ts: datetime | None, row_idx: int) -> None:
+        age = int((now - ts).total_seconds()) if ts else None
+        if ts is not None and age is not None and age < threshold_seconds:
+            return
+        bucket = findings.setdefault(
+            label,
+            {"volatile_in_result": set(), "max_age_seconds": None,
+             "stamped": True, "row_ids": set()},
+        )
+        bucket["volatile_in_result"].add(prop)
+        bucket["row_ids"].add(row_idx)
+        if ts is None:
+            bucket["stamped"] = False
+        elif age is not None and (
+            bucket["max_age_seconds"] is None
+            or age > bucket["max_age_seconds"]
+        ):
+            bucket["max_age_seconds"] = age
+
+    for row_idx, row in enumerate(rows):
         if not isinstance(row, dict):
             continue
 
-        # 1. Whole-node columns (dict with lastSyncedAt + some volatile prop).
-        node_label_in_row: str | None = None
-        for col, value in row.items():
+        # 1. Whole-node columns (dict carrying a label + volatile props).
+        for value in row.values():
             label = _label_from_node(value)
-            if label and label in volatile_props_by_label:
-                node_label_in_row = label
-                vfields = volatile_props_by_label[label]
-                triggered = {p for p in vfields if p in value}
-                if not triggered:
-                    continue
-                stamped = "lastSyncedAt" in value
-                ts = _coerce_datetime(value.get("lastSyncedAt"))
-                age = int((now - ts).total_seconds()) if ts else None
-                if age is None or age >= threshold_seconds:
-                    bucket = findings.setdefault(
-                        label,
-                        {"volatile_in_result": set(), "max_age_seconds": None,
-                         "stamped": True, "count": 0},
-                    )
-                    bucket["volatile_in_result"].update(triggered)
-                    if not stamped or age is None:
-                        bucket["stamped"] = False
-                    if age is not None and (
-                        bucket["max_age_seconds"] is None
-                        or age > bucket["max_age_seconds"]
-                    ):
-                        bucket["max_age_seconds"] = age
-                    bucket["count"] += 1
+            if not label or label not in volatile_props_by_label:
+                continue
+            triggered = {p for p in volatile_props_by_label[label] if p in value}
+            if not triggered:
+                continue
+            ts = _coerce_datetime(value.get("lastSyncedAt"))
+            for prop in triggered:
+                _record(label, prop, ts, row_idx)
 
-        # 2. Projected scalar columns (alias.property).
+        # 2. Projected scalar columns (alias.property). Disambiguate the
+        # node label via the cypher MATCH pattern when possible; otherwise
+        # fall back to the unique label that owns the property.
         for col in row:
             m = _PROJ_RE.match(col)
             if not m:
                 continue
+            alias = m.group("alias")
             prop = m.group("prop")
-            # Find which label this prop is volatile for.
-            for label, vfields in volatile_props_by_label.items():
-                if prop not in vfields:
+            label = alias_to_label.get(alias)
+            if label is not None:
+                if prop not in volatile_props_by_label.get(label, set()):
                     continue
-                # Only warn if we have not already accounted for this label
-                # via a whole-node match in the same row, or if the query
-                # did not also project lastSyncedAt for the same alias.
-                alias = m.group("alias")
-                lsa_col = f"{alias}.lastSyncedAt"
-                ts = _coerce_datetime(row.get(lsa_col))
-                age = int((now - ts).total_seconds()) if ts else None
-                if age is None or age >= threshold_seconds:
-                    bucket = findings.setdefault(
-                        label,
-                        {"volatile_in_result": set(), "max_age_seconds": None,
-                         "stamped": ts is not None, "count": 0},
-                    )
-                    bucket["volatile_in_result"].add(prop)
-                    if ts is None:
-                        bucket["stamped"] = False
-                    elif age is not None and (
-                        bucket["max_age_seconds"] is None
-                        or age > bucket["max_age_seconds"]
-                    ):
-                        bucket["max_age_seconds"] = age
-                    bucket["count"] += 1
-                # Stop after first label match to avoid duplicate warnings;
-                # the same property name is unlikely across multiple labels.
-                break
+                candidate_labels = [label]
+            else:
+                candidate_labels = [
+                    lbl for lbl, vfields in volatile_props_by_label.items()
+                    if prop in vfields
+                ]
+                # Without an alias->label binding, only record when the
+                # property name belongs to exactly one label; otherwise we
+                # would have to guess.
+                if len(candidate_labels) != 1:
+                    continue
+            lsa_col = f"{alias}.lastSyncedAt"
+            ts = _coerce_datetime(row.get(lsa_col))
+            for lbl in candidate_labels:
+                _record(lbl, prop, ts, row_idx)
 
     if not findings:
         return []
@@ -167,7 +171,7 @@ def _scan_freshness(
             "volatile_fields_in_result": sorted(data["volatile_in_result"]),
             "max_age_seconds": data["max_age_seconds"],
             "lastSyncedAt_present": data["stamped"],
-            "rows_affected": data["count"],
+            "rows_affected": len(data["row_ids"]),
             "threshold_seconds": threshold_seconds,
             "recommendation": (
                 f"Values for {label} fields {sorted(data['volatile_in_result'])} "
@@ -181,15 +185,37 @@ def _scan_freshness(
     return warnings
 
 
-def _build_error_hint(error_msg: str) -> str:
-    """Build a context-aware hint from a Cypher error message."""
-    msg_lower = error_msg.lower()
+def _build_error_hint(error_msg: str, cypher: str = "") -> str:
+    """Build a context-aware hint from a Cypher error message.
 
-    if "cannot find property" in msg_lower or "property" in msg_lower and "does not exist" in msg_lower:
-        for table, props in get_node_properties().items():
-            if table.lower() in msg_lower:
-                return f"\n\nValid {table} properties: {', '.join(props)}\nRead graph://schema for the full schema."
-        return f"\n\nRead graph://schema for the full schema with node types, properties, and relationships.\n\n{compact_schema_hint()}"
+    For "Cannot find property X for <alias>" errors we resolve <alias> back
+    to the node label declared in the user's cypher (e.g. ``(d:Device)``)
+    and return *that* label's properties, instead of substring-matching
+    table names against the message (which would pick up the OAS-schema
+    ``Property`` node table for any error containing the word "property").
+    """
+    msg_lower = error_msg.lower()
+    is_property_err = (
+        "cannot find property" in msg_lower
+        or ("property" in msg_lower and "does not exist" in msg_lower)
+    )
+
+    if is_property_err:
+        node_props = get_node_properties()
+        alias_to_label = _parse_alias_labels(cypher)
+        alias_match = _FOR_ALIAS_RE.search(error_msg)
+        if alias_match:
+            alias = alias_match.group(1)
+            label = alias_to_label.get(alias)
+            if label and label in node_props:
+                return (
+                    f"\n\nValid {label} properties: {', '.join(node_props[label])}\n"
+                    "Read graph://schema for the full schema."
+                )
+        return (
+            f"\n\nRead graph://schema for the full schema with node types, "
+            f"properties, and relationships.\n\n{compact_schema_hint()}"
+        )
 
     if "does not exist" in msg_lower or "cannot find" in msg_lower:
         return f"\n\nRead graph://schema for the full schema with node types, properties, and relationships.\n\n{compact_schema_hint()}"
@@ -251,7 +277,7 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
             raise ToolError(str(exc))
         except Exception as exc:
             msg = str(exc)
-            hint = _build_error_hint(msg)
+            hint = _build_error_hint(msg, cypher)
             raise ToolError(f"Cypher query failed: {msg}{hint}")
 
         soft_cap = 200
@@ -266,7 +292,7 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         logger.info("query_graph_done", rows=n)
         threshold = _default_stale_threshold_seconds()
         freshness_warnings = (
-            _scan_freshness(rows, threshold) if threshold > 0 else []
+            _scan_freshness(rows, threshold, cypher) if threshold > 0 else []
         )
 
         if n > soft_cap:
