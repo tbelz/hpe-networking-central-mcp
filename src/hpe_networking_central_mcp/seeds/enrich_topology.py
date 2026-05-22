@@ -10,6 +10,7 @@ Fetches per-site LLDP topology from Central and creates:
 Requires: populate_base_graph must have been run first (needs Site + Device nodes).
 """
 
+import argparse
 import json
 import sys
 
@@ -30,9 +31,20 @@ def fetch_site_topology(site_id: str) -> dict:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Enrich graph with L2 topology.")
+    parser.add_argument(
+        "--site-id",
+        default=None,
+        help="Only enrich topology for this site (otherwise iterates all sites).",
+    )
+    args = parser.parse_args()
+
     # Get all site IDs from the graph
-    site_rows = graph.query("MATCH (s:Site) RETURN s.scopeId AS sid")
-    site_ids = [r["sid"] for r in site_rows if r.get("sid")]
+    if args.site_id:
+        site_ids = [args.site_id]
+    else:
+        site_rows = graph.query("MATCH (s:Site) RETURN s.scopeId AS sid")
+        site_ids = [r["sid"] for r in site_rows if r.get("sid")]
 
     if not site_ids:
         print(json.dumps({"error": "No sites in graph. Run populate_base_graph first."}))

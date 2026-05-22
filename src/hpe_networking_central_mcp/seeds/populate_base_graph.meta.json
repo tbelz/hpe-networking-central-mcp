@@ -1,6 +1,9 @@
 {
-  "description": "Populate the base configuration graph from Central APIs (sites, collections, groups, devices, config profiles).",
-  "tags": ["graph", "population", "startup"],
-  "parameters": [],
+  "description": "Populate the base configuration graph from Central APIs (sites, collections, groups, devices, config profiles). Without filters refreshes everything; pass --site-id or --device-group-id to refresh a single scope cheaply.",
+  "tags": ["graph", "population", "startup", "refresh"],
+  "parameters": [
+    {"name": "site-id", "type": "str", "description": "Only refresh the given site and the devices contained in it.", "required": false, "default": null},
+    {"name": "device-group-id", "type": "str", "description": "Only refresh devices whose deviceGroupId equals this value.", "required": false, "default": null}
+  ],
   "auto_run": true
 }

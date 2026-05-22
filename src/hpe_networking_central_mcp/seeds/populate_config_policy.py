@@ -10,12 +10,47 @@ Use the Central API with ``effective=true&detailed=true`` for authoritative
 per-device effective config with provenance annotations.
 """
 
+import argparse
 import json
 import sys
 
 from central_helpers import api, graph, CentralAPIError
 
 SEED_NAME = "populate_config_policy"
+
+
+# ── ConfigProfile table DDL (idempotent) ────────────────────────────
+CONFIG_PROFILE_DDL = """
+CREATE NODE TABLE IF NOT EXISTS ConfigProfile (
+    id                       STRING,
+    name                     STRING,
+    category                 STRING,
+    scopeId                  STRING,
+    deviceFunction           STRING,
+    objectType               STRING,
+    isDefault                BOOLEAN,
+    isEditable               BOOLEAN,
+    deviceScopeOnly          BOOLEAN,
+    assignedScopeIds         STRING,
+    assignedDeviceFunctions  STRING,
+    lastSyncedAt             TIMESTAMP,
+    PRIMARY KEY (id)
+)
+"""
+
+_CONFIG_REL_DDLS = [
+    "CREATE REL TABLE IF NOT EXISTS HAS_CONFIG (FROM Org TO ConfigProfile)",
+    "CREATE REL TABLE IF NOT EXISTS ORG_ASSIGNS_CONFIG (FROM Org TO ConfigProfile)",
+    "CREATE REL TABLE IF NOT EXISTS COLLECTION_ASSIGNS_CONFIG (FROM SiteCollection TO ConfigProfile)",
+    "CREATE REL TABLE IF NOT EXISTS SITE_ASSIGNS_CONFIG (FROM Site TO ConfigProfile)",
+    "CREATE REL TABLE IF NOT EXISTS GROUP_ASSIGNS_CONFIG (FROM DeviceGroup TO ConfigProfile)",
+]
+
+
+def ensure_config_tables() -> None:
+    graph.execute(CONFIG_PROFILE_DDL)
+    for ddl in _CONFIG_REL_DDLS:
+        graph.execute(ddl)
 
 
 # ── Category discovery ───────────────────────────────────────────────
@@ -115,7 +150,8 @@ def upsert_profile(category: str, profile: dict) -> str:
         "cp.scopeId = $sid, cp.deviceFunction = $df, cp.objectType = $ot, "
         "cp.isDefault = $isDef, cp.isEditable = $isEdit, "
         "cp.deviceScopeOnly = $dso, "
-        "cp.assignedScopeIds = $asi, cp.assignedDeviceFunctions = $adf",
+        "cp.assignedScopeIds = $asi, cp.assignedDeviceFunctions = $adf, "
+        "cp.lastSyncedAt = current_timestamp()",
         {
             "pid": full_id,
             "name": profile.get("name", pid),
@@ -147,58 +183,77 @@ def link_profile_to_scope(scope_label: str, scope_key: str, scope_id: str,
 
 # ── Scope assignment resolution ─────────────────────────────────────
 
-def resolve_scope_assignments(category: str) -> dict:
-    """Resolve config assignments across all known scopes."""
+def resolve_scope_assignments(category: str, scope_filter: tuple[str, str] | None = None) -> dict:
+    """Resolve config assignments across all known scopes.
+
+    scope_filter, if set, restricts work to (scope_type, scope_id) where
+    scope_type ∈ {"org", "collection", "site", "group"}.
+    """
     stats = {"org": 0, "collection": 0, "site": 0, "group": 0, "device": 0}
+    filter_type = scope_filter[0] if scope_filter else None
+    filter_id = scope_filter[1] if scope_filter else None
 
     # Org-level
-    org_profiles = fetch_scope_profiles(category, "org-root", "org")
-    for p in org_profiles:
-        pid = upsert_profile(category, p)
-        if pid:
-            link_profile_to_scope("Org", "scopeId", "org-root", pid, "ORG_ASSIGNS_CONFIG")
-            stats["org"] += 1
+    if not filter_type or filter_type == "org":
+        org_profiles = fetch_scope_profiles(category, filter_id or "org-root", "org")
+        for p in org_profiles:
+            pid = upsert_profile(category, p)
+            if pid:
+                link_profile_to_scope("Org", "scopeId", filter_id or "org-root", pid, "ORG_ASSIGNS_CONFIG")
+                stats["org"] += 1
 
     # Site-collections
-    collections = graph.query("MATCH (sc:SiteCollection) RETURN sc.scopeId")
-    for row in collections:
-        sc_id = row.get("sc.scopeId", "")
-        if not sc_id:
-            continue
-        profiles = fetch_scope_profiles(category, sc_id, "collection")
-        for p in profiles:
-            pid = upsert_profile(category, p)
-            if pid:
-                link_profile_to_scope("SiteCollection", "scopeId", sc_id, pid,
-                                      "COLLECTION_ASSIGNS_CONFIG")
-                stats["collection"] += 1
+    if not filter_type or filter_type == "collection":
+        if filter_id:
+            collections_iter = [{"sc.scopeId": filter_id}]
+        else:
+            collections_iter = graph.query("MATCH (sc:SiteCollection) RETURN sc.scopeId")
+        for row in collections_iter:
+            sc_id = row.get("sc.scopeId", "")
+            if not sc_id:
+                continue
+            profiles = fetch_scope_profiles(category, sc_id, "collection")
+            for p in profiles:
+                pid = upsert_profile(category, p)
+                if pid:
+                    link_profile_to_scope("SiteCollection", "scopeId", sc_id, pid,
+                                          "COLLECTION_ASSIGNS_CONFIG")
+                    stats["collection"] += 1
 
     # Sites
-    sites = graph.query("MATCH (s:Site) RETURN s.scopeId")
-    for row in sites:
-        s_id = row.get("s.scopeId", "")
-        if not s_id:
-            continue
-        profiles = fetch_scope_profiles(category, s_id, "site")
-        for p in profiles:
-            pid = upsert_profile(category, p)
-            if pid:
-                link_profile_to_scope("Site", "scopeId", s_id, pid, "SITE_ASSIGNS_CONFIG")
-                stats["site"] += 1
+    if not filter_type or filter_type == "site":
+        if filter_id:
+            sites_iter = [{"s.scopeId": filter_id}]
+        else:
+            sites_iter = graph.query("MATCH (s:Site) RETURN s.scopeId")
+        for row in sites_iter:
+            s_id = row.get("s.scopeId", "")
+            if not s_id:
+                continue
+            profiles = fetch_scope_profiles(category, s_id, "site")
+            for p in profiles:
+                pid = upsert_profile(category, p)
+                if pid:
+                    link_profile_to_scope("Site", "scopeId", s_id, pid, "SITE_ASSIGNS_CONFIG")
+                    stats["site"] += 1
 
     # Device-groups
-    groups = graph.query("MATCH (dg:DeviceGroup) RETURN dg.scopeId")
-    for row in groups:
-        dg_id = row.get("dg.scopeId", "")
-        if not dg_id:
-            continue
-        profiles = fetch_scope_profiles(category, dg_id, "device-group")
-        for p in profiles:
-            pid = upsert_profile(category, p)
-            if pid:
-                link_profile_to_scope("DeviceGroup", "scopeId", dg_id, pid,
-                                      "GROUP_ASSIGNS_CONFIG")
-                stats["group"] += 1
+    if not filter_type or filter_type == "group":
+        if filter_id:
+            groups_iter = [{"dg.scopeId": filter_id}]
+        else:
+            groups_iter = graph.query("MATCH (dg:DeviceGroup) RETURN dg.scopeId")
+        for row in groups_iter:
+            dg_id = row.get("dg.scopeId", "")
+            if not dg_id:
+                continue
+            profiles = fetch_scope_profiles(category, dg_id, "device-group")
+            for p in profiles:
+                pid = upsert_profile(category, p)
+                if pid:
+                    link_profile_to_scope("DeviceGroup", "scopeId", dg_id, pid,
+                                          "GROUP_ASSIGNS_CONFIG")
+                    stats["group"] += 1
 
     return stats
 
@@ -206,19 +261,44 @@ def resolve_scope_assignments(category: str) -> dict:
 # ── Main ─────────────────────────────────────────────────────────────
 
 def main():
+    parser = argparse.ArgumentParser(description="Populate config policy layer.")
+    parser.add_argument("--category", default=None,
+                        help="Only refresh this config category (e.g. wlan-ssids).")
+    parser.add_argument("--scope-id", default=None,
+                        help="Restrict assignment resolution to this scope id.")
+    parser.add_argument("--scope-type", default=None,
+                        choices=["org", "collection", "site", "group"],
+                        help="Scope type for --scope-id; required when --scope-id is set.")
+    args = parser.parse_args()
+
+    if (args.scope_id and not args.scope_type) or (args.scope_type and not args.scope_id):
+        parser.error("--scope-id and --scope-type must be supplied together")
+    scope_filter = (args.scope_type, args.scope_id) if args.scope_id else None
+
+    ensure_config_tables()
+
     summary = {
         "categories_discovered": 0,
         "categories_with_profiles": 0,
         "total_profiles": 0,
         "scope_assignments": {},
+        "filters": {
+            "category": args.category,
+            "scope_id": args.scope_id,
+            "scope_type": args.scope_type,
+        },
         "errors": [],
     }
 
-    # Step 1: Discover categories
-    print("Discovering config categories...", file=sys.stderr)
-    categories = discover_categories()
+    # Step 1: Discover categories (skipped when --category is set)
+    if args.category:
+        categories = [args.category]
+        print(f"Using single category: {args.category}", file=sys.stderr)
+    else:
+        print("Discovering config categories...", file=sys.stderr)
+        categories = discover_categories()
+        print(f"  Found {len(categories)} categories", file=sys.stderr)
     summary["categories_discovered"] = len(categories)
-    print(f"  Found {len(categories)} categories", file=sys.stderr)
 
     # Step 2: For each category, fetch library profiles
     for cat in categories:
@@ -245,7 +325,7 @@ def main():
                 summary["total_profiles"] += 1
 
         # Step 3: Resolve per-scope assignments
-        stats = resolve_scope_assignments(cat)
+        stats = resolve_scope_assignments(cat, scope_filter)
         summary["scope_assignments"][cat] = stats
 
     print(json.dumps(summary, indent=2))

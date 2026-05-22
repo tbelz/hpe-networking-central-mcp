@@ -113,3 +113,94 @@ class TestQueryGraphRejection:
         qg = _make_query_tool(gm)
         with pytest.raises(ToolError, match="empty"):
             qg(cypher="   ")
+
+
+# ── Freshness signaling (volatile-field detection) ──────────────────
+
+
+def _insert_device_fresh(gm, serial: str) -> None:
+    gm.execute(
+        "CREATE (d:Device {serial: $s, name: $s, status: 'Up', "
+        "lastSyncedAt: current_timestamp()})",
+        {"s": serial},
+    )
+
+
+def _insert_device_stale(gm, serial: str) -> None:
+    gm.execute(
+        "CREATE (d:Device {serial: $s, name: $s, status: 'Up', "
+        "lastSyncedAt: timestamp('2020-01-01 00:00:00')})",
+        {"s": serial},
+    )
+
+
+def _insert_device_unstamped(gm, serial: str) -> None:
+    gm.execute(
+        "CREATE (d:Device {serial: $s, name: $s, status: 'Up'})",
+        {"s": serial},
+    )
+
+
+class TestQueryGraphFreshness:
+    def test_fresh_volatile_projection_returns_bare_list(self, gm):
+        _insert_device_fresh(gm, "FRESH1")
+        qg = _make_query_tool(gm)
+        out = qg(
+            cypher="MATCH (d:Device) RETURN d.status AS `d.status`, "
+                   "d.lastSyncedAt AS `d.lastSyncedAt`",
+        )
+        parsed = json.loads(out)
+        assert isinstance(parsed, list), f"expected bare list, got {parsed!r}"
+        assert len(parsed) == 1
+
+    def test_stale_volatile_projection_wraps_with_warnings(self, gm):
+        _insert_device_stale(gm, "STALE1")
+        qg = _make_query_tool(gm)
+        out = qg(
+            cypher="MATCH (d:Device) RETURN d.status AS `d.status`, "
+                   "d.lastSyncedAt AS `d.lastSyncedAt`",
+        )
+        parsed = json.loads(out)
+        assert isinstance(parsed, dict)
+        assert "rows" in parsed
+        assert "freshness_warnings" in parsed
+        warns = parsed["freshness_warnings"]
+        assert len(warns) == 1
+        w = warns[0]
+        assert w["node_label"] == "Device"
+        assert "status" in w["volatile_fields_in_result"]
+        assert w["lastSyncedAt_present"] is True
+        assert w["max_age_seconds"] is not None and w["max_age_seconds"] > 0
+        assert w["rows_affected"] >= 1
+
+    def test_no_volatile_projection_returns_bare_list(self, gm):
+        _insert_device_stale(gm, "STALE2")
+        qg = _make_query_tool(gm)
+        # Project only stable fields — name + serial. No warning expected.
+        out = qg(cypher="MATCH (d:Device) RETURN d.name AS `d.name`")
+        parsed = json.loads(out)
+        assert isinstance(parsed, list)
+
+    def test_unstamped_node_with_volatile_field_warns(self, gm):
+        _insert_device_unstamped(gm, "NOSTAMP")
+        qg = _make_query_tool(gm)
+        out = qg(
+            cypher="MATCH (d:Device) RETURN d.status AS `d.status`",
+        )
+        parsed = json.loads(out)
+        assert isinstance(parsed, dict)
+        warns = parsed["freshness_warnings"]
+        assert warns and warns[0]["lastSyncedAt_present"] is False
+
+    def test_threshold_zero_disables_warnings(self, gm, monkeypatch):
+        _insert_device_stale(gm, "STALE3")
+        monkeypatch.setenv("MCP_GRAPH_STALE_THRESHOLD_SECONDS", "0")
+        qg = _make_query_tool(gm)
+        out = qg(
+            cypher="MATCH (d:Device) RETURN d.status AS `d.status`, "
+                   "d.lastSyncedAt AS `d.lastSyncedAt`",
+        )
+        parsed = json.loads(out)
+        assert isinstance(parsed, list), (
+            f"threshold=0 should disable freshness wrapping, got {type(parsed)}"
+        )

@@ -1,7 +1,9 @@
 {
-  "description": "Enrich graph with L2 physical topology (LLDP) — CONNECTED_TO/LINKED_TO edges and UnmanagedDevice nodes.",
-  "tags": ["graph", "enrichment", "topology", "lldp"],
-  "parameters": [],
+  "description": "Enrich graph with L2 physical topology (LLDP) — CONNECTED_TO/LINKED_TO edges and UnmanagedDevice nodes. Pass --site-id to refresh a single site cheaply.",
+  "tags": ["graph", "enrichment", "topology", "lldp", "refresh"],
+  "parameters": [
+    {"name": "site-id", "type": "str", "description": "Only refresh topology for this site.", "required": false, "default": null}
+  ],
   "auto_run": true,
   "depends_on": ["populate_base_graph.py"]
 }

@@ -22,10 +22,11 @@ NODE_TABLES: list[str] = [
     """,
     """
     CREATE NODE TABLE IF NOT EXISTS SiteCollection (
-        scopeId     STRING,
-        name        STRING,
-        siteCount   INT64,
-        deviceCount INT64,
+        scopeId      STRING,
+        name         STRING,
+        siteCount    INT64,
+        deviceCount  INT64,
+        lastSyncedAt TIMESTAMP,
         PRIMARY KEY (scopeId)
     )
     """,
@@ -44,14 +45,16 @@ NODE_TABLES: list[str] = [
         collectionId   STRING,
         collectionName STRING,
         timezoneId     STRING,
+        lastSyncedAt   TIMESTAMP,
         PRIMARY KEY (scopeId)
     )
     """,
     """
     CREATE NODE TABLE IF NOT EXISTS DeviceGroup (
-        scopeId     STRING,
-        name        STRING,
-        deviceCount INT64,
+        scopeId      STRING,
+        name         STRING,
+        deviceCount  INT64,
+        lastSyncedAt TIMESTAMP,
         PRIMARY KEY (scopeId)
     )
     """,
@@ -74,6 +77,7 @@ NODE_TABLES: list[str] = [
         configStatus    STRING,
         deviceGroupId   STRING,
         deviceGroupName STRING,
+        lastSyncedAt    TIMESTAMP,
         PRIMARY KEY (serial)
     )
     """,
@@ -325,6 +329,30 @@ def get_rel_tables_with_endpoints() -> list[tuple[str, str, str]]:
     )
     all_ddl = REL_TABLES + KNOWLEDGE_REL_TABLES + TOPOLOGY_REL_TABLES + POLICY_REL_TABLES
     return [(m.group(1), m.group(2), m.group(3)) for ddl in all_ddl if (m := _rel_detail_re.search(ddl))]
+
+
+# ── Freshness signalling ─────────────────────────────────────────────
+# Fields whose value tracks live operational state. When a query_graph
+# result projects one of these AND the node's lastSyncedAt is older than
+# the freshness threshold, query_graph attaches a freshness_warnings
+# block so the agent does not silently treat stale values as authoritative.
+VOLATILE_FIELDS: dict[str, set[str]] = {
+    "Device": {"configStatus", "status", "firmware", "ipv4", "lastSeen"},
+    "Site": {"deviceCount"},
+    "DeviceGroup": {"deviceCount"},
+    "SiteCollection": {"deviceCount", "siteCount"},
+    "ConfigProfile": {"isDefault", "assignedScopeIds", "assignedDeviceFunctions"},
+}
+
+# Idempotent ALTER TABLE statements adding lastSyncedAt to existing graphs
+# created before this column was part of the base DDL. Skipped silently when
+# the column already exists.
+ALTER_ADD_LAST_SYNCED_AT: list[str] = [
+    "ALTER TABLE Site ADD lastSyncedAt TIMESTAMP",
+    "ALTER TABLE SiteCollection ADD lastSyncedAt TIMESTAMP",
+    "ALTER TABLE DeviceGroup ADD lastSyncedAt TIMESTAMP",
+    "ALTER TABLE Device ADD lastSyncedAt TIMESTAMP",
+]
 
 
 def compact_schema_hint() -> str:
