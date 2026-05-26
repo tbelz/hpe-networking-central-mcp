@@ -399,12 +399,17 @@ class _Batch:
                     # rows are purged in flush() via DETACH DELETE.
                     self._evict_component_descendants(cid)
                 else:
-                    # In-place mutate so flush ordering stays stable.
-                    # Eviction is critical here too: stale dedup keys for
-                    # the previous (thinner) body would otherwise suppress
-                    # re-emission of the richer subgraph (properties /
-                    # COMPOSED_OF children / value schemas).
+                    # Eviction may rebuild ``self.components`` (when
+                    # inline children are dropped), so call it FIRST
+                    # and re-read the position before the in-place
+                    # mutate. Eviction is critical: stale dedup keys
+                    # for the previous (thinner) body would otherwise
+                    # suppress re-emission of the richer subgraph
+                    # (properties / COMPOSED_OF children / value
+                    # schemas), and stale rows already appended to the
+                    # row buffers would flush a union of both shapes.
                     self._evict_component_descendants(cid)
+                    idx = self._components_pos[cid]
                     self.components[idx].clear()
                     self.components[idx].update(row)
                 self._components_richness[cid] = richness
@@ -417,15 +422,24 @@ class _Batch:
         return "new"
 
     def _evict_component_descendants(self, cid: str) -> None:
-        """Purge cached property / edge dedup keys owned by ``cid``.
+        """Purge cached property / edge dedup keys AND buffered rows
+        owned by ``cid``.
 
-        Called when a DB-persisted SchemaComponent is being replaced by
-        a richer body — the old DB rows are wiped in ``flush()`` and
-        the new subgraph needs to re-emit without being suppressed by
-        stale ``_seen_*`` entries.
+        Called when a buffered (or DB-persisted) SchemaComponent is being
+        replaced by a richer body. Two things must happen:
+
+        1. Drop entries from the ``_seen_*`` indexes so the richer
+           subgraph re-emission isn't suppressed.
+        2. Remove already-appended rows from the row buffers so the
+           subsequent COPY doesn't flush a stale union of the thinner
+           and richer shapes.
+
+        DB-persisted rows are wiped separately in ``flush()`` via
+        DETACH DELETE for ids in ``_replaced_persisted_components``.
         """
         prop_prefix = f"{cid}#prop:"
         inline_prefix = f"{cid}#"
+
         stale_props = {p for p in self._seen_properties if p.startswith(prop_prefix)}
         self._seen_properties -= stale_props
         self._seen_has_property = {
@@ -444,9 +458,15 @@ class _Batch:
             (a, b, k) for (a, b, k) in self._seen_composed_of
             if a != cid and not a.startswith(inline_prefix)
         }
-        # Inline child SchemaComponents (e.g. {cid}#oneOf:0) are wiped
-        # by the same DETACH DELETE prefix match in flush(); drop their
-        # cached ids so re-emission can rebuild them.
+        self._seen_references = {
+            (a, b, via) for (a, b, via) in self._seen_references
+            if a != cid and not a.startswith(inline_prefix)
+        }
+
+        # Inline child SchemaComponents (e.g. {cid}#oneOf:0,
+        # {cid}#additionalProperties) — wipe their cached ids so the
+        # re-emit rebuilds them, and drop their component rows from
+        # the buffer.
         stale_inline = {
             c for c in self._seen_components
             if c != cid and c.startswith(inline_prefix)
@@ -455,6 +475,53 @@ class _Batch:
         for c in stale_inline:
             self._components_pos.pop(c, None)
             self._components_richness.pop(c, None)
+
+        # ── Row-buffer eviction ──
+        # Without this, COPY would flush both the stale stub-era rows
+        # and the richer re-emission for the same parent. Compact each
+        # list in place so existing index positions in _components_pos
+        # for OTHER components stay valid.
+        if stale_props:
+            self.properties = [
+                r for r in self.properties if r["property_id"] not in stale_props
+            ]
+        self.has_property = [r for r in self.has_property if r["a"] != cid]
+        if stale_props:
+            self.property_of_type = [
+                r for r in self.property_of_type if r["a"] not in stale_props
+            ]
+            self.property_at_yang = [
+                r for r in self.property_at_yang if r["a"] not in stale_props
+            ]
+        self.has_value_schema = [r for r in self.has_value_schema if r["a"] != cid]
+        self.composed_of = [
+            r for r in self.composed_of
+            if r["a"] != cid and not r["a"].startswith(inline_prefix)
+        ]
+        self.references = [
+            r for r in self.references
+            if r["a"] != cid and not r["a"].startswith(inline_prefix)
+        ]
+
+        if stale_inline:
+            # Drop inline child SchemaComponent rows from the buffer.
+            # Use a 2-pass rebuild so _components_pos remains accurate
+            # for the rows we keep.
+            new_components: list[dict] = []
+            new_pos: dict[str, int] = {}
+            for row in self.components:
+                rid = row.get("component_id")
+                if rid in stale_inline:
+                    continue
+                if rid in self._components_pos:
+                    new_pos[rid] = len(new_components)
+                new_components.append(row)
+            self.components = new_components
+            # Patch only the ids we kept; others (e.g. ``cid`` itself,
+            # which is being replaced by the caller right after this
+            # eviction) are repositioned by add_component.
+            for rid, pos in new_pos.items():
+                self._components_pos[rid] = pos
 
     def add_property(self, row: dict) -> bool:
         pid = row["property_id"]
@@ -1441,6 +1508,24 @@ def _emit_property_subgraph(
             isinstance(addl.get("properties"), dict)
             or addl.get("allOf") or addl.get("oneOf") or addl.get("anyOf")
         ):
+            synth_id = f"{parent_component_id}#additionalProperties"
+            _ensure_inline_component(
+                batch,
+                spec_source=spec_source,
+                synth_id=synth_id,
+                synth_name=f"{parent_component_name}[additionalProperties]",
+                body=addl,
+                full_components=full_components,
+                stats=stats,
+                resolution_scope=resolution_scope,
+                inherited_chain=inherited_chain,
+            )
+            batch.add_has_value_schema(parent_component_id, synth_id)
+        else:
+            # Primitive / array value schema (e.g. {"type":"string"}).
+            # Emit a synthetic SchemaComponent so the HAS_VALUE_SCHEMA
+            # contract is preserved for every ``map``-shaped component
+            # and INV-1 doesn't flag the parent as undecomposed.
             synth_id = f"{parent_component_id}#additionalProperties"
             _ensure_inline_component(
                 batch,

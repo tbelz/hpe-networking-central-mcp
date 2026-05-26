@@ -402,11 +402,15 @@ def _populate_configures_yang(db: lb.Database) -> int:
     """
     conn = lb.Connection(db)
     try:
+        # Traverse both COMPOSED_OF (allOf/oneOf/anyOf branches) and
+        # HAS_VALUE_SCHEMA (additionalProperties value shapes) so that
+        # YANG-annotated fields living under map value schemas still
+        # contribute a CONFIGURES_YANG edge.
         rows = list(
             conn.execute(
                 "MATCH (e:ApiEndpoint)-[:HAS_REQUEST_BODY]->(:RequestBody)"
                 "-[:BODY_REFERENCES]->(c:SchemaComponent)"
-                "-[:COMPOSED_OF*0..6]->(c2:SchemaComponent)"
+                "-[:COMPOSED_OF|HAS_VALUE_SCHEMA*0..6]->(c2:SchemaComponent)"
                 "-[:HAS_PROPERTY]->(p:Property)-[:PROPERTY_AT_YANG]->(y:YangPath) "
                 "RETURN DISTINCT e.endpoint_id AS eid, y.yangPath AS yp"
             ).rows_as_dict()

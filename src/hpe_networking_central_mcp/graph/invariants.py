@@ -70,7 +70,7 @@ def check_named_components_decompose(conn) -> InvariantViolation | None:
         WHERE c.bodyJson <> ''
           AND c.kind <> 'primitive'
           AND c.kind <> 'unresolved'
-          AND c.bodyShape IN ['object', 'union-oneOf', 'union-anyOf', 'union-allOf', 'map']
+          AND c.bodyShape IN ['object', 'union-oneOf', 'union-anyOf', 'allOf-composite', 'map']
           AND {_NAMED_COMPONENT_FILTER}
           AND NOT EXISTS {{ MATCH (c)-[:HAS_PROPERTY]->() }}
           AND NOT EXISTS {{ MATCH (c)-[:COMPOSED_OF]->() }}
@@ -105,7 +105,7 @@ def check_no_primitive_with_object_body(conn) -> InvariantViolation | None:
         MATCH (c:SchemaComponent)
         WHERE c.kind = 'primitive'
           AND c.bodyJson <> ''
-          AND c.bodyShape IN ['object', 'union-oneOf', 'union-anyOf', 'union-allOf', 'map']
+          AND c.bodyShape IN ['object', 'union-oneOf', 'union-anyOf', 'allOf-composite', 'map']
         RETURN c.component_id AS component_id, c.bodyShape AS bodyShape
         LIMIT 25
         """,
