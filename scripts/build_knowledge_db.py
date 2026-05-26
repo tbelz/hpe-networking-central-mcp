@@ -42,6 +42,10 @@ from hpe_networking_central_mcp.oas_schema_graph import (  # noqa: E402
     new_batch,
     query_existing_eids,
 )
+from hpe_networking_central_mcp.graph.invariants import (  # noqa: E402
+    assert_graph_invariants,
+    format_report,
+)
 from hpe_networking_central_mcp.oas_scraper import ReadMeSpecProvider  # noqa: E402
 from hpe_networking_central_mcp.vsg_scraper import VsgDocProvider  # noqa: E402
 
@@ -339,10 +343,105 @@ def _sync_docs(cache_dir: Path) -> tuple[list, dict]:
         return [], health
 
 
+def _build_provider_component_pool(specs: list[dict]) -> dict[str, dict]:
+    """Pass A: build a provider-wide, richest-wins ``components`` dict.
+
+    Multi-spec bundles (especially the Aruba Central network-config
+    family) frequently split a single semantic schema across many spec
+    files: one file declares the body fully, others reference it via
+    ``$ref`` without re-declaring. Without a provider-wide pool, the
+    spec that resolves the ref second silently sees an empty stub and
+    drops the body decomposition.
+
+    For every ``(spec_source, section, name)`` triple we keep the body
+    whose serialised representation is longest — a stable proxy for
+    "most-decomposed". The merged dicts are then passed as
+    ``resolution_scope`` to ``collect_into_batch`` in Pass B.
+    """
+    pools: dict[str, dict[str, dict[str, dict]]] = {}
+    for spec in specs:
+        spec_source = spec.get("_spec_source") or "central"
+        components = spec.get("components")
+        if not isinstance(components, dict):
+            continue
+        provider_pool = pools.setdefault(spec_source, {})
+        for section, entries in components.items():
+            if not isinstance(entries, dict):
+                continue
+            section_pool = provider_pool.setdefault(section, {})
+            for name, body in entries.items():
+                if not isinstance(body, dict):
+                    continue
+                try:
+                    body_len = len(json.dumps(body, default=str))
+                except (TypeError, ValueError):
+                    body_len = 0
+                existing = section_pool.get(name)
+                if existing is None:
+                    section_pool[name] = body
+                    continue
+                try:
+                    existing_len = len(json.dumps(existing, default=str))
+                except (TypeError, ValueError):
+                    existing_len = 0
+                if body_len > existing_len:
+                    section_pool[name] = body
+    return pools
+
+
+def _populate_configures_yang(db: lb.Database) -> int:
+    """Derive ApiEndpoint→YangPath edges from the property reverse-index.
+
+    Run after the main schema-subgraph flush. We walk
+    ``ApiEndpoint -[HAS_REQUEST_BODY]-> RequestBody -[BODY_REFERENCES]->
+    SchemaComponent -[COMPOSED_OF*0..6]-> SchemaComponent
+    -[HAS_PROPERTY]-> Property -[PROPERTY_AT_YANG]-> YangPath`` in
+    Cypher, dedupe ``(endpoint_id, yangPath)`` pairs, and COPY them
+    into the ``CONFIGURES_YANG`` rel table. COPY is required (instead
+    of inline ``MERGE``) because of LadybugDB issue #285.
+    """
+    conn = lb.Connection(db)
+    try:
+        # Traverse both COMPOSED_OF (allOf/oneOf/anyOf branches) and
+        # HAS_VALUE_SCHEMA (additionalProperties value shapes) so that
+        # YANG-annotated fields living under map value schemas still
+        # contribute a CONFIGURES_YANG edge.
+        rows = list(
+            conn.execute(
+                "MATCH (e:ApiEndpoint)-[:HAS_REQUEST_BODY]->(:RequestBody)"
+                "-[:BODY_REFERENCES]->(c:SchemaComponent)"
+                "-[:COMPOSED_OF|HAS_VALUE_SCHEMA*0..6]->(c2:SchemaComponent)"
+                "-[:HAS_PROPERTY]->(p:Property)-[:PROPERTY_AT_YANG]->(y:YangPath) "
+                "RETURN DISTINCT e.endpoint_id AS eid, y.yangPath AS yp"
+            ).rows_as_dict()
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        print(f"    ⚠ CONFIGURES_YANG derivation skipped: {exc}", file=sys.stderr)
+        return 0
+    if not rows:
+        return 0
+    import pyarrow as _pa
+    schema = _pa.schema([("a", _pa.string()), ("b", _pa.string())])
+    table = _pa.table(
+        {"a": [r["eid"] for r in rows], "b": [r["yp"] for r in rows]},
+        schema=schema,
+    )
+    conn.execute(
+        "COPY CONFIGURES_YANG FROM $df (ignore_errors=true)",
+        parameters={"df": table},
+    )
+    return len(rows)
+
+
 def _populate_schema_subgraph(db: lb.Database, specs: list[dict]) -> dict:
     """Walk every spec, collect Parameter/RequestBody/Response/SchemaComponent
     /Property rows + REFERENCES edges into a single global batch, then
     bulk-load via ``COPY ... FROM $df`` (one COPY per table).
+
+    Two-pass: Pass A builds a per-provider ``components`` pool (richest
+    body wins per name); Pass B walks every spec with that pool as
+    ``resolution_scope`` so cross-spec $refs and stub-then-rich
+    ordering both resolve correctly.
 
     Bulk path is required because LadybugDB issue #285 (UNWIND+MERGE
     bulk insert) is upstream-WONTFIX. Collection is pure Python (no DB
@@ -366,6 +465,19 @@ def _populate_schema_subgraph(db: lb.Database, specs: list[dict]) -> dict:
     }
     timings: list[tuple[float, str]] = []
     total_specs = len(specs)
+
+    # ── Pass A: provider-wide component pool ─────────────────────
+    t_pool = _time.monotonic()
+    provider_pools = _build_provider_component_pool(specs)
+    pool_sizes = {
+        prov: sum(len(sect) for sect in sections.values())
+        for prov, sections in provider_pools.items()
+    }
+    print(
+        f"    [3a/6] provider component pool built in "
+        f"{_time.monotonic() - t_pool:.2f}s — {pool_sizes}",
+        flush=True,
+    )
 
     # Pre-compute existing endpoint IDs across ALL specs in one query.
     all_eids: list[str] = []
@@ -399,6 +511,7 @@ def _populate_schema_subgraph(db: lb.Database, specs: list[dict]) -> dict:
     t_collect = _time.monotonic()
     for idx, (spec, spec_source, title, endpoints) in enumerate(spec_endpoints, 1):
         t0 = _time.monotonic()
+        scope = provider_pools.get(spec_source) or None
         try:
             stats = collect_into_batch(
                 batch,
@@ -406,11 +519,8 @@ def _populate_schema_subgraph(db: lb.Database, specs: list[dict]) -> dict:
                 spec=spec,
                 endpoints=endpoints,
                 existing_eids=existing_eids,
-                # Skip Property nodes for GreenLake specs: they carry no
-                # ``x-supportedDeviceType`` / ``x-path`` extensions, so the
-                # property-level subgraph adds no query value while bloating
-                # writes. Preserves prior build-time/size envelope.
-                emit_property_subgraph=(spec_source != "glp"),
+                emit_property_subgraph=True,
+                resolution_scope=scope,
             )
         except Exception as exc:  # pragma: no cover — defensive
             print(
@@ -438,7 +548,8 @@ def _populate_schema_subgraph(db: lb.Database, specs: list[dict]) -> dict:
         f"{_time.monotonic() - t_collect:.2f}s; "
         f"buffered {len(batch.params)} params, {len(batch.request_bodies)} bodies, "
         f"{len(batch.responses)} responses, {len(batch.components)} components, "
-        f"{len(batch.properties)} properties, {len(batch.has_param)} HAS_PARAMETER, "
+        f"{len(batch.properties)} properties, {len(batch.yang_paths)} yang paths, "
+        f"{len(batch.has_param)} HAS_PARAMETER, "
         f"{len(batch.references)} REFERENCES — starting COPY…",
         flush=True,
     )
@@ -446,6 +557,15 @@ def _populate_schema_subgraph(db: lb.Database, specs: list[dict]) -> dict:
     flush_batch(conn, batch)
     print(
         f"    [3b/6] flush complete in {_time.monotonic() - t_flush:.2f}s",
+        flush=True,
+    )
+
+    # ── Pass C: derive CONFIGURES_YANG edges from the now-loaded graph ──
+    t_yang = _time.monotonic()
+    cy_edges = _populate_configures_yang(db)
+    print(
+        f"    [3c/6] derived {cy_edges} CONFIGURES_YANG edges in "
+        f"{_time.monotonic() - t_yang:.2f}s",
         flush=True,
     )
 
@@ -568,6 +688,11 @@ def main() -> None:
                         help="Output directory for the DB and tar (default: ./build)")
     parser.add_argument("--tar", action="store_true",
                         help="Create a tar.gz archive of the database")
+    parser.add_argument("--strict", action="store_true",
+                        help="Fail the build if graph invariants (see graph/invariants.py) are violated. "
+                             "Recommended for CI; opt-in locally.")
+    parser.add_argument("--no-invariants", action="store_true",
+                        help="Skip the post-flush invariant audit entirely.")
     args = parser.parse_args()
 
     output_dir: Path = args.output_dir.resolve()
@@ -618,6 +743,26 @@ def main() -> None:
         f"{schema_stats['properties']} properties, "
         f"{schema_stats['references']} REFERENCES edges"
     )
+
+    # 3d. Post-flush invariant audit. Always runs (cheap) unless
+    # --no-invariants is set; --strict converts violations from a warning
+    # into a non-zero exit so CI catches stub-wins / eviction-skip
+    # regressions (ADR-011) before the artifact ships.
+    if not args.no_invariants:
+        print("\n[3d/6] Auditing graph invariants...")
+        invariant_conn = lb.Connection(db)
+        try:
+            violations = assert_graph_invariants(invariant_conn, strict=False)
+        finally:
+            del invariant_conn
+        print("  " + format_report(violations))
+        if violations and args.strict:
+            print(
+                "\n✗ --strict: refusing to ship a knowledge DB that violates invariants.",
+                file=sys.stderr,
+            )
+            db.close()
+            sys.exit(2)
 
     # 4. Sync and populate VSG documentation
     print("\n[4/6] Refreshing and populating VSG documentation...")

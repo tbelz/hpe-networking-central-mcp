@@ -58,9 +58,11 @@ _REQUIRED_PARAMS_QUERY = (
 
 _REQUEST_BODY_PROPS_QUERY = (
     "MATCH (e:ApiEndpoint {endpoint_id: $eid})"
-    "-[:HAS_REQUEST_BODY]->(:RequestBody)-[:BODY_REFERENCES]->(c:SchemaComponent)"
+    "-[:HAS_REQUEST_BODY]->(:RequestBody)"
+    "-[:BODY_REFERENCES]->(root:SchemaComponent) "
+    "MATCH (root)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)"
     "-[:HAS_PROPERTY]->(p:Property) "
-    "RETURN p.name AS name, p.required AS required"
+    "RETURN DISTINCT p.name AS name, p.required AS required"
 )
 
 _PARAMS_FULL_QUERY = (
@@ -216,14 +218,36 @@ def format_validation_error(result: ValidationResult) -> str:
         for warn in result.warnings:
             lines.append(f"  ! {warn}")
     if result.schema_summary:
+        method = result.schema_summary.get("method") or ""
+        path = result.schema_summary.get("path") or ""
         lines.extend(
             [
                 "",
                 "Schema summary for this endpoint:",
                 json.dumps(result.schema_summary, indent=2),
                 "",
-                "Inspect the schema in detail with `query_graph` — see "
-                "`graph://schema` for canned Cypher patterns.",
+                "Inspect every body field (including inherited via allOf and",
+                "promoted inline branches) with this canonical query \u2014",
+                "pass deviceType='' to skip the device filter, or e.g.",
+                "'Switch CX' / 'AP' to slice:",
+                "",
+                "```cypher",
+                f"MATCH (e:ApiEndpoint {{method: '{method}', path: '{path}'}})",
+                "      -[:HAS_REQUEST_BODY]->(:RequestBody)",
+                "      -[:BODY_REFERENCES]->(root:SchemaComponent)",
+                "MATCH (root)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)",
+                "      -[:HAS_PROPERTY]->(p:Property)",
+                "WHERE $deviceType = ''",
+                "   OR $deviceType IN p.supportedDeviceTypes",
+                "   OR size(p.supportedDeviceTypes) = 0",
+                "RETURN c.name AS host, c.bodyShape AS shape,",
+                "       p.name, p.type, p.required, p.enumValues,",
+                "       p.inheritedFrom, p.inheritedFromChain, p.yangPath",
+                "ORDER BY c.name, p.required DESC, p.name",
+                "```",
+                "",
+                "Run it via `query_graph(cypher, parameters={'deviceType': ...})`.",
+                "See `graph://schema` for more canned Cypher patterns.",
             ]
         )
     return "\n".join(lines)

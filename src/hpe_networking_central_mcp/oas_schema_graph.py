@@ -35,6 +35,7 @@ from .oas_normalize import (
     _extract_referenced_components,
     _follow_ref,
     _strip_skeleton_keys,
+    schema_richness,
 )
 
 
@@ -260,6 +261,7 @@ class _Batch:
         "responses",
         "components",
         "properties",
+        "yang_paths",
         "has_param",
         "has_request_body",
         "body_refs",
@@ -267,13 +269,17 @@ class _Batch:
         "response_refs",
         "has_property",
         "property_of_type",
+        "has_value_schema",
         "composed_of",
         "references",
+        "property_at_yang",
+        "configures_yang",
         "_seen_params",
         "_seen_request_bodies",
         "_seen_responses",
         "_seen_components",
         "_seen_properties",
+        "_seen_yang_paths",
         "_seen_has_param",
         "_seen_has_request_body",
         "_seen_body_refs",
@@ -281,8 +287,14 @@ class _Batch:
         "_seen_response_refs",
         "_seen_has_property",
         "_seen_property_of_type",
+        "_seen_has_value_schema",
         "_seen_composed_of",
         "_seen_references",
+        "_seen_property_at_yang",
+        "_seen_configures_yang",
+        "_components_pos",
+        "_components_richness",
+        "_replaced_persisted_components",
     )
 
     def __init__(self) -> None:
@@ -291,6 +303,7 @@ class _Batch:
         self.responses: list[dict] = []
         self.components: list[dict] = []
         self.properties: list[dict] = []
+        self.yang_paths: list[dict] = []
         self.has_param: list[dict] = []
         self.has_request_body: list[dict] = []
         self.body_refs: list[dict] = []
@@ -298,13 +311,17 @@ class _Batch:
         self.response_refs: list[dict] = []
         self.has_property: list[dict] = []
         self.property_of_type: list[dict] = []
+        self.has_value_schema: list[dict] = []
         self.composed_of: list[dict] = []
         self.references: list[dict] = []
+        self.property_at_yang: list[dict] = []
+        self.configures_yang: list[dict] = []
         self._seen_params: set[str] = set()
         self._seen_request_bodies: set[str] = set()
         self._seen_responses: set[str] = set()
         self._seen_components: set[str] = set()
         self._seen_properties: set[str] = set()
+        self._seen_yang_paths: set[str] = set()
         self._seen_has_param: set[tuple[str, str]] = set()
         self._seen_has_request_body: set[tuple[str, str]] = set()
         self._seen_body_refs: set[tuple[str, str]] = set()
@@ -312,8 +329,20 @@ class _Batch:
         self._seen_response_refs: set[tuple[str, str]] = set()
         self._seen_has_property: set[tuple[str, str]] = set()
         self._seen_property_of_type: set[tuple[str, str]] = set()
+        self._seen_has_value_schema: set[tuple[str, str]] = set()
         self._seen_composed_of: set[tuple[str, str, str]] = set()
         self._seen_references: set[tuple[str, str, str]] = set()
+        self._seen_property_at_yang: set[tuple[str, str]] = set()
+        self._seen_configures_yang: set[tuple[str, str]] = set()
+        # Richness tracking enables "richest-wins" merge across multiple
+        # decompositions of the same component_id (multi-spec collision,
+        # stub-then-rich ordering). See add_component.
+        self._components_pos: dict[str, int] = {}
+        # Component ids that were preseeded from the DB and have since
+        # been superseded by a richer version: at flush time these are
+        # DETACH-DELETEd from the DB before the COPY of the new rows.
+        self._replaced_persisted_components: set[str] = set()
+        self._components_richness: dict[str, int] = {}
 
     # ── Node MERGE collectors ──────────────────────────────────
 
@@ -341,14 +370,158 @@ class _Batch:
         self.responses.append(row)
         return True
 
-    def add_component(self, row: dict) -> bool:
-        """Returns True if newly added, False if already buffered."""
+    def add_component(self, row: dict, *, richness: int = 0) -> str:
+        """Insert / replace a SchemaComponent row with richest-wins merge.
+
+        ``richness`` is a comparable score (typically len of the stripped
+        ``bodyJson``). Returns one of:
+
+        - ``"new"``     — row was added for the first time.
+        - ``"replaced"`` — a richer body replaced a previously buffered stub.
+          Callers should re-emit the property subgraph for this id.
+        - ``"skipped"``  — existing buffered row is at least as rich; no change.
+        """
         cid = row["component_id"]
         if cid in self._seen_components:
-            return False
+            prev_score = self._components_richness.get(cid, 0)
+            if richness > prev_score:
+                idx = self._components_pos[cid]
+                if idx < 0:
+                    # Previous version was already persisted to DB in
+                    # an earlier flush. Mark it for deletion and append
+                    # the replacement as a fresh row.
+                    self._replaced_persisted_components.add(cid)
+                    self._components_pos[cid] = len(self.components)
+                    self.components.append(row)
+                    # Evict cached property / edge keys owned by the
+                    # superseded component so the richer subgraph can
+                    # be re-emitted from scratch. The corresponding DB
+                    # rows are purged in flush() via DETACH DELETE.
+                    self._evict_component_descendants(cid)
+                else:
+                    # Eviction may rebuild ``self.components`` (when
+                    # inline children are dropped), so call it FIRST
+                    # and re-read the position before the in-place
+                    # mutate. Eviction is critical: stale dedup keys
+                    # for the previous (thinner) body would otherwise
+                    # suppress re-emission of the richer subgraph
+                    # (properties / COMPOSED_OF children / value
+                    # schemas), and stale rows already appended to the
+                    # row buffers would flush a union of both shapes.
+                    self._evict_component_descendants(cid)
+                    idx = self._components_pos[cid]
+                    self.components[idx].clear()
+                    self.components[idx].update(row)
+                self._components_richness[cid] = richness
+                return "replaced"
+            return "skipped"
         self._seen_components.add(cid)
+        self._components_pos[cid] = len(self.components)
+        self._components_richness[cid] = richness
         self.components.append(row)
-        return True
+        return "new"
+
+    def _evict_component_descendants(self, cid: str) -> None:
+        """Purge cached property / edge dedup keys AND buffered rows
+        owned by ``cid``.
+
+        Called when a buffered (or DB-persisted) SchemaComponent is being
+        replaced by a richer body. Two things must happen:
+
+        1. Drop entries from the ``_seen_*`` indexes so the richer
+           subgraph re-emission isn't suppressed.
+        2. Remove already-appended rows from the row buffers so the
+           subsequent COPY doesn't flush a stale union of the thinner
+           and richer shapes.
+
+        DB-persisted rows are wiped separately in ``flush()`` via
+        DETACH DELETE for ids in ``_replaced_persisted_components``.
+        """
+        prop_prefix = f"{cid}#prop:"
+        inline_prefix = f"{cid}#"
+
+        stale_props = {p for p in self._seen_properties if p.startswith(prop_prefix)}
+        self._seen_properties -= stale_props
+        self._seen_has_property = {
+            (a, b) for (a, b) in self._seen_has_property if a != cid
+        }
+        self._seen_property_of_type = {
+            (a, b) for (a, b) in self._seen_property_of_type if a not in stale_props
+        }
+        self._seen_property_at_yang = {
+            (a, b) for (a, b) in self._seen_property_at_yang if a not in stale_props
+        }
+        self._seen_has_value_schema = {
+            (a, b) for (a, b) in self._seen_has_value_schema if a != cid
+        }
+        self._seen_composed_of = {
+            (a, b, k) for (a, b, k) in self._seen_composed_of
+            if a != cid and not a.startswith(inline_prefix)
+        }
+        self._seen_references = {
+            (a, b, via) for (a, b, via) in self._seen_references
+            if a != cid and not a.startswith(inline_prefix)
+        }
+
+        # Inline child SchemaComponents (e.g. {cid}#oneOf:0,
+        # {cid}#additionalProperties) — wipe their cached ids so the
+        # re-emit rebuilds them, and drop their component rows from
+        # the buffer.
+        stale_inline = {
+            c for c in self._seen_components
+            if c != cid and c.startswith(inline_prefix)
+        }
+        self._seen_components -= stale_inline
+        for c in stale_inline:
+            self._components_pos.pop(c, None)
+            self._components_richness.pop(c, None)
+
+        # ── Row-buffer eviction ──
+        # Without this, COPY would flush both the stale stub-era rows
+        # and the richer re-emission for the same parent. Compact each
+        # list in place so existing index positions in _components_pos
+        # for OTHER components stay valid.
+        if stale_props:
+            self.properties = [
+                r for r in self.properties if r["property_id"] not in stale_props
+            ]
+        self.has_property = [r for r in self.has_property if r["a"] != cid]
+        if stale_props:
+            self.property_of_type = [
+                r for r in self.property_of_type if r["a"] not in stale_props
+            ]
+            self.property_at_yang = [
+                r for r in self.property_at_yang if r["a"] not in stale_props
+            ]
+        self.has_value_schema = [r for r in self.has_value_schema if r["a"] != cid]
+        self.composed_of = [
+            r for r in self.composed_of
+            if r["a"] != cid and not r["a"].startswith(inline_prefix)
+        ]
+        self.references = [
+            r for r in self.references
+            if r["a"] != cid and not r["a"].startswith(inline_prefix)
+        ]
+
+        if stale_inline:
+            # Drop inline child SchemaComponent rows from the buffer.
+            # Use a 2-pass rebuild so _components_pos remains accurate
+            # for the rows we keep.
+            new_components: list[dict] = []
+            new_pos: dict[str, int] = {}
+            for row in self.components:
+                rid = row.get("component_id")
+                if rid in stale_inline:
+                    continue
+                if rid in self._components_pos:
+                    new_pos[rid] = len(new_components)
+                new_components.append(row)
+            self.components = new_components
+            # Patch only the ids we kept; others (e.g. ``cid`` itself,
+            # which is being replaced by the caller right after this
+            # eviction) are repositioned by add_component.
+            for rid, pos in new_pos.items():
+                self._components_pos[rid] = pos
 
     def add_property(self, row: dict) -> bool:
         pid = row["property_id"]
@@ -424,6 +597,37 @@ class _Batch:
         self.composed_of.append({"a": parent_cid, "b": child_cid, "kind": kind})
         return True
 
+    def add_has_value_schema(self, parent_cid: str, value_cid: str) -> bool:
+        key = (parent_cid, value_cid)
+        if key in self._seen_has_value_schema:
+            return False
+        self._seen_has_value_schema.add(key)
+        self.has_value_schema.append({"a": parent_cid, "b": value_cid})
+        return True
+
+    def add_yang_path(self, yang_path: str, module: str = "") -> bool:
+        if not yang_path or yang_path in self._seen_yang_paths:
+            return False
+        self._seen_yang_paths.add(yang_path)
+        self.yang_paths.append({"yangPath": yang_path, "module": module})
+        return True
+
+    def add_property_at_yang(self, pid: str, yang_path: str) -> bool:
+        key = (pid, yang_path)
+        if key in self._seen_property_at_yang:
+            return False
+        self._seen_property_at_yang.add(key)
+        self.property_at_yang.append({"a": pid, "b": yang_path})
+        return True
+
+    def add_configures_yang(self, eid: str, yang_path: str) -> bool:
+        key = (eid, yang_path)
+        if key in self._seen_configures_yang:
+            return False
+        self._seen_configures_yang.add(key)
+        self.configures_yang.append({"a": eid, "b": yang_path})
+        return True
+
     def add_reference(self, parent_cid: str, child_cid: str, via: str) -> bool:
         key = (parent_cid, child_cid, via)
         if key in self._seen_references:
@@ -450,6 +654,30 @@ class _Batch:
         reference them, so node tables are loaded first in dependency
         order.
         """
+        # ── DB-side replacements ──
+        # If a previously persisted SchemaComponent has been superseded
+        # by a richer body in this batch, delete the old node and its
+        # owned Property nodes (HAS_PROPERTY edges go with the node via
+        # DETACH DELETE) before COPYing the replacement. Inline child
+        # SchemaComponents (e.g. promoted oneOf branches) carry the
+        # parent's id as a prefix; wipe those too so the re-emit is a
+        # clean rebuild.
+        for cid in sorted(self._replaced_persisted_components):
+            try:
+                conn.execute(
+                    "MATCH (c:SchemaComponent) "
+                    "WHERE c.component_id = $cid "
+                    "   OR c.component_id STARTS WITH $prefix "
+                    "OPTIONAL MATCH (c)-[:HAS_PROPERTY]->(p:Property) "
+                    "DETACH DELETE c, p",
+                    parameters={"cid": cid, "prefix": cid + "#"},
+                )
+            except Exception:
+                # Best-effort: COPY's ignore_errors=true will still
+                # protect us; a leftover orphan is preferable to a
+                # raised exception breaking the flush.
+                pass
+
         # ── Node tables (in dependency order) ──
         _copy_node_table(
             conn,
@@ -481,6 +709,12 @@ class _Batch:
             self.properties,
             schema=_PROPERTY_SCHEMA,
         )
+        _copy_node_table(
+            conn,
+            "YangPath",
+            self.yang_paths,
+            schema=_YANG_PATH_SCHEMA,
+        )
 
         # ── Rel tables (require both endpoints to be loaded) ──
         _copy_rel_table(conn, "HAS_PARAMETER", self.has_param, _REL_AB_SCHEMA)
@@ -490,12 +724,15 @@ class _Batch:
         _copy_rel_table(conn, "RESPONSE_REFERENCES", self.response_refs, _REL_AB_SCHEMA)
         _copy_rel_table(conn, "HAS_PROPERTY", self.has_property, _REL_AB_SCHEMA)
         _copy_rel_table(conn, "PROPERTY_OF_TYPE", self.property_of_type, _REL_AB_SCHEMA)
+        _copy_rel_table(conn, "HAS_VALUE_SCHEMA", self.has_value_schema, _REL_AB_SCHEMA)
         _copy_rel_table(
             conn, "COMPOSED_OF", self.composed_of, _REL_COMPOSED_OF_SCHEMA
         )
         _copy_rel_table(
             conn, "REFERENCES", self.references, _REL_REFERENCES_SCHEMA
         )
+        _copy_rel_table(conn, "PROPERTY_AT_YANG", self.property_at_yang, _REL_AB_SCHEMA)
+        _copy_rel_table(conn, "CONFIGURES_YANG", self.configures_yang, _REL_AB_SCHEMA)
 
 
 # ── PyArrow schemas (column order MUST match graph/schema.py DDL) ───
@@ -537,8 +774,10 @@ _COMPONENT_SCHEMA = pa.schema([
     ("name", pa.string()),
     ("type", pa.string()),
     ("kind", pa.string()),
+    ("bodyShape", pa.string()),
     ("required", pa.list_(pa.string())),
     ("enumValues", pa.list_(pa.string())),
+    ("supportedDeviceTypes", pa.list_(pa.string())),
     ("bodyJson", pa.string()),
 ])
 
@@ -555,7 +794,13 @@ _PROPERTY_SCHEMA = pa.schema([
     ("yangPath", pa.string()),
     ("extensionsJson", pa.string()),
     ("inheritedFrom", pa.string()),
+    ("inheritedFromChain", pa.list_(pa.string())),
     ("readOnly", pa.bool_()),
+])
+
+_YANG_PATH_SCHEMA = pa.schema([
+    ("yangPath", pa.string()),
+    ("module", pa.string()),
 ])
 
 # Rel schemas: first two columns are FROM/TO PKs; extra cols follow.
@@ -672,12 +917,18 @@ def _collect_spec_into_batch(
     existing_eids: set[str],
     stats: dict,
     emit_property_subgraph: bool = True,
+    resolution_scope: dict | None = None,
 ) -> None:
     """Pure-Python collection: walk one spec, append rows to ``batch``.
 
     No DB I/O. The caller is responsible for flushing the batch via
     ``batch.flush(conn)`` (or ``flush_batch`` below) after all
     interesting specs have been collected.
+
+    ``resolution_scope`` is an optional provider-wide ``components``
+    dict used as a fallback when the local spec doesn't define a
+    referenced component (cross-spec $ref). When omitted, only the
+    spec's own components are consulted.
     """
     components = spec.get("components") or {}
 
@@ -697,7 +948,7 @@ def _collect_spec_into_batch(
                 continue
             resolved = raw_p
             if "$ref" in raw_p:
-                target = _follow_ref(raw_p["$ref"], components)
+                target = _follow_ref(raw_p["$ref"], components, fallback=resolution_scope)
                 if isinstance(target, dict):
                     resolved = target
             schema = resolved.get("schema") or {}
@@ -730,7 +981,7 @@ def _collect_spec_into_batch(
         if isinstance(rb, dict):
             rb_resolved = rb
             if "$ref" in rb:
-                target = _follow_ref(rb["$ref"], components)
+                target = _follow_ref(rb["$ref"], components, fallback=resolution_scope)
                 if isinstance(target, dict):
                     rb_resolved = target
             content = rb_resolved.get("content") or {}
@@ -750,6 +1001,7 @@ def _collect_spec_into_batch(
                 comp_id = _ensure_component_node(
                     batch, spec_source, root_ref, components, stats,
                     emit_property_subgraph=emit_property_subgraph,
+                    resolution_scope=resolution_scope,
                 )
                 if comp_id:
                     batch.add_body_ref(rb_id, comp_id)
@@ -760,7 +1012,7 @@ def _collect_spec_into_batch(
                 continue
             resp_resolved = resp
             if "$ref" in resp:
-                target = _follow_ref(resp["$ref"], components)
+                target = _follow_ref(resp["$ref"], components, fallback=resolution_scope)
                 if isinstance(target, dict):
                     resp_resolved = target
             content = resp_resolved.get("content") or {}
@@ -780,6 +1032,7 @@ def _collect_spec_into_batch(
                 comp_id = _ensure_component_node(
                     batch, spec_source, root_ref, components, stats,
                     emit_property_subgraph=emit_property_subgraph,
+                    resolution_scope=resolution_scope,
                 )
                 if comp_id:
                     batch.add_response_ref(resp_id, comp_id)
@@ -790,7 +1043,9 @@ def _collect_spec_into_batch(
             "requestBody": op.get("requestBody"),
             "responses": op.get("responses") or {},
         }
-        side = _extract_referenced_components(refs_root, components)
+        side = _extract_referenced_components(
+            refs_root, components, fallback=resolution_scope
+        )
         for section, entries in side.items():
             if not isinstance(entries, dict):
                 continue
@@ -799,6 +1054,7 @@ def _collect_spec_into_batch(
                 comp_id = _ensure_component_node(
                     batch, spec_source, ref, components, stats,
                     emit_property_subgraph=emit_property_subgraph,
+                    resolution_scope=resolution_scope,
                 )
                 if not comp_id:
                     continue
@@ -808,6 +1064,7 @@ def _collect_spec_into_batch(
                     child_id = _ensure_component_node(
                         batch, spec_source, child_ref, components, stats,
                         emit_property_subgraph=emit_property_subgraph,
+                        resolution_scope=resolution_scope,
                     )
                     if not child_id or child_id == comp_id:
                         continue
@@ -835,6 +1092,7 @@ def collect_into_batch(
     endpoints: list[tuple[str, str]],
     existing_eids: set[str],
     emit_property_subgraph: bool = True,
+    resolution_scope: dict | None = None,
 ) -> dict:
     """Collect schema-subgraph rows for ONE spec into ``batch`` (no DB I/O).
 
@@ -842,6 +1100,11 @@ def collect_into_batch(
     that already exist in the DB. The caller filters with
     ``query_existing_eids(conn, [...])`` before the loop so the build
     script doesn't issue one MATCH query per spec.
+
+    ``resolution_scope`` is an optional provider-wide components dict
+    used as a fallback when the local spec doesn't define a referenced
+    component (cross-spec $ref). The build script builds this in
+    Pass A of the two-pass populate.
 
     Returns per-spec stats; the build script logs these to provide ETA.
     """
@@ -854,6 +1117,7 @@ def collect_into_batch(
         existing_eids=existing_eids,
         stats=stats,
         emit_property_subgraph=emit_property_subgraph,
+        resolution_scope=resolution_scope,
     )
     return stats
 
@@ -877,10 +1141,23 @@ def _preseed_batch_from_db(conn, batch: "_Batch") -> None:
         batch._seen_request_bodies.add(r["k"])
     for r in conn.execute("MATCH (resp:Response) RETURN resp.response_id AS k").rows_as_dict():
         batch._seen_responses.add(r["k"])
-    for r in conn.execute("MATCH (c:SchemaComponent) RETURN c.component_id AS k").rows_as_dict():
-        batch._seen_components.add(r["k"])
+    for r in conn.execute(
+        "MATCH (c:SchemaComponent) RETURN c.component_id AS k, c.bodyJson AS body"
+    ).rows_as_dict():
+        cid = r["k"]
+        batch._seen_components.add(cid)
+        # Track richness so a subsequent in-batch richer body can still
+        # win; position is -1 because the row is in the DB, not in
+        # ``self.components``, so we can't mutate it in-place — the
+        # COPY layer's ignore_errors=true protects us from PK collision
+        # if a stricter richer body is later re-emitted (replacement
+        # via DELETE+INSERT is out of scope for the preseed path).
+        batch._components_pos[cid] = -1
+        batch._components_richness[cid] = len(r.get("body") or "")
     for r in conn.execute("MATCH (p:Property) RETURN p.property_id AS k").rows_as_dict():
         batch._seen_properties.add(r["k"])
+    for r in conn.execute("MATCH (y:YangPath) RETURN y.yangPath AS k").rows_as_dict():
+        batch._seen_yang_paths.add(r["k"])
     # Rels
     for r in conn.execute(
         "MATCH (e:ApiEndpoint)-[:HAS_PARAMETER]->(p:Parameter) "
@@ -927,6 +1204,21 @@ def _preseed_batch_from_db(conn, batch: "_Batch") -> None:
         "RETURN a.component_id AS a, b.component_id AS b, r.via AS via"
     ).rows_as_dict():
         batch._seen_references.add((r["a"], r["b"], r["via"]))
+    for r in conn.execute(
+        "MATCH (a:SchemaComponent)-[:HAS_VALUE_SCHEMA]->(b:SchemaComponent) "
+        "RETURN a.component_id AS a, b.component_id AS b"
+    ).rows_as_dict():
+        batch._seen_has_value_schema.add((r["a"], r["b"]))
+    for r in conn.execute(
+        "MATCH (p:Property)-[:PROPERTY_AT_YANG]->(y:YangPath) "
+        "RETURN p.property_id AS a, y.yangPath AS b"
+    ).rows_as_dict():
+        batch._seen_property_at_yang.add((r["a"], r["b"]))
+    for r in conn.execute(
+        "MATCH (e:ApiEndpoint)-[:CONFIGURES_YANG]->(y:YangPath) "
+        "RETURN e.endpoint_id AS a, y.yangPath AS b"
+    ).rows_as_dict():
+        batch._seen_configures_yang.add((r["a"], r["b"]))
 
 
 def flush_batch(conn, batch: "_Batch") -> None:
@@ -941,6 +1233,7 @@ def populate_schema_graph(
     spec: dict,
     endpoints: list[tuple[str, str]],
     emit_property_subgraph: bool = True,
+    resolution_scope: dict | None = None,
 ) -> dict:
     """Decompose ``spec`` into schema-subgraph rows for ``endpoints``
     and bulk-load them via ``COPY ... FROM $df``.
@@ -969,10 +1262,79 @@ def populate_schema_graph(
         existing_eids=existing_eids,
         stats=stats,
         emit_property_subgraph=emit_property_subgraph,
+        resolution_scope=resolution_scope,
     )
     batch.flush(conn)
     return stats
 
+
+
+# ── Component shape / device-type / yang helpers ────────────────────
+
+
+def _compute_body_shape(body: dict) -> str:
+    """Single-word structural signature of a SchemaComponent body.
+
+    Stable across spec versions; lets agents filter `WHERE c.bodyShape =
+    'union-oneOf'` without grepping bodyJson. Falls back to "primitive".
+    """
+    if not isinstance(body, dict):
+        return "primitive"
+    if isinstance(body.get("oneOf"), list) and body["oneOf"]:
+        return "union-oneOf"
+    if isinstance(body.get("anyOf"), list) and body["anyOf"]:
+        return "union-anyOf"
+    if isinstance(body.get("allOf"), list) and body["allOf"]:
+        return "allOf-composite"
+    if isinstance(body.get("properties"), dict) and body["properties"]:
+        return "object"
+    if body.get("additionalProperties"):
+        return "map"
+    t = body.get("type")
+    if t == "object":
+        return "object"
+    if t == "array":
+        return "array"
+    return "primitive"
+
+
+def _lift_supported_device_types(body: dict) -> list[str]:
+    """Lift ``x-supportedDeviceType`` from a component body, if present.
+
+    Many Aruba Central CX configuration schemas carry the device-type
+    annotation at the schema-component root in addition to (or instead
+    of) on each leaf property. Surfacing it on the SchemaComponent lets
+    callers slice ``MATCH (c:SchemaComponent) WHERE 'Switch CX' IN
+    c.supportedDeviceTypes`` without descending into properties.
+    """
+    if not isinstance(body, dict):
+        return []
+    raw = body.get("x-supportedDeviceType")
+    if isinstance(raw, list):
+        return [v for v in raw if isinstance(v, str)]
+    if isinstance(raw, str):
+        return [raw]
+    return []
+
+
+def _yang_module_for(yang_path: str) -> str:
+    """Extract the YANG module name from a path like ``/ac-ntp:ntp/...``."""
+    if not isinstance(yang_path, str) or not yang_path:
+        return ""
+    for part in yang_path.split("/"):
+        if ":" in part:
+            return part.split(":", 1)[0]
+    return ""
+
+
+def _richness(body_json: str) -> int:
+    """Comparable richness score for richest-wins merge.
+
+    Bodies are scored on the JSON-serialised payload length so the
+    metric matches :func:`hpe_networking_central_mcp.oas_normalize.schema_richness`
+    used during ref resolution.
+    """
+    return len(body_json or "")
 
 
 # ── Component MERGE (buffered) ──────────────────────────────────────
@@ -985,11 +1347,26 @@ def _ensure_component_node(
     full_components: dict,
     stats: dict,
     emit_property_subgraph: bool = True,
+    *,
+    resolution_scope: dict | None = None,
+    inherited_chain: tuple[str, ...] = (),
 ) -> str:
     """Buffer the SchemaComponent row + its property subgraph.
 
-    Returns the component_id (deterministic) so callers can wire up
-    edges. Returns "" if the ref cannot be resolved.
+    Returns the component_id (deterministic per provider+section+name)
+    so callers can wire up edges.
+
+    Resolution order: local ``full_components`` first, then the
+    provider-wide ``resolution_scope`` fallback (multi-spec ref
+    handling). When neither resolves the ref we still emit a
+    placeholder ``UnresolvedRef``-style node so consumers can detect
+    and report missing definitions instead of silently dropping the
+    edge.
+
+    Richest-wins: if the component was already buffered (e.g. from an
+    earlier spec where it was a stub), and the current body is richer
+    (longer serialised), the row is replaced in-place and the property
+    subgraph is re-emitted.
     """
     if not ref.startswith("#/components/"):
         return ""
@@ -998,32 +1375,65 @@ def _ensure_component_node(
     if not section or not name:
         return ""
     comp_id = _named_component_id(spec_source, section, name)
-    if comp_id in batch._seen_components:
+
+    body = _follow_ref(ref, full_components, fallback=resolution_scope)
+    if not isinstance(body, dict):
+        # Emit a placeholder so the graph still has the node and any
+        # incoming BODY_REFERENCES / COMPOSED_OF edges land somewhere.
+        # A future spec that *does* define this component will replace
+        # the placeholder via richest-wins.
+        if comp_id not in batch._seen_components:
+            batch.add_component(
+                {
+                    "component_id": comp_id,
+                    "spec_source": spec_source,
+                    "section": section,
+                    "name": name,
+                    "type": "",
+                    "kind": "unresolved",
+                    "bodyShape": "unresolved",
+                    "required": [],
+                    "enumValues": [],
+                    "supportedDeviceTypes": [],
+                    "bodyJson": "",
+                },
+                richness=0,
+            )
+            stats["components"] += 1
         return comp_id
 
-    body = _follow_ref(ref, full_components)
-    if not isinstance(body, dict):
-        return ""
     stripped = _strip_skeleton_keys(body)
     body_json = json.dumps(stripped)
     enum_vals = [v for v in (body.get("enum") or []) if isinstance(v, str)]
     _req = body.get("required")
     required = [v for v in (_req if isinstance(_req, list) else []) if isinstance(v, str)]
+    sdt = _lift_supported_device_types(body)
+    shape = _compute_body_shape(body)
+    richness = _richness(body_json)
 
-    batch.add_component({
-        "component_id": comp_id,
-        "spec_source": spec_source,
-        "section": section,
-        "name": name,
-        "type": str(body.get("type") or ""),
-        "kind": _component_kind(body),
-        "required": required,
-        "enumValues": enum_vals,
-        "bodyJson": body_json,
-    })
-    stats["components"] += 1
+    outcome = batch.add_component(
+        {
+            "component_id": comp_id,
+            "spec_source": spec_source,
+            "section": section,
+            "name": name,
+            "type": str(body.get("type") or ""),
+            "kind": _component_kind(body),
+            "bodyShape": shape,
+            "required": required,
+            "enumValues": enum_vals,
+            "supportedDeviceTypes": sdt,
+            "bodyJson": body_json,
+        },
+        richness=richness,
+    )
+    if outcome == "new":
+        stats["components"] += 1
 
-    if emit_property_subgraph:
+    # Emit property subgraph on first-add OR when richer body replaced
+    # a stub (placeholder or otherwise less-rich). Skipped only when
+    # the buffered row is already at least as rich.
+    if emit_property_subgraph and outcome in ("new", "replaced"):
         _emit_property_subgraph(
             batch,
             spec_source=spec_source,
@@ -1032,6 +1442,8 @@ def _ensure_component_node(
             body=body,
             full_components=full_components,
             stats=stats,
+            resolution_scope=resolution_scope,
+            inherited_chain=inherited_chain,
         )
 
     return comp_id
@@ -1049,8 +1461,17 @@ def _emit_property_subgraph(
     body: dict,
     full_components: dict,
     stats: dict,
+    resolution_scope: dict | None = None,
+    inherited_chain: tuple[str, ...] = (),
 ) -> None:
-    """Emit HAS_PROPERTY / COMPOSED_OF / PROPERTY_OF_TYPE rows."""
+    """Emit HAS_PROPERTY / COMPOSED_OF / PROPERTY_OF_TYPE / HAS_VALUE_SCHEMA rows.
+
+    Beyond top-level ``properties`` and ``allOf`` flattening, this
+    also promotes inline structural schemas found in ``oneOf`` /
+    ``anyOf`` branches (no ``$ref``) and the value-schema of
+    ``additionalProperties`` so they become first-class
+    SchemaComponents, walkable via ``COMPOSED_OF`` / ``HAS_VALUE_SCHEMA``.
+    """
     _req = body.get("required")
     own_required = set(
         v for v in (_req if isinstance(_req, list) else []) if isinstance(v, str)
@@ -1065,27 +1486,81 @@ def _emit_property_subgraph(
                 prop_name=prop_name,
                 prop_body=prop_body if isinstance(prop_body, dict) else {},
                 required=prop_name in own_required,
-                inherited_from="",
+                inherited_chain=inherited_chain,
                 full_components=full_components,
                 stats=stats,
+                resolution_scope=resolution_scope,
             )
+
+    # additionalProperties → HAS_VALUE_SCHEMA edge to a synthetic
+    # SchemaComponent that holds the value shape.
+    addl = body.get("additionalProperties")
+    if isinstance(addl, dict):
+        ref = addl.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/components/"):
+            value_id = _ensure_component_node(
+                batch, spec_source, ref, full_components, stats,
+                resolution_scope=resolution_scope,
+            )
+            if value_id:
+                batch.add_has_value_schema(parent_component_id, value_id)
+        elif (
+            isinstance(addl.get("properties"), dict)
+            or addl.get("allOf") or addl.get("oneOf") or addl.get("anyOf")
+        ):
+            synth_id = f"{parent_component_id}#additionalProperties"
+            _ensure_inline_component(
+                batch,
+                spec_source=spec_source,
+                synth_id=synth_id,
+                synth_name=f"{parent_component_name}[additionalProperties]",
+                body=addl,
+                full_components=full_components,
+                stats=stats,
+                resolution_scope=resolution_scope,
+                inherited_chain=inherited_chain,
+            )
+            batch.add_has_value_schema(parent_component_id, synth_id)
+        else:
+            # Primitive / array value schema (e.g. {"type":"string"}).
+            # Emit a synthetic SchemaComponent so the HAS_VALUE_SCHEMA
+            # contract is preserved for every ``map``-shaped component
+            # and INV-1 doesn't flag the parent as undecomposed.
+            synth_id = f"{parent_component_id}#additionalProperties"
+            _ensure_inline_component(
+                batch,
+                spec_source=spec_source,
+                synth_id=synth_id,
+                synth_name=f"{parent_component_name}[additionalProperties]",
+                body=addl,
+                full_components=full_components,
+                stats=stats,
+                resolution_scope=resolution_scope,
+                inherited_chain=inherited_chain,
+            )
+            batch.add_has_value_schema(parent_component_id, synth_id)
 
     for kind in ("allOf", "oneOf", "anyOf"):
         branches = body.get(kind)
         if not isinstance(branches, list):
             continue
-        for branch in branches:
+        for idx, branch in enumerate(branches):
             if not isinstance(branch, dict):
                 continue
             ref = branch.get("$ref")
             if isinstance(ref, str):
+                # The referenced component's OWN property subgraph has
+                # an empty chain (it isn't inheriting from anywhere);
+                # ``inherited_chain`` only applies when we *flatten*
+                # its properties into the parent below.
                 target_id = _ensure_component_node(
-                    batch, spec_source, ref, full_components, stats
+                    batch, spec_source, ref, full_components, stats,
+                    resolution_scope=resolution_scope,
                 )
                 if target_id:
                     batch.add_composed_of(parent_component_id, target_id, kind)
                 if kind == "allOf":
-                    target_body = _follow_ref(ref, full_components)
+                    target_body = _follow_ref(ref, full_components, fallback=resolution_scope)
                     if isinstance(target_body, dict):
                         branch_name = _name_for_ref(ref)
                         _flatten_allof_properties(
@@ -1093,23 +1568,47 @@ def _emit_property_subgraph(
                             spec_source=spec_source,
                             parent_component_id=parent_component_id,
                             branch_body=target_body,
-                            inherited_from=branch_name,
+                            inherited_chain=inherited_chain + (branch_name,),
                             full_components=full_components,
                             stats=stats,
+                            resolution_scope=resolution_scope,
                             _visited=frozenset({ref}),
                         )
             else:
+                # Inline branch (no $ref): for allOf flatten properties
+                # into the parent; for oneOf/anyOf with structural
+                # content promote to a synthetic SchemaComponent so the
+                # branch shape is walkable, not stranded in bodyJson.
                 if kind == "allOf":
                     _flatten_allof_properties(
                         batch,
                         spec_source=spec_source,
                         parent_component_id=parent_component_id,
                         branch_body=branch,
-                        inherited_from="",
+                        inherited_chain=inherited_chain,
                         full_components=full_components,
                         stats=stats,
+                        resolution_scope=resolution_scope,
                         _visited=frozenset(),
                     )
+                elif (
+                    isinstance(branch.get("properties"), dict)
+                    or branch.get("allOf") or branch.get("oneOf") or branch.get("anyOf")
+                ):
+                    synth_id = f"{parent_component_id}#{kind}:{idx}"
+                    synth_name = f"{parent_component_name}[{kind}:{idx}]"
+                    _ensure_inline_component(
+                        batch,
+                        spec_source=spec_source,
+                        synth_id=synth_id,
+                        synth_name=synth_name,
+                        body=branch,
+                        full_components=full_components,
+                        stats=stats,
+                        resolution_scope=resolution_scope,
+                        inherited_chain=inherited_chain,
+                    )
+                    batch.add_composed_of(parent_component_id, synth_id, kind)
 
 
 def _flatten_allof_properties(
@@ -1118,9 +1617,10 @@ def _flatten_allof_properties(
     spec_source: str,
     parent_component_id: str,
     branch_body: dict,
-    inherited_from: str,
+    inherited_chain: tuple[str, ...],
     full_components: dict,
     stats: dict,
+    resolution_scope: dict | None = None,
     _visited: frozenset[str] = frozenset(),
 ) -> None:
     _req = branch_body.get("required")
@@ -1137,9 +1637,10 @@ def _flatten_allof_properties(
                 prop_name=prop_name,
                 prop_body=prop_body if isinstance(prop_body, dict) else {},
                 required=prop_name in branch_required,
-                inherited_from=inherited_from,
+                inherited_chain=inherited_chain,
                 full_components=full_components,
                 stats=stats,
+                resolution_scope=resolution_scope,
             )
 
     nested = branch_body.get("allOf")
@@ -1151,17 +1652,20 @@ def _flatten_allof_properties(
             if isinstance(ref, str):
                 if ref in _visited:
                     continue
-                target_body = _follow_ref(ref, full_components)
+                target_body = _follow_ref(ref, full_components, fallback=resolution_scope)
                 if isinstance(target_body, dict):
-                    nested_name = _name_for_ref(ref) or inherited_from
+                    nested_name = _name_for_ref(ref) or (
+                        inherited_chain[-1] if inherited_chain else ""
+                    )
                     _flatten_allof_properties(
                         batch,
                         spec_source=spec_source,
                         parent_component_id=parent_component_id,
                         branch_body=target_body,
-                        inherited_from=nested_name,
+                        inherited_chain=inherited_chain + (nested_name,),
                         full_components=full_components,
                         stats=stats,
+                        resolution_scope=resolution_scope,
                         _visited=_visited | {ref},
                     )
             else:
@@ -1170,9 +1674,10 @@ def _flatten_allof_properties(
                     spec_source=spec_source,
                     parent_component_id=parent_component_id,
                     branch_body=sub,
-                    inherited_from=inherited_from,
+                    inherited_chain=inherited_chain,
                     full_components=full_components,
                     stats=stats,
+                    resolution_scope=resolution_scope,
                     _visited=_visited,
                 )
 
@@ -1185,11 +1690,17 @@ def _emit_one_property(
     prop_name: str,
     prop_body: dict,
     required: bool,
-    inherited_from: str,
+    inherited_chain: tuple[str, ...],
     full_components: dict,
     stats: dict,
+    resolution_scope: dict | None = None,
 ) -> None:
     resolved = _resolve_property_schema(prop_body, full_components)
+    if resolved is prop_body and isinstance(prop_body.get("$ref"), str):
+        # Local lookup failed — try provider-wide pool.
+        fb = _follow_ref(prop_body["$ref"], full_components, fallback=resolution_scope)
+        if isinstance(fb, dict):
+            resolved = fb
     extensions = _collect_x_extensions(prop_body)
     for k, v in _collect_x_extensions(resolved).items():
         extensions.setdefault(k, v)
@@ -1219,6 +1730,7 @@ def _emit_one_property(
 
     extensions_json = json.dumps(extensions, sort_keys=True) if extensions else ""
 
+    inherited_from = inherited_chain[-1] if inherited_chain else ""
     property_id = f"{parent_component_id}#prop:{prop_name}"
     if inherited_from:
         property_id = f"{property_id}@{inherited_from}"
@@ -1236,10 +1748,15 @@ def _emit_one_property(
         "yangPath": yang_path,
         "extensionsJson": extensions_json,
         "inheritedFrom": inherited_from,
+        "inheritedFromChain": list(inherited_chain),
         "readOnly": read_only,
     }):
         stats["properties"] = stats.get("properties", 0) + 1
     batch.add_has_property(parent_component_id, property_id)
+
+    if yang_path:
+        batch.add_yang_path(yang_path, _yang_module_for(yang_path))
+        batch.add_property_at_yang(property_id, yang_path)
 
     target_ref: str | None = None
     if isinstance(prop_body.get("$ref"), str):
@@ -1250,25 +1767,20 @@ def _emit_one_property(
             target_ref = items["$ref"]
     if target_ref and target_ref.startswith("#/components/"):
         target_id = _ensure_component_node(
-            batch, spec_source, target_ref, full_components, stats
+            batch, spec_source, target_ref, full_components, stats,
+            resolution_scope=resolution_scope,
         )
         if target_id:
             batch.add_property_of_type(property_id, target_id)
             return
-        # $ref could not be resolved (missing component) — fall through to
-        # inline materialisation so we don't strand the schema entirely.
+        # Fall through to inline materialisation below.
 
     # Inline schema (no $ref): materialise as a synthetic SchemaComponent so
-    # that nested fields (e.g. NTP `servers[].address`) are reachable from
-    # the property graph instead of stranded inside opaque `bodyJson`.
+    # that nested fields are reachable from the property graph instead of
+    # stranded inside opaque ``bodyJson``.
     items = prop_body.get("items") if isinstance(prop_body.get("items"), dict) else None
     inline_body: dict | None = None
     inline_kind: str = ""
-    # Only materialise array-item objects that have decomposable structure the
-    # downstream recursion (``_emit_property_subgraph``) actually walks —
-    # ``properties`` / ``allOf`` / ``oneOf`` / ``anyOf``. Nested arrays
-    # (``items.items``) would mint a synthetic component whose inner schema
-    # would not be decomposed, so we skip them here.
     if items is not None and (
         isinstance(items.get("properties"), dict)
         or items.get("allOf") or items.get("oneOf") or items.get("anyOf")
@@ -1278,6 +1790,11 @@ def _emit_one_property(
     elif isinstance(prop_body.get("properties"), dict):
         inline_body = prop_body
         inline_kind = "object"
+    elif prop_body.get("oneOf") or prop_body.get("anyOf") or prop_body.get("allOf"):
+        # Inline union / composition at the property level (no $ref):
+        # promote so the agent can walk into the branches.
+        inline_body = prop_body
+        inline_kind = "union"
 
     if inline_body is not None:
         synth_id = f"{property_id}#{inline_kind}"
@@ -1290,6 +1807,8 @@ def _emit_one_property(
             body=inline_body,
             full_components=full_components,
             stats=stats,
+            resolution_scope=resolution_scope,
+            inherited_chain=inherited_chain,
         )
         batch.add_property_of_type(property_id, synth_id)
 
@@ -1303,15 +1822,18 @@ def _ensure_inline_component(
     body: dict,
     full_components: dict,
     stats: dict,
+    resolution_scope: dict | None = None,
+    inherited_chain: tuple[str, ...] = (),
 ) -> None:
     """Materialise an inline schema (no `$ref`) as a SchemaComponent and
     recurse into its property subgraph.
 
-    Synthetic ids carry an ``#items`` / ``#object`` suffix derived from the
-    enclosing ``property_id``, which guarantees uniqueness across specs and
-    prevents collisions with named-component ids (which use ``::``
-    separators). Dedupe via ``batch._seen_components`` makes recursion
-    cycle-safe.
+    Synthetic ids carry an ``#items`` / ``#object`` / ``#union`` /
+    ``#additionalProperties`` / ``#oneOf:N`` suffix derived from the
+    enclosing ``property_id`` or parent ``component_id``. Guarantees
+    uniqueness across specs and prevents collision with named-component
+    ids (which use ``:`` separators between provider/section/name).
+    Dedupe via batch._seen_components makes recursion cycle-safe.
     """
     if synth_id in batch._seen_components:
         return
@@ -1321,18 +1843,25 @@ def _ensure_inline_component(
     enum_vals = [v for v in (body.get("enum") or []) if isinstance(v, str)]
     _req = body.get("required")
     required = [v for v in (_req if isinstance(_req, list) else []) if isinstance(v, str)]
+    sdt = _lift_supported_device_types(body)
+    shape = _compute_body_shape(body)
 
-    batch.add_component({
-        "component_id": synth_id,
-        "spec_source": spec_source,
-        "section": "inline",
-        "name": synth_name,
-        "type": str(body.get("type") or ""),
-        "kind": _component_kind(body),
-        "required": required,
-        "enumValues": enum_vals,
-        "bodyJson": body_json,
-    })
+    batch.add_component(
+        {
+            "component_id": synth_id,
+            "spec_source": spec_source,
+            "section": "inline",
+            "name": synth_name,
+            "type": str(body.get("type") or ""),
+            "kind": _component_kind(body),
+            "bodyShape": shape,
+            "required": required,
+            "enumValues": enum_vals,
+            "supportedDeviceTypes": sdt,
+            "bodyJson": body_json,
+        },
+        richness=_richness(body_json),
+    )
     stats["components"] = stats.get("components", 0) + 1
 
     _emit_property_subgraph(
@@ -1343,4 +1872,6 @@ def _ensure_inline_component(
         body=body,
         full_components=full_components,
         stats=stats,
+        resolution_scope=resolution_scope,
+        inherited_chain=inherited_chain,
     )

@@ -66,6 +66,43 @@ uv run pytest -m live_api
 uv run pytest --cov --cov-report=term-missing
 ```
 
+### Real-spec ingestion fixtures (ADR-011)
+
+The OAS → graph ingestion code is regression-tested against real
+HPE Aruba Central / GreenLake spec excerpts at
+`tests/fixtures/oas/real_excerpts/` rather than handwritten
+synthetic OpenAPI. To refresh the corpus:
+
+```bash
+# After a fresh build with the current upstream specs:
+cp build/spec_cache/central/Config/<file>.json tests/fixtures/oas/real_excerpts/central_config_<slug>.json
+cp build/spec_cache/glp/<file>.json            tests/fixtures/oas/real_excerpts/glp_<slug>.json
+```
+
+Do NOT hand-edit these fixtures — they are verbatim by policy.
+`tests/test_real_spec_ingest_smoke.py` runs every fixture through the
+full pipeline and asserts the post-flush invariants
+(`src/hpe_networking_central_mcp/graph/invariants.py`) hold.
+
+### Build-time invariants gate
+
+`scripts/build_knowledge_db.py` now runs the four invariants from
+`graph/invariants.py` after the schema subgraph is populated. Two new
+flags:
+
+- `--strict` — turn violations into a non-zero exit (CI default).
+- `--no-invariants` — skip the audit entirely (rarely useful).
+
+Locally:
+
+```bash
+uv run python scripts/build_knowledge_db.py            # warn only
+uv run python scripts/build_knowledge_db.py --strict   # fail on violation
+```
+
+See [docs/adr/011-real-spec-ingestion-invariants.md](adr/011-real-spec-ingestion-invariants.md)
+for the rationale.
+
 ### Docker E2E layer
 
 The shell scripts at the repo root (`test_all.sh`, `test_mcp.sh`,
