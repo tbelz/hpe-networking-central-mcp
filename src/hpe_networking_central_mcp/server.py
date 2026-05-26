@@ -74,7 +74,12 @@ graph_manager.create_fts_indexes()
 # JSON blob columns and the ApiEndpointSkeleton node table — all API
 # discovery now flows through the Property/Parameter/SchemaComponent
 # subgraph and the ``query_graph`` tool (see ADR 010).
-_KNOWLEDGE_SCHEMA_VERSION = 8
+# Version 9 adds the ``lastSyncedAt`` timestamp column to
+# Site/SiteCollection/DeviceGroup/Device for freshness signalling.
+# Existing databases are migrated in place via ``ALTER TABLE ... ADD``
+# at startup, but the version bump triggers a clean rebuild for users
+# who prefer it.
+_KNOWLEDGE_SCHEMA_VERSION = 9
 
 
 def _check_knowledge_schema_version() -> None:

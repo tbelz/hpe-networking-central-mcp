@@ -320,7 +320,7 @@ class GraphHelper:
         self._ensure_conn()
         self._req_id += 1
         req = {"id": self._req_id, "method": method, "cypher": cypher, "params": params or {}}
-        data = (json.dumps(req) + "\n").encode("utf-8")
+        data = (json.dumps(req, default=str) + "\n").encode("utf-8")
         self._wfile.write(data)
         self._wfile.flush()
         line = self._rfile.readline()

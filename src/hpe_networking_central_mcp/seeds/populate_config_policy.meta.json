@@ -1,0 +1,10 @@
+{
+  "description": "Populate config policy layer — discovers categories, fetches library profiles, and resolves scope assignments. EXPENSIVE: cost ≈ 1 + P + P × (SC + S + G). Pass --category to limit to one category; pass --scope-id together with --scope-type (org|collection|site|group) to limit assignment resolution to a single scope.",
+  "tags": ["graph", "config", "policy", "refresh"],
+  "parameters": [
+    {"name": "category", "type": "str", "description": "Only refresh this config category (e.g. wlan-ssids, sw-port-profiles).", "required": false, "default": null},
+    {"name": "scope-id", "type": "str", "description": "Restrict assignment resolution to this scope id.", "required": false, "default": null},
+    {"name": "scope-type", "type": "str", "description": "Scope type for --scope-id (org, collection, site, or group).", "required": false, "default": null}
+  ],
+  "auto_run": false
+}
