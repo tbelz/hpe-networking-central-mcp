@@ -12,6 +12,7 @@ Hierarchy built:
   DeviceGroup → Device (cross-cutting membership)
 """
 
+import argparse
 import json
 import sys
 
@@ -45,11 +46,27 @@ def fetch_device_groups() -> list[dict]:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Populate the base configuration graph.")
+    parser.add_argument(
+        "--site-id",
+        default=None,
+        help="Only refresh the given site and the devices contained in it.",
+    )
+    parser.add_argument(
+        "--device-group-id",
+        default=None,
+        help="Only refresh devices whose deviceGroupId equals this value.",
+    )
+    args = parser.parse_args()
+    site_filter = args.site_id
+    group_filter = args.device_group_id
+
     summary = {
         "sites": 0,
         "site_collections": 0,
         "device_groups": 0,
         "devices": 0,
+        "filters": {"site_id": site_filter, "device_group_id": group_filter},
         "errors": [],
     }
 
@@ -102,7 +119,8 @@ def main():
         collection_ids.add(sid)
         graph.execute(
             "MERGE (sc:SiteCollection {scopeId: $sid}) "
-            "SET sc.name = $name, sc.siteCount = $sc, sc.deviceCount = $dc",
+            "SET sc.name = $name, sc.siteCount = $sc, sc.deviceCount = $dc, "
+            "sc.lastSyncedAt = current_timestamp()",
             {
                 "sid": sid,
                 "name": sc.get("scopeName", sc.get("name", "")),
@@ -117,6 +135,8 @@ def main():
         sid = str(s.get("id", s.get("scopeId", "")))
         if not sid:
             continue
+        if site_filter and sid != site_filter:
+            continue
         site_ids.add(sid)
         coll_id = str(s.get("collectionId", s.get("collection_id", "") or ""))
         coll_name = s.get("collectionName", s.get("collection_name", "") or "")
@@ -129,7 +149,8 @@ def main():
             "SET s.name = $name, s.address = $addr, s.city = $city, "
             "s.country = $country, s.state = $state, s.zipcode = $zip, "
             "s.lat = $lat, s.lon = $lon, s.deviceCount = $dc, "
-            "s.collectionId = $cid, s.collectionName = $cn, s.timezoneId = $tz",
+            "s.collectionId = $cid, s.collectionName = $cn, s.timezoneId = $tz, "
+            "s.lastSyncedAt = current_timestamp()",
             {
                 "sid": sid,
                 "name": s.get("scopeName", s.get("name", "")),
@@ -153,9 +174,11 @@ def main():
         sid = str(dg.get("id", dg.get("scopeId", "")))
         if not sid:
             continue
+        if group_filter and sid != group_filter:
+            continue
         graph.execute(
             "MERGE (dg:DeviceGroup {scopeId: $sid}) "
-            "SET dg.name = $name, dg.deviceCount = $dc",
+            "SET dg.name = $name, dg.deviceCount = $dc, dg.lastSyncedAt = current_timestamp()",
             {
                 "sid": sid,
                 "name": dg.get("scopeName", dg.get("name", "")),
@@ -171,6 +194,11 @@ def main():
         if not serial:
             continue
         site_id = str(d.get("siteId", d.get("site_id", "") or ""))
+        dg_id = str(d.get("deviceGroupId", "") or "")
+        if site_filter and site_id != site_filter:
+            continue
+        if group_filter and dg_id != group_filter:
+            continue
         if site_id:
             device_site_map[serial] = site_id
         graph.execute(
@@ -180,7 +208,8 @@ def main():
             "d.firmware = $fw, d.persona = $persona, d.deviceFunction = $df, "
             "d.siteId = $sid, d.siteName = $sn, d.partNumber = $pn, "
             "d.deployment = $dep, d.configStatus = $cs, "
-            "d.deviceGroupId = $dgid, d.deviceGroupName = $dgn",
+            "d.deviceGroupId = $dgid, d.deviceGroupName = $dgn, "
+            "d.lastSyncedAt = current_timestamp()",
             {
                 "serial": serial,
                 "name": d.get("deviceName", d.get("name", "")),
@@ -197,7 +226,7 @@ def main():
                 "pn": d.get("partNumber", d.get("part_number", "")),
                 "dep": d.get("deployment", "") or "",
                 "cs": d.get("configStatus", d.get("config_status", "")) or "",
-                "dgid": str(d.get("deviceGroupId", "") or ""),
+                "dgid": dg_id,
                 "dgn": d.get("deviceGroupName", "") or "",
             },
         )
@@ -238,12 +267,17 @@ def main():
                 {"sid": site_id, "serial": serial},
             )
 
-    # DeviceGroup -> Device
+    # DeviceGroup -> Device (respect the same filters used for the device pass)
     linked = 0
     for d in devices:
         serial = str(d.get("serialNumber", d.get("serial", "")))
         dg_id = str(d.get("deviceGroupId", "") or "")
+        site_id = str(d.get("siteId", d.get("site_id", "") or ""))
         if not serial or not dg_id:
+            continue
+        if site_filter and site_id != site_filter:
+            continue
+        if group_filter and dg_id != group_filter:
             continue
         graph.execute(
             "MATCH (dg:DeviceGroup {scopeId: $dgid}), (d:Device {serial: $serial}) "

@@ -18,6 +18,29 @@ direct API reads and reusable Python scripts.
    Devices. The graph is your structural map — use it for navigation, blast-radius analysis,
    cross-site comparison, and dependency tracking.
 
+   **Graph vs live state (important)**: The graph is the authoritative map of
+   *structure* (hierarchy, topology, OpenAPI schema). Operational fields on
+   Site/SiteCollection/DeviceGroup/Device/ConfigProfile nodes
+   (`status`, `configStatus`, `firmware`, `ipv4`, `deviceCount`,
+   `isDefault`, `assignedScopeIds`, ...) are stamped with `lastSyncedAt` at
+   seed/refresh time and may be stale. `query_graph` automatically attaches
+   a `freshness_warnings` block to its response when it detects stale
+   volatile data (threshold env: `MCP_GRAPH_STALE_THRESHOLD_SECONDS`,
+   default 900). For authoritative live state, call the matching
+   monitoring/config endpoint directly via `call_central_api`. For
+   resolved config with per-setting provenance, add
+   `effective=true&detailed=true` to the query string.
+
+   **Refresh recipes** (use `execute_script`). Scope filters limit which graph
+   rows get rewritten; the script still walks the relevant Central API pages,
+   so cost scales with that scope, not with the rest of the org:
+   - Full base-graph refresh: `execute_script("populate_base_graph.py")`
+   - One site only: `execute_script("populate_base_graph.py", {"site-id": "<scopeId>"})`
+   - One device-group only: `execute_script("populate_base_graph.py", {"device-group-id": "<scopeId>"})`
+   - Topology for one site: `execute_script("enrich_topology.py", {"site-id": "<scopeId>"})`
+   - Config policy, single category: `execute_script("populate_config_policy.py", {"category": "wlan-ssids"})`
+   - Config policy, single scope: `execute_script("populate_config_policy.py", {"scope-id": "<id>", "scope-type": "site"})`
+
    **Configuration model**: Central uses five scopes — Global (Org), SiteCollection, Site,
    DeviceGroup, and Device. Config propagates top-down; DeviceGroups cut across sites.
    Precedence: Device > DeviceGroup > Site > SiteCollection > Global.
@@ -62,6 +85,13 @@ direct API reads and reusable Python scripts.
 
 5. **Single writes**: Use call_central_api(path, method="POST", body={...}) for simple
    write operations (create a VLAN, delete a profile, update a setting).
+
+   **Batch reads**: For a handful of independent reads against unrelated
+   endpoints (cap 25), pass `calls=[{"path": ..., "method": ...,
+   "query_params": ...}, ...]` to `call_central_api` / `call_greenlake_api`.
+   Items run sequentially, continue-on-error; each result carries its own
+   `{request, status, response}` envelope. Do NOT use batch mode to walk a
+   paginated collection — use a script with `api.paginate()` for that.
 
 6. **Multi-step workflows**: For operations that involve multiple API calls (e.g., onboard
    a device: check inventory → create site → assign device → set persona), ALWAYS use a

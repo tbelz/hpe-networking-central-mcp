@@ -11,7 +11,7 @@ from typing import Any
 import real_ladybug as lb
 import structlog
 
-from .schema import KNOWLEDGE_NODE_TABLES, KNOWLEDGE_REL_TABLES, NODE_TABLES, POLICY_REL_TABLES, REL_TABLES, TOPOLOGY_REL_TABLES
+from .schema import ALTER_ADD_LAST_SYNCED_AT, KNOWLEDGE_NODE_TABLES, KNOWLEDGE_REL_TABLES, NODE_TABLES, POLICY_REL_TABLES, REL_TABLES, TOPOLOGY_REL_TABLES
 
 logger = structlog.get_logger("graph.manager")
 
@@ -65,6 +65,19 @@ class GraphManager:
         )
         for ddl in bootstrap_ddl:
             conn.execute(ddl.strip())
+
+        # Idempotent column-add migrations for pre-existing databases.
+        # ALTER fails when the column already exists; that error is benign.
+        for stmt in ALTER_ADD_LAST_SYNCED_AT:
+            try:
+                conn.execute(stmt)
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "already exists" in msg or "duplicate" in msg or "already has" in msg:
+                    logger.debug("alter_add_column_skipped", stmt=stmt, error=str(exc))
+                else:
+                    logger.error("alter_add_column_failed", stmt=stmt, error=str(exc))
+                    raise
 
         # Load the algo extension
         try:
@@ -554,6 +567,78 @@ MATCH (e:ApiEndpoint {method: $m, path: $p})
       -[:HAS_PROPERTY]->(p:Property {required: true})
 RETURN p.name, p.type, p.enumValues
 ORDER BY p.name
+```
+
+### Hierarchy & scope navigation
+
+```cypher
+// All devices at a site (by scopeId or by friendly name)
+MATCH (s:Site)-[:HAS_DEVICE]->(d:Device)
+WHERE s.scopeId = $siteScopeId OR s.name = $siteName
+RETURN d.serial, d.name, d.deviceType, d.status, d.lastSyncedAt
+ORDER BY d.name
+```
+
+```cypher
+// Resolve a site/collection/group friendly name to its scopeId
+MATCH (n)
+WHERE (n:Site OR n:SiteCollection OR n:DeviceGroup) AND n.name = $name
+RETURN labels(n)[0] AS kind, n.scopeId, n.name
+```
+
+```cypher
+// Full scope chain for a device (Device <- Group/Site <- Collection <- Org)
+MATCH (d:Device {serial: $serial})
+OPTIONAL MATCH (g:DeviceGroup)-[:HAS_MEMBER]->(d)
+OPTIONAL MATCH (s:Site)-[:HAS_DEVICE]->(d)
+OPTIONAL MATCH (sc:SiteCollection)-[:CONTAINS_SITE]->(s)
+OPTIONAL MATCH (org:Org)
+RETURN d.serial AS serial, d.name AS device,
+       g.scopeId AS deviceGroupScopeId,
+       s.scopeId AS siteScopeId,
+       sc.scopeId AS collectionScopeId,
+       org.scopeId AS orgScopeId
+```
+
+```cypher
+// All sites in a site collection
+MATCH (sc:SiteCollection {scopeId: $collectionScopeId})-[:CONTAINS_SITE]->(s:Site)
+RETURN s.scopeId, s.name, s.deviceCount, s.lastSyncedAt
+ORDER BY s.name
+```
+
+### ApiEndpoint discovery from a fragment
+
+```cypher
+// Search the API catalog by a path fragment when you don't know the full path
+MATCH (e:ApiEndpoint)
+WHERE e.path CONTAINS $fragment
+RETURN e.method, e.path, e.category
+ORDER BY size(e.path), e.path
+LIMIT 20
+```
+
+### Freshness sanity check
+
+```cypher
+// Detect stale operational data before reading it
+MATCH (d:Device)
+WHERE d.lastSyncedAt IS NULL
+   OR d.lastSyncedAt < timestamp() - duration({minutes: 15})
+RETURN count(d) AS staleDevices
+```
+
+### Reserved-keyword caveat
+
+Cypher reserves keywords such as `in`, `from`, `to`, `where`, `order`,
+`with`. Property names that collide with these (most often
+`Parameter.in` for the OpenAPI parameter location) must be referenced
+by string syntax, not dot syntax. Use `MATCH (p:Parameter) WHERE
+p.location = 'query'` if available, otherwise quote the property with
+backticks:
+
+```cypher
+MATCH (p:Parameter) RETURN p.`in` AS location
 ```
 
 For everything else (cross-spec lookups, category rollups, custom
