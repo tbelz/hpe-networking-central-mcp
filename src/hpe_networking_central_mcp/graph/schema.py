@@ -337,7 +337,7 @@ def get_rel_tables_with_endpoints() -> list[tuple[str, str, str]]:
 # the freshness threshold, query_graph attaches a freshness_warnings
 # block so the agent does not silently treat stale values as authoritative.
 VOLATILE_FIELDS: dict[str, set[str]] = {
-    "Device": {"configStatus", "status", "firmware", "ipv4", "lastSeen"},
+    "Device": {"configStatus", "status", "firmware", "ipv4"},
     "Site": {"deviceCount"},
     "DeviceGroup": {"deviceCount"},
     "SiteCollection": {"deviceCount", "siteCount"},

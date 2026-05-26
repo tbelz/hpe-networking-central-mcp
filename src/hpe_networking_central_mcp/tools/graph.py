@@ -178,8 +178,13 @@ def _scan_freshness(
                 "may be stale. For live state call the Central API directly "
                 "(e.g. call_central_api on the matching monitoring endpoint); "
                 f"to refresh the graph run execute_script('populate_base_graph.py'"
-                + (f", parameters={{'site-id': '<scopeId>'}}" if label in ('Device', 'Site') else "")
+                + (", parameters={'site-id': '<siteScopeId>'}" if label in ('Device', 'Site') else "")
                 + ")."
+                + (
+                    " Device rows are refreshed by re-fetching their containing"
+                    " site, so pass the site's scopeId (not a device serial)."
+                    if label == 'Device' else ""
+                )
             ),
         })
     return warnings

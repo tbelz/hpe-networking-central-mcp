@@ -589,7 +589,7 @@ RETURN labels(n)[0] AS kind, n.scopeId, n.name
 ```cypher
 // Full scope chain for a device (Device <- Group/Site <- Collection <- Org)
 MATCH (d:Device {serial: $serial})
-OPTIONAL MATCH (g:DeviceGroup)-[:HAS_DEVICE]->(d)
+OPTIONAL MATCH (g:DeviceGroup)-[:HAS_MEMBER]->(d)
 OPTIONAL MATCH (s:Site)-[:HAS_DEVICE]->(d)
 OPTIONAL MATCH (sc:SiteCollection)-[:CONTAINS_SITE]->(s)
 OPTIONAL MATCH (org:Org)

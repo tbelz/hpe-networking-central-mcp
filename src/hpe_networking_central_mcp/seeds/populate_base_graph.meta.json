@@ -1,5 +1,5 @@
 {
-  "description": "Populate the base configuration graph from Central APIs (sites, collections, groups, devices, config profiles). Without filters refreshes everything; pass --site-id or --device-group-id to refresh a single scope cheaply.",
+  "description": "Populate the base configuration graph from Central APIs (sites, collections, groups, devices, config profiles). Without filters refreshes everything; pass --site-id or --device-group-id to limit the graph refresh scope to a specific site or device group (the script still walks the relevant Central API pages, so cost scales with that scope, not with the rest of the org).",
   "tags": ["graph", "population", "startup", "refresh"],
   "parameters": [
     {"name": "site-id", "type": "str", "description": "Only refresh the given site and the devices contained in it.", "required": false, "default": null},

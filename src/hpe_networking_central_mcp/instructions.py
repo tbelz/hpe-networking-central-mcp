@@ -21,7 +21,7 @@ direct API reads and reusable Python scripts.
    **Graph vs live state (important)**: The graph is the authoritative map of
    *structure* (hierarchy, topology, OpenAPI schema). Operational fields on
    Site/SiteCollection/DeviceGroup/Device/ConfigProfile nodes
-   (`status`, `configStatus`, `firmware`, `ipv4`, `lastSeen`, `deviceCount`,
+   (`status`, `configStatus`, `firmware`, `ipv4`, `deviceCount`,
    `isDefault`, `assignedScopeIds`, ...) are stamped with `lastSyncedAt` at
    seed/refresh time and may be stale. `query_graph` automatically attaches
    a `freshness_warnings` block to its response when it detects stale
@@ -31,8 +31,10 @@ direct API reads and reusable Python scripts.
    resolved config with per-setting provenance, add
    `effective=true&detailed=true` to the query string.
 
-   **Refresh recipes** (use `execute_script`):
-   - Full refresh (cheap): `execute_script("populate_base_graph.py")`
+   **Refresh recipes** (use `execute_script`). Scope filters limit which graph
+   rows get rewritten; the script still walks the relevant Central API pages,
+   so cost scales with that scope, not with the rest of the org:
+   - Full base-graph refresh: `execute_script("populate_base_graph.py")`
    - One site only: `execute_script("populate_base_graph.py", {"site-id": "<scopeId>"})`
    - One device-group only: `execute_script("populate_base_graph.py", {"device-group-id": "<scopeId>"})`
    - Topology for one site: `execute_script("enrich_topology.py", {"site-id": "<scopeId>"})`
