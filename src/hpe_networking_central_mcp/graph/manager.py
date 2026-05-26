@@ -425,9 +425,19 @@ required fields without ever materialising a full skeleton.
 - `Response` — one row per status code (e.g. `200`, `400`). Links to a
   `SchemaComponent` via `RESPONSE_REFERENCES`.
 - `SchemaComponent` — every reusable OpenAPI component (schemas,
-  parameters, requestBodies, responses). Properties: `component_id` (PK),
-  `spec_source`, `section`, `name`, `type`, `kind`, `required`,
-  `enumValues`, `bodyJson` (full serialised component for deep inspection).
+  parameters, requestBodies, responses) AND every promoted inline
+  schema (oneOf/anyOf/allOf branches, additionalProperties value
+  shapes, array items, nested objects). Properties: `component_id`
+  (PK), `spec_source`, `section` (`schemas` / `parameters` / ... /
+  `inline` for synthesised nodes), `name`, `type`, `kind`,
+  `bodyShape` (single-word structural signature: `object`,
+  `array`, `primitive`, `union-oneOf`, `union-anyOf`,
+  `allOf-composite`, `map`, `unresolved`), `required`,
+  `enumValues`, `supportedDeviceTypes` (component-level lift of
+  `x-supportedDeviceType` — lets you slice by device type without
+  descending to properties), `bodyJson` (full serialised component
+  for deep inspection; empty when `kind = 'unresolved'`, i.e. an
+  unresolvable `$ref` placeholder).
 - `Property` — one row per leaf property of a `SchemaComponent`
   (including properties flattened from `allOf` branches). Properties:
   `property_id` (PK), `parent_component_id`, `name`, `type`, `format`,
@@ -438,7 +448,13 @@ required fields without ever materialising a full skeleton.
   set of `x-*` vendor extensions for that property as a JSON string,
   including the typed-extracted ones), `inheritedFrom` (empty for
   properties defined directly on the component, or the name of the
-  `allOf` branch component when the property was flattened up).
+  `allOf` branch component when the property was flattened up),
+  `inheritedFromChain` (full ancestor chain for nested `allOf`
+  flattening, e.g. `['ParentSchema', 'GrandparentSchema']`),
+  `readOnly` (boolean).
+- `YangPath` — reverse index of every YANG path appearing on a
+  `Property`. Properties: `yangPath` (PK, the full `/ac-foo:bar/...`
+  string), `module` (the prefix, e.g. `ac-ntp`).
 
 ### Relationship tables
 - `(ApiEndpoint)-[:HAS_PARAMETER]->(Parameter)`
@@ -455,12 +471,44 @@ required fields without ever materialising a full skeleton.
   `items.$ref`).
 - `(SchemaComponent)-[:COMPOSED_OF {kind}]->(SchemaComponent)` —
   records `allOf` / `oneOf` / `anyOf` composition; `kind` is the
-  composition keyword.
+  composition keyword. Synthetic inline components (sections =
+  `inline`) are linked the same way so a single `COMPOSED_OF*0..N`
+  walk covers both named and promoted-inline branches.
+- `(SchemaComponent)-[:HAS_VALUE_SCHEMA]->(SchemaComponent)` —
+  links a map-shaped component (`additionalProperties`) to the
+  component describing its values.
 - `(SchemaComponent)-[:REFERENCES {via}]->(SchemaComponent)`
   — captures `$ref` edges between components; `via` is e.g.
   `"property:<name>"`, `"items:<name>"`, `"allOf"`.
+- `(Property)-[:PROPERTY_AT_YANG]->(YangPath)` — fast reverse
+  lookup from a YANG path string to every Property that maps to it.
+- `(ApiEndpoint)-[:CONFIGURES_YANG]->(YangPath)` — derived
+  edge: every endpoint whose request body (any depth, via
+  `COMPOSED_OF*0..6`) reaches a property that maps to this YANG
+  path. Lets you go from a CLI/YANG identifier straight to the API
+  endpoints that touch it without a multi-hop traversal.
 
 ### Canned API discovery patterns
+
+```cypher
+// CANONICAL body-discovery query: every field of an endpoint's request
+// body, walking through allOf/oneOf/anyOf composition AND promoted
+// inline components, optionally filtered by device type. Pass
+// $deviceType='' to skip the filter. Use this first when you need to
+// construct or validate an API call body.
+MATCH (e:ApiEndpoint {method: $m, path: $p})
+      -[:HAS_REQUEST_BODY]->(:RequestBody)
+      -[:BODY_REFERENCES]->(root:SchemaComponent)
+MATCH (root)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)
+      -[:HAS_PROPERTY]->(p:Property)
+WHERE $deviceType = ''
+   OR $deviceType IN p.supportedDeviceTypes
+   OR size(p.supportedDeviceTypes) = 0
+RETURN c.name AS host, c.bodyShape AS shape,
+       p.name, p.type, p.required, p.enumValues,
+       p.inheritedFrom, p.inheritedFromChain, p.yangPath
+ORDER BY c.name, p.required DESC, p.name
+```
 
 ```cypher
 // Find all GET endpoints in a category
@@ -519,6 +567,39 @@ RETURN e.method, e.path, c.name AS component, p.name AS field
 ```
 
 ```cypher
+// Same lookup, but using the derived CONFIGURES_YANG edge (fast path):
+// every endpoint that touches a given YANG path anywhere in its body.
+MATCH (e:ApiEndpoint)-[:CONFIGURES_YANG]->(y:YangPath {yangPath: $yp})
+RETURN DISTINCT e.method, e.path
+ORDER BY e.path
+```
+
+```cypher
+// Branches of a oneOf / anyOf union component (use bodyShape to
+// detect unions without grep'ing bodyJson). The branches are either
+// named components or synthesised `inline` ones; both are walked.
+MATCH (c:SchemaComponent {name: $name})
+WHERE c.bodyShape IN ['union-oneOf', 'union-anyOf']
+MATCH (c)-[r:COMPOSED_OF]->(branch:SchemaComponent)
+RETURN r.kind AS kind, branch.section, branch.name, branch.bodyShape
+```
+
+```cypher
+// Find map-shaped components (additionalProperties) and what their
+// values are constrained to.
+MATCH (c:SchemaComponent)-[:HAS_VALUE_SCHEMA]->(v:SchemaComponent)
+RETURN c.name AS map, v.name AS valueShape, v.bodyShape
+```
+
+```cypher
+// Debug: components whose body could not be resolved (missing $ref
+// target). Empty result = healthy ingestion.
+MATCH (c:SchemaComponent {kind: 'unresolved'})
+RETURN c.spec_source, c.section, c.name
+ORDER BY c.spec_source, c.name
+```
+
+```cypher
 // Show the allOf composition tree of a component
 MATCH (c:SchemaComponent {name: $name})-[r:COMPOSED_OF {kind: 'allOf'}]->(b:SchemaComponent)
 RETURN b.name, b.section
@@ -545,18 +626,23 @@ ORDER BY param.required DESC, param.name
 ```
 
 ```cypher
-// Request-body properties for an endpoint, optionally filtered by device type
-// (pass deviceType='' to skip the filter)
+// Request-body properties for an endpoint, walking composition and
+// promoted-inline branches, optionally filtered by device type.
+// (Pass deviceType='' to skip the filter.) This is the same canonical
+// pattern shown above — repeated here for the call-construction
+// workflow.
 MATCH (e:ApiEndpoint {method: $m, path: $p})
       -[:HAS_REQUEST_BODY]->(:RequestBody)
-      -[:BODY_REFERENCES]->(c:SchemaComponent)
+      -[:BODY_REFERENCES]->(root:SchemaComponent)
+MATCH (root)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)
       -[:HAS_PROPERTY]->(p:Property)
 WHERE $deviceType = ''
    OR $deviceType IN p.supportedDeviceTypes
    OR size(p.supportedDeviceTypes) = 0
-RETURN p.name, p.type, p.required, p.enumValues,
-       p.inheritedFrom, p.supportedDeviceTypes
-ORDER BY p.required DESC, p.name
+RETURN c.name AS host, c.bodyShape AS shape,
+       p.name, p.type, p.required, p.enumValues,
+       p.inheritedFrom, p.inheritedFromChain, p.supportedDeviceTypes
+ORDER BY c.name, p.required DESC, p.name
 ```
 
 ```cypher

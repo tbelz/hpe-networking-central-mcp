@@ -188,15 +188,17 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
     """,
     """
     CREATE NODE TABLE IF NOT EXISTS SchemaComponent (
-        component_id   STRING,
-        spec_source    STRING,
-        section        STRING,
-        name           STRING,
-        type           STRING,
-        kind           STRING,
-        required       STRING[],
-        enumValues     STRING[],
-        bodyJson       STRING,
+        component_id         STRING,
+        spec_source          STRING,
+        section              STRING,
+        name                 STRING,
+        type                 STRING,
+        kind                 STRING,
+        bodyShape            STRING,
+        required             STRING[],
+        enumValues           STRING[],
+        supportedDeviceTypes STRING[],
+        bodyJson             STRING,
         PRIMARY KEY (component_id)
     )
     """,
@@ -221,8 +223,20 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         yangPath             STRING,
         extensionsJson       STRING,
         inheritedFrom        STRING,
+        inheritedFromChain   STRING[],
         readOnly             BOOLEAN,
         PRIMARY KEY (property_id)
+    )
+    """,
+    # ── YANG reverse-index (Phase 3) ────────────────────────────────
+    # Lets an agent map a known YANG path (e.g. from a legacy CLI/YANG
+    # config) back to the API endpoints that configure it, or to the
+    # property/schema-component where it lives, in one hop.
+    """
+    CREATE NODE TABLE IF NOT EXISTS YangPath (
+        yangPath  STRING,
+        module    STRING,
+        PRIMARY KEY (yangPath)
     )
     """,
 ]
@@ -240,6 +254,10 @@ KNOWLEDGE_REL_TABLES: list[str] = [
     "CREATE REL TABLE IF NOT EXISTS HAS_PROPERTY (FROM SchemaComponent TO Property)",
     "CREATE REL TABLE IF NOT EXISTS PROPERTY_OF_TYPE (FROM Property TO SchemaComponent)",
     "CREATE REL TABLE IF NOT EXISTS COMPOSED_OF (FROM SchemaComponent TO SchemaComponent, kind STRING)",
+    "CREATE REL TABLE IF NOT EXISTS HAS_VALUE_SCHEMA (FROM SchemaComponent TO SchemaComponent)",
+    # ── YANG reverse-index edges (Phase 3) ───────────────────────────
+    "CREATE REL TABLE IF NOT EXISTS PROPERTY_AT_YANG (FROM Property TO YangPath)",
+    "CREATE REL TABLE IF NOT EXISTS CONFIGURES_YANG (FROM ApiEndpoint TO YangPath)",
 ]
 
 # ── Relationship table DDL ───────────────────────────────────────────

@@ -410,17 +410,61 @@ def _find_operation(spec: dict, method: str, path: str) -> dict | None:
     return op if isinstance(op, dict) else None
 
 
-def _follow_ref(ref: str, components: dict) -> Any | None:
+def schema_richness(node: Any) -> int:
+    """Comparable richness score for an OAS schema fragment.
+
+    Used by both ref-resolution (cross-spec richest-wins, see
+    ``_follow_ref``) and the SchemaComponent merge in
+    :mod:`oas_schema_graph` so the two sites cannot drift apart.
+    Returns 0 for ``None``. The score is the length of the
+    JSON-serialised node — longer ≈ richer (more properties,
+    descriptions, enums, ``allOf`` chains, vendor extensions).
+    """
+    if node is None:
+        return 0
+    try:
+        return len(json.dumps(node, default=str, sort_keys=True))
+    except (TypeError, ValueError):
+        return len(repr(node))
+
+
+def _follow_ref(
+    ref: str,
+    components: dict,
+    fallback: dict | None = None,
+) -> Any | None:
+    """Resolve a local ``#/components/...`` ref, richest-wins across scopes.
+
+    Tries both ``components`` and ``fallback`` (provider-wide union of
+    every spec's components built during Pass A of the knowledge-DB
+    build). When both define the target — common in multi-file Aruba
+    Central bundles where one operation spec stubs a component that a
+    sibling spec declares richly — the candidate with the higher
+    :func:`schema_richness` wins. Returns ``None`` only if neither
+    scope contains the path.
+    """
     if not ref.startswith("#/components/"):
         return None
     parts = ref.removeprefix("#/components/").split("/")
-    node: Any = components
-    for part in parts:
-        if isinstance(node, dict):
-            node = node.get(part)
-        else:
-            return None
-    return node
+    best: Any | None = None
+    best_score = -1
+    for scope in (components, fallback):
+        if not isinstance(scope, dict):
+            continue
+        node: Any = scope
+        for part in parts:
+            if isinstance(node, dict):
+                node = node.get(part)
+            else:
+                node = None
+                break
+        if node is None:
+            continue
+        score = schema_richness(node)
+        if score > best_score:
+            best = node
+            best_score = score
+    return best
 
 
 def _collect_refs(node: Any, refs: set[str]) -> None:
@@ -436,12 +480,20 @@ def _collect_refs(node: Any, refs: set[str]) -> None:
             _collect_refs(item, refs)
 
 
-def _extract_referenced_components(payload: Any, full_components: dict) -> dict:
+def _extract_referenced_components(
+    payload: Any,
+    full_components: dict,
+    fallback: dict | None = None,
+) -> dict:
     """Return a side-table containing only the components referenced by ``payload``.
 
     Walks transitively: a referenced schema may itself contain ``$ref`` to
     another schema; both are included.  Returns an empty dict if nothing is
     referenced.  Output mirrors OAS layout: ``{"schemas": {...}, "responses": {...}}``.
+
+    ``fallback`` is a provider-wide component pool used when ``payload`` /
+    a transitive reference targets a component that the local spec does not
+    define (cross-spec ref).
     """
     seen: set[str] = set()
     pending: set[str] = set()
@@ -459,7 +511,7 @@ def _extract_referenced_components(payload: Any, full_components: dict) -> dict:
         if len(parts) < 2:
             continue
         section, name = parts[0], parts[1]
-        target = _follow_ref(ref, full_components)
+        target = _follow_ref(ref, full_components, fallback=fallback)
         if target is None:
             continue
         out.setdefault(section, {})[name] = target
