@@ -57,3 +57,4 @@ src/hpe_networking_central_mcp/onboard_device.*
 src/hpe_networking_central_mcp/populate_base_graph.*
 src/hpe_networking_central_mcp/populate_config_policy.*
 src/hpe_networking_central_mcp/populate_monitoring.*
+.claude/settings.local.json
