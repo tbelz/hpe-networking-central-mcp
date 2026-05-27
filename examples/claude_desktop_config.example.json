@@ -5,42 +5,35 @@
       "args": [
         "run", "-i", "--rm", "--pull", "always",
         "-v", "central-scripts:/scripts/library",
-        "-e", "CENTRAL_BASE_URL",
-        "-e", "CENTRAL_CLIENT_ID",
-        "-e", "CENTRAL_CLIENT_SECRET",
-        "-e", "GREENLAKE_CLIENT_ID",
-        "-e", "GREENLAKE_CLIENT_SECRET",
-        "ghcr.io/tbelz/hpe-networking-central-mcp:main"
-      ],
-      "env": {
-        "CENTRAL_BASE_URL": "https://apigw-YOUR_CLUSTER.central.arubanetworks.com",
-        "CENTRAL_CLIENT_ID": "REPLACE_WITH_YOUR_CENTRAL_CLIENT_ID",
-        "CENTRAL_CLIENT_SECRET": "REPLACE_WITH_YOUR_CENTRAL_CLIENT_SECRET",
-        "GREENLAKE_CLIENT_ID": "REPLACE_WITH_YOUR_GLP_CLIENT_ID",
-        "GREENLAKE_CLIENT_SECRET": "REPLACE_WITH_YOUR_GLP_CLIENT_SECRET"
-      }
+        "ghcr.io/tbelz/hpe-networking-central-mcp:main",
+        "--central-url", "https://apigw-YOUR_CLUSTER.central.arubanetworks.com",
+        "--client-id", "REPLACE_WITH_YOUR_CENTRAL_CLIENT_ID",
+        "--client-secret", "REPLACE_WITH_YOUR_CENTRAL_CLIENT_SECRET",
+        "--glp-client-id", "REPLACE_WITH_YOUR_GLP_CLIENT_ID",
+        "--glp-client-secret", "REPLACE_WITH_YOUR_GLP_CLIENT_SECRET"
+      ]
     },
     "hpe-networking-central-mcp-readonly": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm", "--pull", "always",
         "-v", "central-scripts:/scripts/library",
-        "-e", "CENTRAL_BASE_URL",
-        "-e", "CENTRAL_CLIENT_ID",
-        "-e", "CENTRAL_CLIENT_SECRET",
-        "-e", "GREENLAKE_CLIENT_ID",
-        "-e", "GREENLAKE_CLIENT_SECRET",
-        "-e", "READ_ONLY",
+        "ghcr.io/tbelz/hpe-networking-central-mcp:main",
+        "--central-url", "https://apigw-YOUR_CLUSTER.central.arubanetworks.com",
+        "--client-id", "REPLACE_WITH_YOUR_CENTRAL_CLIENT_ID",
+        "--client-secret", "REPLACE_WITH_YOUR_CENTRAL_CLIENT_SECRET",
+        "--glp-client-id", "REPLACE_WITH_YOUR_GLP_CLIENT_ID",
+        "--glp-client-secret", "REPLACE_WITH_YOUR_GLP_CLIENT_SECRET",
+        "--read-only"
+      ]
+    },
+    "hpe-networking-central-mcp-discovery-only": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm", "--pull", "always",
+        "-v", "central-scripts:/scripts/library",
         "ghcr.io/tbelz/hpe-networking-central-mcp:main"
-      ],
-      "env": {
-        "CENTRAL_BASE_URL": "https://apigw-YOUR_CLUSTER.central.arubanetworks.com",
-        "CENTRAL_CLIENT_ID": "REPLACE_WITH_YOUR_CENTRAL_CLIENT_ID",
-        "CENTRAL_CLIENT_SECRET": "REPLACE_WITH_YOUR_CENTRAL_CLIENT_SECRET",
-        "GREENLAKE_CLIENT_ID": "REPLACE_WITH_YOUR_GLP_CLIENT_ID",
-        "GREENLAKE_CLIENT_SECRET": "REPLACE_WITH_YOUR_GLP_CLIENT_SECRET",
-        "READ_ONLY": "true"
-      }
+      ]
     }
   }
 }

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 import atexit
 import graphlib
 import json
+import os
 import shutil
 import sys
 import threading
@@ -30,32 +32,98 @@ from .tools.scripts import register_script_tools, sync_seeds_to_graph
 
 logger = setup_logging()
 
+
+def _parse_server_args() -> None:
+    """Translate optional CLI args into the env vars that ``config.py`` reads.
+
+    The MCP server has historically been configured exclusively through
+    environment variables, which forces deployments (Claude Desktop, VS Code,
+    docker-compose, ...) to duplicate every credential between the Docker
+    ``-e VAR`` flag list and a separate JSON ``env`` block. Accepting the same
+    values as proper CLI arguments lets the launcher pass everything in one
+    flat ``args`` array and drop the ``env`` block entirely. CLI values, when
+    provided, take precedence over any already-set env vars.
+
+    Unknown arguments are tolerated (``parse_known_args``) so this never
+    fights FastMCP's own argv handling.
+    """
+    parser = argparse.ArgumentParser(
+        prog="hpe-networking-central-mcp",
+        description=(
+            "HPE Networking Central MCP server. With no credentials the server "
+            "starts in discovery-only mode (knowledge DB + script CRUD only, "
+            "no live Central / GreenLake API calls)."
+        ),
+        add_help=False,  # don't shadow FastMCP's own --help if it ever adds one
+    )
+    parser.add_argument("--central-url", dest="central_url", default=None,
+                        help="Central API base URL (sets CENTRAL_BASE_URL).")
+    parser.add_argument("--client-id", dest="client_id", default=None,
+                        help="Central OAuth2 client ID (sets CENTRAL_CLIENT_ID).")
+    parser.add_argument("--client-secret", dest="client_secret", default=None,
+                        help="Central OAuth2 client secret (sets CENTRAL_CLIENT_SECRET).")
+    parser.add_argument("--glp-client-id", dest="glp_client_id", default=None,
+                        help="GreenLake OAuth2 client ID (sets GREENLAKE_CLIENT_ID).")
+    parser.add_argument("--glp-client-secret", dest="glp_client_secret", default=None,
+                        help="GreenLake OAuth2 client secret (sets GREENLAKE_CLIENT_SECRET).")
+    parser.add_argument("--read-only", dest="read_only", action="store_true",
+                        help="Refuse mutating Central / GreenLake API calls (sets READ_ONLY=true).")
+    args, _unknown = parser.parse_known_args()
+    if args.central_url:
+        os.environ["CENTRAL_BASE_URL"] = args.central_url
+    if args.client_id:
+        os.environ["CENTRAL_CLIENT_ID"] = args.client_id
+    if args.client_secret:
+        os.environ["CENTRAL_CLIENT_SECRET"] = args.client_secret
+    if args.glp_client_id:
+        os.environ["GREENLAKE_CLIENT_ID"] = args.glp_client_id
+    if args.glp_client_secret:
+        os.environ["GREENLAKE_CLIENT_SECRET"] = args.glp_client_secret
+    if args.read_only:
+        os.environ["READ_ONLY"] = "true"
+
+
+_parse_server_args()
 settings = load_settings()
 
-# ── Validate Central credentials before accepting connections ──────────
-if not settings.has_credentials:
-    logger.error(
-        "startup_failed",
-        reason="Missing credentials. Set CENTRAL_BASE_URL, CENTRAL_CLIENT_ID, "
-        "CENTRAL_CLIENT_SECRET in your .env file. See .env.example.",
+# ── Credential gate: connected vs discovery-only mode ─────────────────
+# When CENTRAL_BASE_URL / CENTRAL_CLIENT_ID / CENTRAL_CLIENT_SECRET are all
+# present we run in connected mode and validate the token up front. With
+# no credentials the server starts in *discovery-only* mode: it serves the
+# knowledge DB (graph queries, embedded API catalog) and script CRUD, but
+# does not register the tools that talk to live Central / GreenLake. This
+# supports the workflow where an agent designs API calls and writes scripts
+# the user reviews before running against a real environment.
+_offline_mode = not settings.has_credentials
+client: CentralClient | None = None
+if _offline_mode:
+    logger.info(
+        "discovery_only_mode_active",
+        hint=(
+            "No Central credentials configured. The server is running in "
+            "discovery-only mode: query_graph, write_graph, list_scripts, "
+            "get_script_content, and save_script are available; "
+            "call_central_api, call_greenlake_api, and execute_script are not. "
+            "Pass --central-url / --client-id / --client-secret (or the matching "
+            "CENTRAL_* env vars) to enable connected mode."
+        ),
     )
-    sys.exit(1)
-
-try:
-    client = CentralClient(
-        settings.central_base_url,
-        settings.central_client_id,
-        settings.central_client_secret,
-    )
-    client.validate()
-    logger.info("credentials_validated")
-except Exception as exc:
-    logger.error(
-        "startup_failed",
-        reason="Credential validation failed — could not obtain OAuth2 token.",
-        error=str(exc),
-    )
-    sys.exit(1)
+else:
+    try:
+        client = CentralClient(
+            settings.central_base_url,
+            settings.central_client_id,
+            settings.central_client_secret,
+        )
+        client.validate()
+        logger.info("credentials_validated")
+    except Exception as exc:
+        logger.error(
+            "startup_failed",
+            reason="Credential validation failed — could not obtain OAuth2 token.",
+            error=str(exc),
+        )
+        sys.exit(1)
 
 # ── Download knowledge DB from GitHub release (if configured) ─────────
 # Try to download knowledge DB before initializing graph
@@ -145,6 +213,7 @@ mcp = FastMCP(
     instructions=build_instructions(
         read_only=settings.read_only,
         api_tree=_api_tree_text,
+        offline_mode=_offline_mode,
     ),
 )
 
@@ -153,9 +222,11 @@ ipc_server = GraphIPCServer(settings.graph_ipc_socket, graph_manager)
 ipc_server.start()
 atexit.register(ipc_server.stop)
 
-# ── Optionally initialize GreenLake client ────────────────────────────
+# ── Optionally initialize GreenLake client ────────────────────────────────
 glp_client: GreenLakeClient | None = None
-if settings.has_glp_credentials:
+if _offline_mode:
+    logger.info("greenlake_disabled", reason="discovery_only_mode")
+elif settings.has_glp_credentials:
     try:
         glp_client = GreenLakeClient(
             settings.glp_base_url,
@@ -304,24 +375,41 @@ def _bg_auto_run_seeds():
 
 
 # Register all components
-register_execution_tools(mcp, settings)
+# In discovery-only mode we deliberately omit the tools that need live
+# Central / GreenLake credentials (call_central_api, call_greenlake_api)
+# and the execute_script tool — the agent designs and saves scripts that
+# the user reviews before running in a connected workspace.
 register_graph_tools(mcp, settings, graph_manager)
 register_script_tools(mcp, settings, graph_manager)
-register_api_call_tools(mcp, settings, client, graph_manager)
-if glp_client is not None:
-    register_greenlake_api_call_tools(mcp, settings, glp_client, graph_manager)
+if _offline_mode:
+    logger.info(
+        "connected_tools_disabled",
+        reason="discovery_only_mode",
+        disabled=["execute_script", "call_central_api", "call_greenlake_api"],
+    )
 else:
-    logger.info("greenlake_tools_disabled", reason="GreenLake credentials not configured")
+    register_execution_tools(mcp, settings)
+    register_api_call_tools(mcp, settings, client, graph_manager)
+    if glp_client is not None:
+        register_greenlake_api_call_tools(mcp, settings, glp_client, graph_manager)
+    else:
+        logger.info("greenlake_tools_disabled", reason="GreenLake credentials not configured")
 register_resources(mcp, settings, graph_manager)
 register_api_catalog_resource(mcp, settings, graph_manager)
 register_graph_resources(mcp, graph_manager, lambda: _seed_status)
 register_prompts(mcp, graph_manager)
 
-# Start auto-run seeds in background AFTER tools are registered
-threading.Thread(target=_bg_auto_run_seeds, daemon=True).start()
+# Start auto-run seeds in background AFTER tools are registered. Skipped in
+# discovery-only mode because seeds populate the domain graph from live
+# Central / GreenLake APIs.
+if _offline_mode:
+    logger.info("auto_run_seeds_skipped", reason="discovery_only_mode")
+else:
+    threading.Thread(target=_bg_auto_run_seeds, daemon=True).start()
 
 logger.info(
     "server_ready",
+    mode="discovery_only" if _offline_mode else "connected",
     credentials_configured=settings.has_credentials,
     glp_configured=glp_client is not None,
     knowledge_db_loaded=knowledge_downloaded,

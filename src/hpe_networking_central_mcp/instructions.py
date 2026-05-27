@@ -195,6 +195,35 @@ _API_TREE_HEADER = """\
 """
 
 
+_DISCOVERY_ONLY_BANNER = """🔎 DISCOVERY-ONLY MODE ACTIVE 🔎
+
+This MCP server is running WITHOUT Central / GreenLake credentials. It
+cannot reach a live HPE Aruba Networking Central tenant in this session.
+
+The following tools are NOT registered and MUST NOT be referenced:
+  • call_central_api, call_greenlake_api  — no live API access
+  • execute_script                          — no script runner
+
+The following tools ARE available and form your entire workspace:
+  • query_graph, write_graph  — the embedded knowledge DB
+    (graph schema + full OpenAPI surface as ApiEndpoint / Parameter /
+    RequestBody / Response / SchemaComponent / Property nodes).
+  • list_scripts, get_script_content, save_script — read existing seed
+    scripts and persist new ones for the user to review.
+
+Your job in this mode is to help the user *design* automation: use the
+graph + the embedded API catalog (below) to discover the right endpoints,
+read the seed-script library for patterns, and produce well-structured
+scripts via save_script. The user will review every script and run it
+later in a connected workspace. Do not pretend live data is available
+and do not invent device inventories — base every answer on the graph
+schema, the API catalog, and the saved scripts.
+
+────────────────────────────────────────────────────────────────────────
+
+"""
+
+
 _READONLY_BANNER = """⚠️ READ_ONLY MODE ACTIVE ⚠️
 
 This MCP server has been started with READ_ONLY=true. Network-side
@@ -223,11 +252,21 @@ inspection and reporting are permitted.
 """
 
 
-def build_instructions(*, read_only: bool, api_tree: str | None = None) -> str:
+def build_instructions(
+    *,
+    read_only: bool,
+    api_tree: str | None = None,
+    offline_mode: bool = False,
+) -> str:
     """Return the MCP server instructions string.
 
     When ``read_only`` is true, the READ_ONLY banner is prepended so the
     model is explicitly informed that mutating operations are not allowed.
+
+    When ``offline_mode`` is true, the DISCOVERY_ONLY banner is prepended
+    instead so the model knows the live-API and script-execution tools are
+    not registered in this session and that its job is to draft API calls
+    and scripts the user will run later in a connected workspace.
 
     When ``api_tree`` is provided, the rendered path-tree of all API
     endpoints is appended so the agent can browse the catalog without
@@ -237,6 +276,8 @@ def build_instructions(*, read_only: bool, api_tree: str | None = None) -> str:
     text = _BASE_INSTRUCTIONS
     if api_tree:
         text = text + _API_TREE_HEADER + api_tree
+    if offline_mode:
+        return _DISCOVERY_ONLY_BANNER + text
     if read_only:
         return _READONLY_BANNER + text
     return text
