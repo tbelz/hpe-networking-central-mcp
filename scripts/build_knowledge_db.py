@@ -142,10 +142,15 @@ def _load_cached_specs_sample(cache_dir: Path, n: int) -> tuple[list[dict], dict
     import yaml  # type: ignore  # noqa: PLC0415
     specs: list[dict] = []
     sync_health: dict = {}
-    for provider in ("central", "glp"):
+    # Keep sync_health keys aligned with _sync_specs ("central", "greenlake")
+    # so manifest.json's schema is identical between full and --sample builds.
+    # The on-disk cache layout still uses ``glp/`` and _spec_source stays
+    # "glp" to match the full path.
+    providers = (("central", "central"), ("glp", "greenlake"))
+    for provider, health_key in providers:
         provider_dir = cache_dir / provider
         if not provider_dir.is_dir():
-            sync_health[provider] = {"status": "error", "spec_count": 0, "coverage": 0.0,
+            sync_health[health_key] = {"status": "error", "spec_count": 0, "coverage": 0.0,
                                       "error": f"no cache at {provider_dir}"}
             continue
         files = sorted(provider_dir.rglob("*.json")) + sorted(provider_dir.rglob("*.yaml"))
@@ -176,7 +181,7 @@ def _load_cached_specs_sample(cache_dir: Path, n: int) -> tuple[list[dict], dict
             paths = spec.get("paths")
             if isinstance(paths, dict) and len(paths) > per_spec_cap:
                 spec["paths"] = dict(list(paths.items())[:per_spec_cap])
-        sync_health[provider] = {"status": "ok", "spec_count": loaded, "coverage": 1.0,
+        sync_health[health_key] = {"status": "ok", "spec_count": loaded, "coverage": 1.0,
                                   "note": f"--sample {n} (loaded {loaded} files)"}
         print(f"    → {loaded} cached {provider} specs (sample mode)")
     return specs, sync_health

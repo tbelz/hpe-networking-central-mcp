@@ -1504,8 +1504,13 @@ def _emit_property_subgraph(
             )
 
     # additionalProperties → HAS_VALUE_SCHEMA edge to a synthetic
-    # SchemaComponent that holds the value shape.
+    # SchemaComponent that holds the value shape. ``True`` and ``{}`` both
+    # mean "free-form map of any"; normalise both to an empty dict so the
+    # synthetic value component exists and bodyShape='map' (set in
+    # _compute_body_shape) is never edge-less.
     addl = body.get("additionalProperties")
+    if addl is True:
+        addl = {}
     if isinstance(addl, dict):
         ref = addl.get("$ref")
         if isinstance(ref, str) and ref.startswith("#/components/"):
