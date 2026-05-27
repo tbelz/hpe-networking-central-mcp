@@ -606,7 +606,8 @@ RETURN b.name, b.section
 
 ```cypher
 // Inherited vs directly-defined properties on a composite component:
-// walk one level of COMPOSED_OF to see where each property is declared.
+// walk up to 5 levels of COMPOSED_OF to find every declaring host
+// component (allOf parents and promoted-inline branches).
 MATCH (c:SchemaComponent {name: $name})-[:COMPOSED_OF*0..5]->(host:SchemaComponent)-[:HAS_PROPERTY]->(p:Property)
 RETURN p.name, p.type, p.required,
        CASE WHEN host.component_id = c.component_id THEN 'direct' ELSE host.name END AS source

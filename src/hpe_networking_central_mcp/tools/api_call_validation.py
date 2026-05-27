@@ -242,7 +242,7 @@ def format_validation_error(result: ValidationResult) -> str:
                 "   OR size(p.supportedDeviceTypes) = 0",
                 "RETURN c.name AS host, c.bodyShape AS shape,",
                 "       p.name, p.type, p.required, p.enumValues,",
-                "       p.inheritedFrom, p.inheritedFromChain, p.yangPath",
+                "       p.supportedDeviceTypes, p.yangPath",
                 "ORDER BY c.name, p.required DESC, p.name",
                 "```",
                 "",

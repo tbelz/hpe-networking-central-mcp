@@ -103,6 +103,11 @@ def _anon_component_id(spec_source: str, body: Any) -> str:
 def _component_kind(body: dict) -> str:
     if not isinstance(body, dict):
         return "primitive"
+    # Keep in lockstep with _compute_body_shape: enum-typed schemas are
+    # leaves even when wrapped in a trivial allOf/oneOf/anyOf, otherwise
+    # kind='union' would disagree with bodyShape='primitive' (INV-7).
+    if isinstance(body.get("enum"), list) and body["enum"]:
+        return "primitive"
     for kw in ("oneOf", "anyOf", "allOf"):
         if isinstance(body.get(kw), list) and body[kw]:
             return "union"
@@ -1293,7 +1298,11 @@ def _compute_body_shape(body: dict) -> str:
         return "allOf-composite"
     if isinstance(body.get("properties"), dict) and body["properties"]:
         return "object"
-    if body.get("additionalProperties"):
+    # ``additionalProperties`` may legitimately be ``{}`` (free-form map of
+    # any), which is falsy in Python; treat anything other than absent/False
+    # as a map shape so HAS_VALUE_SCHEMA emission and bodyShape stay aligned.
+    ap = body.get("additionalProperties")
+    if ap is True or isinstance(ap, dict):
         return "map"
     t = body.get("type")
     if t == "object":

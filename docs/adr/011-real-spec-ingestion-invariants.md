@@ -77,8 +77,8 @@ satisfy:
 | INV-2 | `kind = 'primitive'` rows never carry object/union bodies. |
 | INV-3 | `component_id` is globally unique (no duplicate PK rows). |
 | INV-5 | No `SchemaComponent` declares two `HAS_PROPERTY` edges to leaves with the same name (catches re-introduced allOf flattening). |
-| INV-6 | Every named `kind = 'object'` `SchemaComponent` has ≥1 `HAS_PROPERTY` edge directly OR reachable via `COMPOSED_OF*1..N`. |
-| INV-7 | `SchemaComponent.bodyShape` agrees with `kind` (object/union/map/array primitives never mis-tagged). |
+| INV-6 | Every named `kind = 'object'` `SchemaComponent` that declares `properties` has ≥1 direct outgoing `HAS_PROPERTY` edge. Genuinely empty object schemas (`{"type":"object"}` with no `properties`) are exempt. |
+| INV-7 | `SchemaComponent.bodyShape` agrees with `kind` for the object/union/map mismatch cases currently checked (any `bodyShape ∈ {object, union-*, allOf-composite, map}` paired with `kind='primitive'`, or `bodyShape='primitive'` paired with `kind='object'`). |
 
 INV-4 (inheritedFromChain resolution) was retired together with the
 `inheritedFrom*` columns; leaf reachability is now expressed structurally

@@ -232,7 +232,8 @@ def _print_build_report(db: lb.Database, schema_stats: dict, violations: list) -
     print(f"  Health:")
     print(f"    properties / named component  {props_per_named:>6.2f}")
     print(f"    named objects with no fields  {empty_named} ({empty_pct:.1f}%)")
-    print(f"    invariant violations          {len(violations)} of {6}")
+    from hpe_networking_central_mcp.graph.invariants import _CHECKS
+    print(f"    invariant violations          {len(violations)} of {len(_CHECKS)}")
     del conn
 
 
@@ -800,9 +801,10 @@ def main() -> None:
                         help="Skip the post-flush invariant audit entirely.")
     parser.add_argument("--sample", type=int, default=0, metavar="N",
                         help="Dev/CI shortcut: skip spec sync, load cached specs from "
-                             "<output-dir>/spec_cache, truncate each provider to the first N "
-                             "endpoints, and run the full pipeline against a tiny graph. "
-                             "Use 0 (default) for the real full build.")
+                             "<output-dir>/spec_cache (falling back to ./build/spec_cache "
+                             "if the per-output cache is empty), truncate each provider to "
+                             "the first N endpoints, and run the full pipeline against a "
+                             "tiny graph. Use 0 (default) for the real full build.")
     args = parser.parse_args()
 
     output_dir: Path = args.output_dir.resolve()
@@ -828,12 +830,14 @@ def main() -> None:
     # 2. Sync API specs
     print("\n[2/6] Refreshing API documentation...")
     if args.sample and args.sample > 0:
-        # Sample mode reads from the *standard* cache populated by a prior
-        # real build, so it never depends on the per-build output cache
-        # being warm.
-        sample_cache = Path("build/spec_cache").resolve()
-        if not sample_cache.is_dir():
-            sample_cache = cache_dir
+        # Prefer the per-output cache so --output-dir is respected; fall
+        # back to the standard ./build/spec_cache populated by a prior
+        # real build when the per-output cache hasn't been warmed yet.
+        sample_cache = cache_dir
+        if not sample_cache.is_dir() or not any(sample_cache.iterdir()):
+            fallback = Path("build/spec_cache").resolve()
+            if fallback.is_dir():
+                sample_cache = fallback
         specs, sync_health = _load_cached_specs_sample(sample_cache, args.sample)
     else:
         specs, sync_health = _sync_specs(cache_dir)
