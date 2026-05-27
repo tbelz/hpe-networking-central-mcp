@@ -793,8 +793,6 @@ _PROPERTY_SCHEMA = pa.schema([
     ("supportedDeviceTypes", pa.list_(pa.string())),
     ("yangPath", pa.string()),
     ("extensionsJson", pa.string()),
-    ("inheritedFrom", pa.string()),
-    ("inheritedFromChain", pa.list_(pa.string())),
     ("readOnly", pa.bool_()),
 ])
 
@@ -1280,6 +1278,13 @@ def _compute_body_shape(body: dict) -> str:
     """
     if not isinstance(body, dict):
         return "primitive"
+    # Enum-typed schemas are primitive scalars even if they carry a
+    # trivial allOf/oneOf wrapper for inheritance metadata. The
+    # allowed values are fully described by `enum`, so classifying
+    # them as composites would force property-edge emission for what
+    # is really a leaf type.
+    if isinstance(body.get("enum"), list) and body["enum"]:
+        return "primitive"
     if isinstance(body.get("oneOf"), list) and body["oneOf"]:
         return "union-oneOf"
     if isinstance(body.get("anyOf"), list) and body["anyOf"]:
@@ -1349,7 +1354,6 @@ def _ensure_component_node(
     emit_property_subgraph: bool = True,
     *,
     resolution_scope: dict | None = None,
-    inherited_chain: tuple[str, ...] = (),
 ) -> str:
     """Buffer the SchemaComponent row + its property subgraph.
 
@@ -1443,7 +1447,6 @@ def _ensure_component_node(
             full_components=full_components,
             stats=stats,
             resolution_scope=resolution_scope,
-            inherited_chain=inherited_chain,
         )
 
     return comp_id
@@ -1462,15 +1465,15 @@ def _emit_property_subgraph(
     full_components: dict,
     stats: dict,
     resolution_scope: dict | None = None,
-    inherited_chain: tuple[str, ...] = (),
 ) -> None:
     """Emit HAS_PROPERTY / COMPOSED_OF / PROPERTY_OF_TYPE / HAS_VALUE_SCHEMA rows.
 
-    Beyond top-level ``properties`` and ``allOf`` flattening, this
-    also promotes inline structural schemas found in ``oneOf`` /
-    ``anyOf`` branches (no ``$ref``) and the value-schema of
-    ``additionalProperties`` so they become first-class
-    SchemaComponents, walkable via ``COMPOSED_OF`` / ``HAS_VALUE_SCHEMA``.
+    Properties live exclusively on the component that declares them.
+    `allOf` / `oneOf` / `anyOf` branches are wired up via `COMPOSED_OF`;
+    consumers walk `(parent)-[:COMPOSED_OF*0..N]->(c)-[:HAS_PROPERTY]->(p)`
+    to gather inherited fields. Inline branches without a `$ref` are
+    promoted to synthetic SchemaComponents so their fields are reachable
+    via the same traversal instead of stranded in `bodyJson`.
     """
     _req = body.get("required")
     own_required = set(
@@ -1486,7 +1489,6 @@ def _emit_property_subgraph(
                 prop_name=prop_name,
                 prop_body=prop_body if isinstance(prop_body, dict) else {},
                 required=prop_name in own_required,
-                inherited_chain=inherited_chain,
                 full_components=full_components,
                 stats=stats,
                 resolution_scope=resolution_scope,
@@ -1504,28 +1506,7 @@ def _emit_property_subgraph(
             )
             if value_id:
                 batch.add_has_value_schema(parent_component_id, value_id)
-        elif (
-            isinstance(addl.get("properties"), dict)
-            or addl.get("allOf") or addl.get("oneOf") or addl.get("anyOf")
-        ):
-            synth_id = f"{parent_component_id}#additionalProperties"
-            _ensure_inline_component(
-                batch,
-                spec_source=spec_source,
-                synth_id=synth_id,
-                synth_name=f"{parent_component_name}[additionalProperties]",
-                body=addl,
-                full_components=full_components,
-                stats=stats,
-                resolution_scope=resolution_scope,
-                inherited_chain=inherited_chain,
-            )
-            batch.add_has_value_schema(parent_component_id, synth_id)
         else:
-            # Primitive / array value schema (e.g. {"type":"string"}).
-            # Emit a synthetic SchemaComponent so the HAS_VALUE_SCHEMA
-            # contract is preserved for every ``map``-shaped component
-            # and INV-1 doesn't flag the parent as undecomposed.
             synth_id = f"{parent_component_id}#additionalProperties"
             _ensure_inline_component(
                 batch,
@@ -1536,7 +1517,6 @@ def _emit_property_subgraph(
                 full_components=full_components,
                 stats=stats,
                 resolution_scope=resolution_scope,
-                inherited_chain=inherited_chain,
             )
             batch.add_has_value_schema(parent_component_id, synth_id)
 
@@ -1549,137 +1529,33 @@ def _emit_property_subgraph(
                 continue
             ref = branch.get("$ref")
             if isinstance(ref, str):
-                # The referenced component's OWN property subgraph has
-                # an empty chain (it isn't inheriting from anywhere);
-                # ``inherited_chain`` only applies when we *flatten*
-                # its properties into the parent below.
                 target_id = _ensure_component_node(
                     batch, spec_source, ref, full_components, stats,
                     resolution_scope=resolution_scope,
                 )
                 if target_id:
                     batch.add_composed_of(parent_component_id, target_id, kind)
-                if kind == "allOf":
-                    target_body = _follow_ref(ref, full_components, fallback=resolution_scope)
-                    if isinstance(target_body, dict):
-                        branch_name = _name_for_ref(ref)
-                        _flatten_allof_properties(
-                            batch,
-                            spec_source=spec_source,
-                            parent_component_id=parent_component_id,
-                            branch_body=target_body,
-                            inherited_chain=inherited_chain + (branch_name,),
-                            full_components=full_components,
-                            stats=stats,
-                            resolution_scope=resolution_scope,
-                            _visited=frozenset({ref}),
-                        )
-            else:
-                # Inline branch (no $ref): for allOf flatten properties
-                # into the parent; for oneOf/anyOf with structural
-                # content promote to a synthetic SchemaComponent so the
-                # branch shape is walkable, not stranded in bodyJson.
-                if kind == "allOf":
-                    _flatten_allof_properties(
-                        batch,
-                        spec_source=spec_source,
-                        parent_component_id=parent_component_id,
-                        branch_body=branch,
-                        inherited_chain=inherited_chain,
-                        full_components=full_components,
-                        stats=stats,
-                        resolution_scope=resolution_scope,
-                        _visited=frozenset(),
-                    )
-                elif (
-                    isinstance(branch.get("properties"), dict)
-                    or branch.get("allOf") or branch.get("oneOf") or branch.get("anyOf")
-                ):
-                    synth_id = f"{parent_component_id}#{kind}:{idx}"
-                    synth_name = f"{parent_component_name}[{kind}:{idx}]"
-                    _ensure_inline_component(
-                        batch,
-                        spec_source=spec_source,
-                        synth_id=synth_id,
-                        synth_name=synth_name,
-                        body=branch,
-                        full_components=full_components,
-                        stats=stats,
-                        resolution_scope=resolution_scope,
-                        inherited_chain=inherited_chain,
-                    )
-                    batch.add_composed_of(parent_component_id, synth_id, kind)
-
-
-def _flatten_allof_properties(
-    batch: _Batch,
-    *,
-    spec_source: str,
-    parent_component_id: str,
-    branch_body: dict,
-    inherited_chain: tuple[str, ...],
-    full_components: dict,
-    stats: dict,
-    resolution_scope: dict | None = None,
-    _visited: frozenset[str] = frozenset(),
-) -> None:
-    _req = branch_body.get("required")
-    branch_required = set(
-        v for v in (_req if isinstance(_req, list) else []) if isinstance(v, str)
-    )
-    props = branch_body.get("properties") or {}
-    if isinstance(props, dict):
-        for prop_name, prop_body in props.items():
-            _emit_one_property(
-                batch,
-                spec_source=spec_source,
-                parent_component_id=parent_component_id,
-                prop_name=prop_name,
-                prop_body=prop_body if isinstance(prop_body, dict) else {},
-                required=prop_name in branch_required,
-                inherited_chain=inherited_chain,
-                full_components=full_components,
-                stats=stats,
-                resolution_scope=resolution_scope,
-            )
-
-    nested = branch_body.get("allOf")
-    if isinstance(nested, list):
-        for sub in nested:
-            if not isinstance(sub, dict):
-                continue
-            ref = sub.get("$ref")
-            if isinstance(ref, str):
-                if ref in _visited:
-                    continue
-                target_body = _follow_ref(ref, full_components, fallback=resolution_scope)
-                if isinstance(target_body, dict):
-                    nested_name = _name_for_ref(ref) or (
-                        inherited_chain[-1] if inherited_chain else ""
-                    )
-                    _flatten_allof_properties(
-                        batch,
-                        spec_source=spec_source,
-                        parent_component_id=parent_component_id,
-                        branch_body=target_body,
-                        inherited_chain=inherited_chain + (nested_name,),
-                        full_components=full_components,
-                        stats=stats,
-                        resolution_scope=resolution_scope,
-                        _visited=_visited | {ref},
-                    )
-            else:
-                _flatten_allof_properties(
+            elif (
+                isinstance(branch.get("properties"), dict)
+                or branch.get("allOf") or branch.get("oneOf") or branch.get("anyOf")
+                or isinstance(branch.get("additionalProperties"), dict)
+            ):
+                # Inline branch with structural content: promote to a
+                # synthetic SchemaComponent so its fields are reachable
+                # via COMPOSED_OF traversal.
+                synth_id = f"{parent_component_id}#{kind}:{idx}"
+                synth_name = f"{parent_component_name}[{kind}:{idx}]"
+                _ensure_inline_component(
                     batch,
                     spec_source=spec_source,
-                    parent_component_id=parent_component_id,
-                    branch_body=sub,
-                    inherited_chain=inherited_chain,
+                    synth_id=synth_id,
+                    synth_name=synth_name,
+                    body=branch,
                     full_components=full_components,
                     stats=stats,
                     resolution_scope=resolution_scope,
-                    _visited=_visited,
                 )
+                batch.add_composed_of(parent_component_id, synth_id, kind)
 
 
 def _emit_one_property(
@@ -1690,7 +1566,6 @@ def _emit_one_property(
     prop_name: str,
     prop_body: dict,
     required: bool,
-    inherited_chain: tuple[str, ...],
     full_components: dict,
     stats: dict,
     resolution_scope: dict | None = None,
@@ -1730,10 +1605,7 @@ def _emit_one_property(
 
     extensions_json = json.dumps(extensions, sort_keys=True) if extensions else ""
 
-    inherited_from = inherited_chain[-1] if inherited_chain else ""
     property_id = f"{parent_component_id}#prop:{prop_name}"
-    if inherited_from:
-        property_id = f"{property_id}@{inherited_from}"
 
     if batch.add_property({
         "property_id": property_id,
@@ -1747,8 +1619,6 @@ def _emit_one_property(
         "supportedDeviceTypes": sdt,
         "yangPath": yang_path,
         "extensionsJson": extensions_json,
-        "inheritedFrom": inherited_from,
-        "inheritedFromChain": list(inherited_chain),
         "readOnly": read_only,
     }):
         stats["properties"] = stats.get("properties", 0) + 1
@@ -1808,7 +1678,6 @@ def _emit_one_property(
             full_components=full_components,
             stats=stats,
             resolution_scope=resolution_scope,
-            inherited_chain=inherited_chain,
         )
         batch.add_property_of_type(property_id, synth_id)
 
@@ -1823,7 +1692,6 @@ def _ensure_inline_component(
     full_components: dict,
     stats: dict,
     resolution_scope: dict | None = None,
-    inherited_chain: tuple[str, ...] = (),
 ) -> None:
     """Materialise an inline schema (no `$ref`) as a SchemaComponent and
     recurse into its property subgraph.
@@ -1873,5 +1741,4 @@ def _ensure_inline_component(
         full_components=full_components,
         stats=stats,
         resolution_scope=resolution_scope,
-        inherited_chain=inherited_chain,
     )

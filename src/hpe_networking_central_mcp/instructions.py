@@ -13,10 +13,12 @@ direct API reads and reusable Python scripts.
 
 ## How to work
 
-1. **Understand the network**: Read the graph://schema resource to learn the graph model,
-   then use query_graph(cypher) to explore the hierarchy: Org → SiteCollections → Sites →
+1. **Understand the network**: The `query_graph(cypher)` tool description embeds
+   the graph schema cheat-sheet and the canonical Cypher patterns; start there.
+   Use `query_graph` to explore the hierarchy: Org → SiteCollections → Sites →
    Devices. The graph is your structural map — use it for navigation, blast-radius analysis,
-   cross-site comparison, and dependency tracking.
+   cross-site comparison, and dependency tracking. The `graph://schema` resource is
+   also available for richer clients but is not required reading.
 
    **Graph vs live state (important)**: The graph is the authoritative map of
    *structure* (hierarchy, topology, OpenAPI schema). Operational fields on
@@ -50,8 +52,11 @@ direct API reads and reusable Python scripts.
 
 2. **Discover APIs (graph-first)**: The OpenAPI surface is fully decomposed into the
    graph as `ApiEndpoint`, `Parameter`, `RequestBody`, `Response`, `SchemaComponent`,
-   and `Property` nodes. Read `graph://schema` for the full schema and canned Cypher
-   patterns. Two complementary surfaces exist:
+   and `Property` nodes. The `query_graph` tool description has the schema cheat-sheet,
+   the canonical request-body walk pattern, and instructions for using the pre-built FTS
+   indexes via `CALL QUERY_FTS_INDEX(...)` for keyword-based endpoint discovery (use
+   FTS when path-grep fails — e.g. VRF profiles live under `/stacks/` and only the
+   description mentions "vrf"). Two complementary surfaces exist:
 
      • The `api://endpoint-catalog` resource (also embedded below in these
        instructions) — a category-grouped path-tree of every available
@@ -59,9 +64,10 @@ direct API reads and reusable Python scripts.
      • `query_graph(cypher)` — for any structural question about an endpoint
        (required parameters, request body fields, response shape, what device
        types support a given Property, transitive `$ref` walks, cross-endpoint
-       comparisons, etc.). The graph is the source of truth. `allOf` branches
-       are flattened at seed time, so a single Cypher pattern returns every
-       inherited leaf property.
+       comparisons, etc.) and for FTS-based discovery. Properties live only on
+       the component that declares them; walk
+       `(root)-[:COMPOSED_OF*0..N]->(c)-[:HAS_PROPERTY]->(p)` to gather
+       inherited fields from allOf parents and promoted-inline branches.
 
 3. **Pre-flight validation (enforced)**: Every `call_central_api` and
    `call_greenlake_api` invocation is validated against the graph before the
@@ -134,9 +140,10 @@ Scripts use `from central_helpers import api, glp, graph` — no OAuth2 boilerpl
 - **`query_graph(cypher)`**: the source of truth for everything else —
   required parameters and body fields for a specific endpoint, cross-endpoint
   structural comparisons, transitive `$ref` walks, all properties supporting
-  a given device type, and graph navigation (Org/Site/Device hierarchy,
-  topology). Read `graph://schema` first — it includes canned Cypher
-  patterns for the most common questions.
+  a given device type, graph navigation (Org/Site/Device hierarchy,
+  topology), and FTS-based keyword discovery via
+  `CALL QUERY_FTS_INDEX('ApiEndpoint','api_fts', $q) YIELD node, score`. The
+  tool description embeds the schema cheat-sheet and canned Cypher patterns.
 
 ## MCP Resources
 
@@ -150,7 +157,8 @@ Read these resources for context — they are always up to date:
 - `graph://schema` — Full graph schema: node types (including the API
   subgraph: `ApiEndpoint`, `Parameter`, `RequestBody`, `Response`,
   `SchemaComponent`, `Property`), properties, relationships, row counts,
-  and example Cypher queries. **Read this first** before writing any Cypher.
+  and example Cypher queries. The `query_graph` tool description already
+  embeds the most-used cheat-sheet; read this resource for the full reference.
 - `graph://seed-status` — Startup seed execution results. Check this if graph data seems
   incomplete or queries return empty results.
 - `docs://script-writing-guide` — Script template, authentication pattern, available helpers.
@@ -164,7 +172,10 @@ Before writing ANY script you MUST complete these steps IN ORDER:
    instructions below) for the right `METHOD /path`. NEVER guess API paths.
 3. Use `query_graph` against the `Parameter`/`RequestBody`/`SchemaComponent`/
    `Property` subgraph to learn the exact required parameters, body fields,
-   types, and enums. See `graph://schema` for canned patterns.
+   types, and enums. The `query_graph` tool description has the schema
+   cheat-sheet and canonical patterns; combine with
+   `CALL QUERY_FTS_INDEX('ApiEndpoint','api_fts', '<keyword>')` when you only
+   know a topic word, not the path.
 4. Only THEN write the script using the discovered endpoints and schemas.
 
 Skipping these steps leads to wrong endpoints, wrong parameter names, and wasted iterations.

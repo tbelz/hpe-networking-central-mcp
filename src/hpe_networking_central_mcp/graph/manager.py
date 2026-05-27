@@ -438,20 +438,18 @@ required fields without ever materialising a full skeleton.
   descending to properties), `bodyJson` (full serialised component
   for deep inspection; empty when `kind = 'unresolved'`, i.e. an
   unresolvable `$ref` placeholder).
-- `Property` — one row per leaf property of a `SchemaComponent`
-  (including properties flattened from `allOf` branches). Properties:
+- `Property` — one row per leaf property of a `SchemaComponent`,
+  defined **only on the component that declares it**. Inherited
+  fields are gathered at query time by walking
+  `(parent)-[:COMPOSED_OF*0..N]->(c)-[:HAS_PROPERTY]->(p)`.
+  Properties:
   `property_id` (PK), `parent_component_id`, `name`, `type`, `format`,
   `required`, `enumValues`, `description`, `supportedDeviceTypes`
   (typed list extracted from the `x-supportedDeviceType` vendor
   extension — first-class for filtering), `yangPath` (typed extraction
   of the `x-path` vendor extension), `extensionsJson` (the **full**
   set of `x-*` vendor extensions for that property as a JSON string,
-  including the typed-extracted ones), `inheritedFrom` (empty for
-  properties defined directly on the component, or the name of the
-  `allOf` branch component when the property was flattened up),
-  `inheritedFromChain` (full ancestor chain for nested `allOf`
-  flattening, e.g. `['ParentSchema', 'GrandparentSchema']`),
-  `readOnly` (boolean).
+  including the typed-extracted ones), `readOnly` (boolean).
 - `YangPath` — reverse index of every YANG path appearing on a
   `Property`. Properties: `yangPath` (PK, the full `/ac-foo:bar/...`
   string), `module` (the prefix, e.g. `ac-ntp`).
@@ -464,8 +462,9 @@ required fields without ever materialising a full skeleton.
 - `(RequestBody)-[:BODY_REFERENCES]->(SchemaComponent)`
 - `(Response)-[:RESPONSE_REFERENCES]->(SchemaComponent)`
 - `(SchemaComponent)-[:HAS_PROPERTY]->(Property)` — every leaf
-  property reachable from the component (direct or flattened from an
-  `allOf` branch).
+  property **declared directly** on the component. Walk
+  `COMPOSED_OF*0..N` first to reach inherited fields from `allOf`
+  parents or promoted inline branches.
 - `(Property)-[:PROPERTY_OF_TYPE]->(SchemaComponent)` — when a
   property's value is itself a named component (`$ref` or
   `items.$ref`).
@@ -506,7 +505,7 @@ WHERE $deviceType = ''
    OR size(p.supportedDeviceTypes) = 0
 RETURN c.name AS host, c.bodyShape AS shape,
        p.name, p.type, p.required, p.enumValues,
-       p.inheritedFrom, p.inheritedFromChain, p.yangPath
+       p.yangPath
 ORDER BY c.name, p.required DESC, p.name
 ```
 
@@ -552,9 +551,9 @@ RETURN e.method, e.path
 
 ```cypher
 // Headline use case: which fields of an NTP profile apply to Switch CX?
-MATCH (c:SchemaComponent {name: $componentName})-[:HAS_PROPERTY]->(p:Property)
+MATCH (c:SchemaComponent {name: $componentName})-[:COMPOSED_OF*0..5]->(host:SchemaComponent)-[:HAS_PROPERTY]->(p:Property)
 WHERE 'Switch CX' IN p.supportedDeviceTypes
-RETURN p.name, p.type, p.required, p.yangPath, p.inheritedFrom
+RETURN host.name AS declaredOn, p.name, p.type, p.required, p.yangPath
 ORDER BY p.name
 ```
 
@@ -606,17 +605,18 @@ RETURN b.name, b.section
 ```
 
 ```cypher
-// Inherited vs directly-defined properties on a composite component
-MATCH (c:SchemaComponent {name: $name})-[:HAS_PROPERTY]->(p:Property)
+// Inherited vs directly-defined properties on a composite component:
+// walk one level of COMPOSED_OF to see where each property is declared.
+MATCH (c:SchemaComponent {name: $name})-[:COMPOSED_OF*0..5]->(host:SchemaComponent)-[:HAS_PROPERTY]->(p:Property)
 RETURN p.name, p.type, p.required,
-       CASE WHEN p.inheritedFrom = '' THEN 'direct' ELSE p.inheritedFrom END AS source
+       CASE WHEN host.component_id = c.component_id THEN 'direct' ELSE host.name END AS source
 ORDER BY source, p.name
 ```
 
 When you need a field-by-field guide for assembling a call body
-(request or response), use the following canned patterns. `allOf`
-branches are flattened at seed time, so a single `HAS_PROPERTY`
-traversal returns every inherited leaf property.
+(request or response), use the following canned patterns. Inherited
+fields live on parent components; walk `COMPOSED_OF*0..N` before
+`HAS_PROPERTY` to gather them.
 
 ```cypher
 // Required parameters for a specific endpoint
@@ -641,7 +641,7 @@ WHERE $deviceType = ''
    OR size(p.supportedDeviceTypes) = 0
 RETURN c.name AS host, c.bodyShape AS shape,
        p.name, p.type, p.required, p.enumValues,
-       p.inheritedFrom, p.inheritedFromChain, p.supportedDeviceTypes
+       p.supportedDeviceTypes
 ORDER BY c.name, p.required DESC, p.name
 ```
 

@@ -71,6 +71,7 @@ def check_named_components_decompose(conn) -> InvariantViolation | None:
           AND c.kind <> 'primitive'
           AND c.kind <> 'unresolved'
           AND c.bodyShape IN ['object', 'union-oneOf', 'union-anyOf', 'allOf-composite', 'map']
+          AND NOT (c.bodyShape = 'object' AND NOT c.bodyJson CONTAINS '"properties"')
           AND {_NAMED_COMPONENT_FILTER}
           AND NOT EXISTS {{ MATCH (c)-[:HAS_PROPERTY]->() }}
           AND NOT EXISTS {{ MATCH (c)-[:COMPOSED_OF]->() }}
@@ -142,31 +143,103 @@ def check_no_duplicate_component_ids(conn) -> InvariantViolation | None:
     )
 
 
-def check_inherited_chain_resolves(conn) -> InvariantViolation | None:
-    """INV-4: every name in a Property's ``inheritedFromChain`` must
-    correspond to at least one ``SchemaComponent`` row by name. A
-    dangling reference would mean we dropped a component without
-    cleaning its consumers.
+def check_no_duplicate_property_names_per_parent(conn) -> InvariantViolation | None:
+    """INV-5: ``HAS_PROPERTY`` must be unique on ``(parent, name)``.
+
+    Duplicates indicate the emitter wrote a property twice for the same
+    declaring component (the regression class that motivated dropping
+    the allOf flattening — inherited copies stamped onto every consumer).
     """
     rows = _rows(
         conn,
         """
-        MATCH (p:Property)
-        WHERE size(p.inheritedFromChain) > 0
-        UNWIND p.inheritedFromChain AS anc
-        WITH DISTINCT anc
-        WHERE NOT EXISTS {
-            MATCH (c:SchemaComponent {name: anc})
-        }
-        RETURN anc AS missing_name
+        MATCH (c:SchemaComponent)-[:HAS_PROPERTY]->(p:Property)
+        WITH c.component_id AS parent_id, p.name AS pname, COUNT(p) AS n
+        WHERE n > 1
+        RETURN parent_id, pname, n
+        ORDER BY n DESC
         LIMIT 25
         """,
     )
     if not rows:
         return None
     return InvariantViolation(
-        invariant="INV-4",
-        detail=f"{len(rows)} inheritedFromChain entries reference unknown components",
+        invariant="INV-5",
+        detail=f"{len(rows)} (component, property) pairs have duplicate HAS_PROPERTY edges",
+        sample=rows,
+    )
+
+
+def check_named_object_components_have_properties(conn) -> InvariantViolation | None:
+    """INV-6: every named ``SchemaComponent`` with ``bodyShape='object'``
+    and a non-empty ``properties`` map must have at least one outgoing
+    ``HAS_PROPERTY`` edge (object schemas must expose their fields).
+    Genuinely empty object schemas (``{"type":"object"}`` with no
+    properties) are allowed — they're valid OAS for empty payloads.
+    Map-shaped or pure-union shapes are covered by INV-1's
+    ``HAS_VALUE_SCHEMA`` / ``COMPOSED_OF`` clauses.
+    """
+    rows = _rows(
+        conn,
+        f"""
+        MATCH (c:SchemaComponent)
+        WHERE c.bodyShape = 'object'
+          AND c.bodyJson <> ''
+          AND c.bodyJson CONTAINS '"properties"'
+          AND c.kind <> 'unresolved'
+          AND {_NAMED_COMPONENT_FILTER}
+          AND NOT EXISTS {{ MATCH (c)-[:HAS_PROPERTY]->() }}
+        RETURN c.component_id AS component_id,
+               c.name AS name,
+               c.section AS section,
+               size(c.bodyJson) AS bodyLen
+        ORDER BY bodyLen DESC
+        LIMIT 25
+        """,
+    )
+    if not rows:
+        return None
+    return InvariantViolation(
+        invariant="INV-6",
+        detail=(
+            f"{len(rows)} named object SchemaComponents have no HAS_PROPERTY edges "
+            "(properties dropped during emission)"
+        ),
+        sample=rows,
+    )
+
+
+def check_body_shape_kind_agreement(conn) -> InvariantViolation | None:
+    """INV-7: ``bodyShape`` must agree with ``kind``.
+
+    Catches drift between the two classifiers — e.g. a component tagged
+    ``bodyShape='union-oneOf'`` but ``kind='primitive'`` is internally
+    inconsistent and confuses any agent filtering by either column.
+    """
+    rows = _rows(
+        conn,
+        """
+        MATCH (c:SchemaComponent)
+        WHERE c.bodyJson <> ''
+          AND (
+                (c.bodyShape = 'object'          AND c.kind = 'primitive')
+             OR (c.bodyShape = 'union-oneOf'     AND c.kind = 'primitive')
+             OR (c.bodyShape = 'union-anyOf'     AND c.kind = 'primitive')
+             OR (c.bodyShape = 'allOf-composite' AND c.kind = 'primitive')
+             OR (c.bodyShape = 'map'             AND c.kind = 'primitive')
+             OR (c.bodyShape = 'primitive'       AND c.kind = 'object')
+          )
+        RETURN c.component_id AS component_id,
+               c.bodyShape AS bodyShape,
+               c.kind AS kind
+        LIMIT 25
+        """,
+    )
+    if not rows:
+        return None
+    return InvariantViolation(
+        invariant="INV-7",
+        detail=f"{len(rows)} SchemaComponents have bodyShape/kind disagreement",
         sample=rows,
     )
 
@@ -175,7 +248,9 @@ _CHECKS = (
     check_named_components_decompose,
     check_no_primitive_with_object_body,
     check_no_duplicate_component_ids,
-    check_inherited_chain_resolves,
+    check_no_duplicate_property_names_per_parent,
+    check_named_object_components_have_properties,
+    check_body_shape_kind_agreement,
 )
 
 
@@ -199,7 +274,7 @@ def assert_graph_invariants(conn, *, strict: bool = True) -> list[InvariantViola
 def format_report(violations: list[InvariantViolation]) -> str:
     """Pretty-print for the build script log."""
     if not violations:
-        return "✓ graph invariants OK (4/4 checks passed)"
+        return f"✓ graph invariants OK ({len(_CHECKS)}/{len(_CHECKS)} checks passed)"
     lines = [f"⚠ {len(violations)} graph invariant(s) violated:"]
     for v in violations:
         lines.append(f"  • {v.invariant}: {v.detail}")

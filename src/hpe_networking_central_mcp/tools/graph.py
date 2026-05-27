@@ -237,14 +237,114 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
     def query_graph(cypher: str, parameters: str = "{}") -> str:
         """Execute a read-only Cypher query against the Central graph (incl. the API schema subgraph).
 
-        The graph models both the Aruba Central hierarchy / physical L2 topology
-        AND the OpenAPI surface (ApiEndpoint, Parameter, RequestBody, Response,
-        SchemaComponent, plus REFERENCES edges). This is the
-        primary tool for API discovery and structural exploration. Read
-        ``graph://schema`` for the full schema, row counts, and canned API
-        discovery patterns.
+        The graph models the Aruba Central hierarchy / physical L2 topology
+        AND the full OpenAPI surface (ApiEndpoint, Parameter, RequestBody,
+        Response, SchemaComponent, Property, YangPath, plus REFERENCES /
+        COMPOSED_OF / HAS_PROPERTY / CONFIGURES_YANG edges). This is the
+        **only** structural discovery tool — there is no separate search
+        endpoint; combine Cypher with FTS (see below) to find what you need.
 
         For write operations (CREATE, MERGE, SET, DELETE), use ``write_graph``.
+
+        ## Node tables (most-used)
+
+        - ``ApiEndpoint(method, path, summary, description, operationId, category)``
+        - ``ApiCategory(name)`` — ``BELONGS_TO_CATEGORY`` from endpoints
+        - ``Parameter(name, location, required, type, inferredHint)``
+        - ``RequestBody`` / ``Response(status)``
+        - ``SchemaComponent(component_id PK, name, section, kind, bodyShape, supportedDeviceTypes, bodyJson)``
+          - ``bodyShape ∈ {object, union-oneOf, union-anyOf, allOf-composite, map, array, primitive, unresolved}``
+          - ``section='inline'`` indicates a synthetic component promoted from an inline
+            allOf/oneOf/anyOf/items branch; its ``component_id`` contains ``#``.
+        - ``Property(property_id PK, parent_component_id, name, type, required,
+          enumValues, supportedDeviceTypes, yangPath, readOnly)``
+        - ``YangPath(yangPath PK, module)``
+        - Live tables: ``Org``, ``SiteCollection``, ``Site``, ``Device``, ``DeviceGroup``, ``UnmanagedDevice``, ``DocSection``, ``Script``.
+
+        ## Relationship tables (most-used)
+
+        - ``(ApiEndpoint)-[:HAS_PARAMETER]->(Parameter)``
+        - ``(ApiEndpoint)-[:HAS_REQUEST_BODY]->(RequestBody)``
+        - ``(ApiEndpoint)-[:HAS_RESPONSE]->(Response)``
+        - ``(RequestBody)-[:BODY_REFERENCES]->(SchemaComponent)``
+        - ``(Response)-[:RESPONSE_REFERENCES]->(SchemaComponent)``
+        - ``(SchemaComponent)-[:COMPOSED_OF {kind}]->(SchemaComponent)`` — allOf/oneOf/anyOf
+        - ``(SchemaComponent)-[:HAS_PROPERTY]->(Property)`` — direct fields only
+        - ``(SchemaComponent)-[:HAS_VALUE_SCHEMA]->(SchemaComponent)`` — map value shape
+        - ``(Property)-[:PROPERTY_OF_TYPE]->(SchemaComponent)`` — ref'd nested shape
+        - ``(Property)-[:PROPERTY_AT_YANG]->(YangPath)``
+        - ``(ApiEndpoint)-[:CONFIGURES_YANG]->(YangPath)`` — derived shortcut
+
+        ## CANONICAL PATTERN: walk a request body's fields
+
+        **Properties live only on the component that declares them.** Walk
+        ``COMPOSED_OF*0..N`` first to gather inherited fields from allOf
+        parents and promoted-inline branches. Use this instead of reading
+        ``bodyJson`` strings:
+
+        ```cypher
+        MATCH (e:ApiEndpoint {method: $m, path: $p})
+              -[:HAS_REQUEST_BODY]->(:RequestBody)
+              -[:BODY_REFERENCES]->(root:SchemaComponent)
+        MATCH (root)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)
+              -[:HAS_PROPERTY]->(p:Property)
+        RETURN c.name AS declaredOn, p.name, p.type, p.required,
+               p.enumValues, p.supportedDeviceTypes, p.yangPath
+        ORDER BY c.name, p.required DESC, p.name
+        ```
+
+        Filter ``WHERE $deviceType IN p.supportedDeviceTypes OR size(p.supportedDeviceTypes)=0``
+        to scope to one platform (e.g. ``'Switch CX'``).
+
+        ## FTS DISCOVERY (use Cypher, no separate tool)
+
+        Full-text indexes are pre-built. Call them through Cypher with
+        ``CALL QUERY_FTS_INDEX(table, index, query) YIELD node, score``.
+        Use FTS when you need keyword-based discovery (path-grep often misses
+        — e.g. VRF config lives only under ``/stacks/`` because the path
+        doesn't mention "vrf"; the description does):
+
+        ```cypher
+        // Find endpoints mentioning "vrf" anywhere (path, summary, description, operationId)
+        CALL QUERY_FTS_INDEX('ApiEndpoint', 'api_fts', 'vrf')
+        YIELD node, score
+        RETURN node.method, node.path, node.summary, score
+        ORDER BY score DESC LIMIT 25
+        ```
+
+        Available FTS indexes: ``api_fts`` (ApiEndpoint: summary, description,
+        path, operationId), ``doc_fts`` (DocSection), ``script_fts`` (Script),
+        runtime ``device_fts`` / ``site_fts`` / ``config_fts``.
+
+        Combine FTS with structural follow-up in a single query:
+
+        ```cypher
+        CALL QUERY_FTS_INDEX('ApiEndpoint', 'api_fts', 'mvrp')
+        YIELD node AS e, score
+        MATCH (e)-[:HAS_REQUEST_BODY]->(:RequestBody)-[:BODY_REFERENCES]->(c:SchemaComponent)
+        RETURN e.method, e.path, c.name, score ORDER BY score DESC LIMIT 10
+        ```
+
+        ## Other common patterns
+
+        ```cypher
+        // All endpoints in a category
+        MATCH (e:ApiEndpoint {category: 'Network Services', method: 'GET'})
+        RETURN e.path, e.summary ORDER BY e.path
+
+        // Required parameters of an endpoint
+        MATCH (e:ApiEndpoint {method: $m, path: $p})-[:HAS_PARAMETER]->(p:Parameter {required: true})
+        RETURN p.name, p.location, p.type
+
+        // Endpoints that touch a given YANG path (fast path)
+        MATCH (e:ApiEndpoint)-[:CONFIGURES_YANG]->(:YangPath {yangPath: $yp})
+        RETURN DISTINCT e.method, e.path ORDER BY e.path
+
+        // Branches of a union component
+        MATCH (c:SchemaComponent {name: $name})-[r:COMPOSED_OF]->(b:SchemaComponent)
+        WHERE c.bodyShape IN ['union-oneOf','union-anyOf']
+        RETURN r.kind, b.name, b.bodyShape
+        ```
 
         Row caps (to keep responses agent-friendly):
         - Soft cap: 200 rows. Larger result sets come back as
@@ -253,9 +353,8 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
           add ``LIMIT``/``WHERE`` filters or aggregate.
 
         Args:
-            cypher: A read-only Cypher query string.
-                    Example: MATCH (d:Device)-[c:CONNECTED_TO]->(d2:Device)
-                             RETURN d.name, d2.name, c.speed
+            cypher: A read-only Cypher query string (or a
+                    ``CALL QUERY_FTS_INDEX(...)`` invocation as shown above).
             parameters: JSON-encoded parameter dict for parameterised queries
                     (default: ``"{}"``). Example: ``{"site": "hq-1"}``.
 
