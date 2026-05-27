@@ -254,14 +254,6 @@ class TestPopulateProperties:
         assert rows[0]["d"] == "Enable auth"
         assert rows[0]["t"] == "boolean"
 
-    def test_inline_properties_use_empty_inheritedFrom(self, fresh_db):
-        _, conn = fresh_db
-        _seed(conn)
-        rows = list(conn.execute(
-            "MATCH (c:SchemaComponent {name: 'AuthenticationConfig'})-[:HAS_PROPERTY]->(p:Property) "
-            "RETURN p.inheritedFrom AS i ORDER BY p.name"
-        ).rows_as_dict())
-        assert all(r["i"] == "" for r in rows), rows
 
 
 # ── readOnly extraction (Phase 2D-1) ────────────────────────────────
@@ -348,36 +340,44 @@ class TestAllOfFlattening:
         assert ("AuthenticationConfig", "allOf") in names
         assert ("ServerConfig", "allOf") in names
 
-    def test_allOf_flattens_into_parent_properties(self, fresh_db):
+    def test_allOf_leaves_reachable_via_composed_of_walk(self, fresh_db):
         """NtpprofileSchema is allOf [Auth, Server, inline{name,vrf}].
 
-        Every leaf property must be reachable via a single HAS_PROPERTY
-        hop on the parent so the agent can ask "what fields can I send"
-        in one Cypher step."""
+        Properties live only on their declaring component. The canonical
+        agent query walks ``COMPOSED_OF*0..N -> HAS_PROPERTY`` to gather
+        every leaf, including the inline-promoted synthetic branch."""
         _, conn = fresh_db
         _seed(conn)
         rows = list(conn.execute(
-            "MATCH (c:SchemaComponent {name: 'NtpprofileSchema'})-[:HAS_PROPERTY]->(p:Property) "
-            "RETURN p.name AS name ORDER BY p.name"
+            "MATCH (root:SchemaComponent {name: 'NtpprofileSchema'})"
+            "-[:COMPOSED_OF*0..5]->(c:SchemaComponent)"
+            "-[:HAS_PROPERTY]->(p:Property) "
+            "RETURN DISTINCT p.name AS name ORDER BY name"
         ).rows_as_dict())
         names = sorted(r["name"] for r in rows)
         assert names == sorted(["authenticate", "key-value", "server", "name", "vrf"])
 
-    def test_inherited_properties_track_their_branch(self, fresh_db):
+    def test_leaves_are_declared_on_their_branch_component(self, fresh_db):
+        """Each leaf surfaces from the branch that declares it; no copies
+        on the parent. Replaces the old ``inheritedFrom`` provenance column."""
         _, conn = fresh_db
         _seed(conn)
         rows = list(conn.execute(
-            "MATCH (c:SchemaComponent {name: 'NtpprofileSchema'})-[:HAS_PROPERTY]->(p:Property) "
-            "RETURN p.name AS name, p.inheritedFrom AS i"
+            "MATCH (root:SchemaComponent {name: 'NtpprofileSchema'})"
+            "-[:COMPOSED_OF*0..5]->(c:SchemaComponent)"
+            "-[:HAS_PROPERTY]->(p:Property) "
+            "RETURN p.name AS name, c.name AS declaredOn"
         ).rows_as_dict())
-        by_name = {r["name"]: r["i"] for r in rows}
-        # Inline branch:
-        assert by_name["name"] == ""
-        assert by_name["vrf"] == ""
-        # Inherited from allOf $refs:
+        by_name = {r["name"]: r["declaredOn"] for r in rows}
         assert by_name["authenticate"] == "AuthenticationConfig"
         assert by_name["key-value"] == "AuthenticationConfig"
         assert by_name["server"] == "ServerConfig"
+        # Inline allOf branch is promoted to a synthetic component whose
+        # name starts with the parent name.
+        assert by_name["name"].startswith("NtpprofileSchema")
+        assert by_name["vrf"].startswith("NtpprofileSchema")
+        # The parent itself declares no fields directly.
+        assert "NtpprofileSchema" not in set(by_name.values())
 
     def test_filter_by_supported_device_type_works_in_cypher(self, fresh_db):
         """The headline use case: 'show me the NTP fields valid for Switch CX'."""
@@ -386,7 +386,9 @@ class TestAllOfFlattening:
         rows = list(conn.execute(
             "MATCH (e:ApiEndpoint {endpoint_id: 'POST:/v1/ntp'})"
             "-[:HAS_REQUEST_BODY]->(:RequestBody)-[:BODY_REFERENCES]->"
-            "(c:SchemaComponent)-[:HAS_PROPERTY]->(p:Property) "
+            "(root:SchemaComponent) "
+            "MATCH (root)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)"
+            "-[:HAS_PROPERTY]->(p:Property) "
             "WHERE 'Switch CX' IN p.supportedDeviceTypes "
             "RETURN p.name AS name ORDER BY p.name"
         ).rows_as_dict())

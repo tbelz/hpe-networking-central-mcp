@@ -131,6 +131,117 @@ def _sync_specs(cache_dir: Path) -> tuple[list[dict], dict]:
     return specs, sync_health
 
 
+def _load_cached_specs_sample(cache_dir: Path, n: int) -> tuple[list[dict], dict]:
+    """Dev shortcut for ``--sample N``: load cached OAS files and keep
+    only the first ``n`` operations per provider.
+
+    Returns ``(specs, sync_health)`` shaped exactly like ``_sync_specs``
+    so the rest of the pipeline is identical. Skips all network I/O —
+    fails loudly if no cache exists yet.
+    """
+    import yaml  # type: ignore  # noqa: PLC0415
+    specs: list[dict] = []
+    sync_health: dict = {}
+    # Keep sync_health keys aligned with _sync_specs ("central", "greenlake")
+    # so manifest.json's schema is identical between full and --sample builds.
+    # The on-disk cache layout still uses ``glp/`` and _spec_source stays
+    # "glp" to match the full path.
+    providers = (("central", "central"), ("glp", "greenlake"))
+    for provider, health_key in providers:
+        provider_dir = cache_dir / provider
+        if not provider_dir.is_dir():
+            sync_health[health_key] = {"status": "error", "spec_count": 0, "coverage": 0.0,
+                                      "error": f"no cache at {provider_dir}"}
+            continue
+        files = sorted(provider_dir.rglob("*.json")) + sorted(provider_dir.rglob("*.yaml"))
+        # Cap files loaded so a sample doesn't pull thousands of single-endpoint excerpts.
+        # Each cached file in the per-endpoint layout already contributes ~1 path,
+        # so loading `n` files yields ~`n` endpoints for this provider.
+        files = files[:n]
+        loaded = 0
+        provider_start = len(specs)
+        for f in files:
+            try:
+                if f.suffix == ".json":
+                    spec = json.loads(f.read_text(encoding="utf-8"))
+                else:
+                    spec = yaml.safe_load(f.read_text(encoding="utf-8"))
+            except Exception as exc:
+                print(f"    ⚠ Skipping {f.name}: {exc}", file=sys.stderr)
+                continue
+            if not isinstance(spec, dict):
+                continue
+            spec["_spec_source"] = provider
+            specs.append(spec)
+            loaded += 1
+        # If any spec carries more than one path (multi-path cached form),
+        # truncate so the per-provider total stays close to `n`.
+        per_spec_cap = max(1, n // max(1, loaded))
+        for spec in specs[provider_start:]:
+            paths = spec.get("paths")
+            if isinstance(paths, dict) and len(paths) > per_spec_cap:
+                spec["paths"] = dict(list(paths.items())[:per_spec_cap])
+        sync_health[health_key] = {"status": "ok", "spec_count": loaded, "coverage": 1.0,
+                                  "note": f"--sample {n} (loaded {loaded} files)"}
+        print(f"    → {loaded} cached {provider} specs (sample mode)")
+    return specs, sync_health
+
+
+def _print_build_report(db: lb.Database, schema_stats: dict, violations: list) -> None:
+    """Print absolute current-build counters. No history, no trend lines —
+    just enough numbers to eyeball whether this build matches expectations.
+    """
+    conn = lb.Connection(db)
+    def _count(cypher: str) -> int:
+        try:
+            rows = list(conn.execute(cypher).rows_as_dict())
+            return int(rows[0]["n"]) if rows else 0
+        except Exception:
+            return -1
+
+    metrics = {
+        "ApiEndpoint": _count("MATCH (n:ApiEndpoint) RETURN COUNT(n) AS n"),
+        "SchemaComponent": _count("MATCH (n:SchemaComponent) RETURN COUNT(n) AS n"),
+        "  named": _count(
+            "MATCH (n:SchemaComponent) WHERE NOT n.component_id CONTAINS '#' RETURN COUNT(n) AS n"
+        ),
+        "  inline": _count(
+            "MATCH (n:SchemaComponent) WHERE n.component_id CONTAINS '#' RETURN COUNT(n) AS n"
+        ),
+        "  unresolved": _count(
+            "MATCH (n:SchemaComponent {kind: 'unresolved'}) RETURN COUNT(n) AS n"
+        ),
+        "Property": _count("MATCH (n:Property) RETURN COUNT(n) AS n"),
+        "YangPath": _count("MATCH (n:YangPath) RETURN COUNT(n) AS n"),
+        "HAS_PROPERTY": _count("MATCH ()-[r:HAS_PROPERTY]->() RETURN COUNT(r) AS n"),
+        "COMPOSED_OF": _count("MATCH ()-[r:COMPOSED_OF]->() RETURN COUNT(r) AS n"),
+        "CONFIGURES_YANG": _count("MATCH ()-[r:CONFIGURES_YANG]->() RETURN COUNT(r) AS n"),
+    }
+
+    named = max(1, metrics.get("  named", 1))
+    props_per_named = metrics["HAS_PROPERTY"] / named if named > 0 else 0.0
+    empty_named = _count(
+        """
+        MATCH (c:SchemaComponent)
+        WHERE NOT c.component_id CONTAINS '#'
+          AND c.bodyShape = 'object'
+          AND NOT EXISTS { MATCH (c)-[:HAS_PROPERTY]->() }
+        RETURN COUNT(c) AS n
+        """
+    )
+    empty_pct = (empty_named / named * 100.0) if named > 0 else 0.0
+
+    print(f"  Nodes:")
+    for k, v in metrics.items():
+        print(f"    {k:<18} {v}")
+    print(f"  Health:")
+    print(f"    properties / named component  {props_per_named:>6.2f}")
+    print(f"    named objects with no fields  {empty_named} ({empty_pct:.1f}%)")
+    from hpe_networking_central_mcp.graph.invariants import _CHECKS
+    print(f"    invariant violations          {len(violations)} of {len(_CHECKS)}")
+    del conn
+
+
 def _summarise_oas_reports(reports, specs: list[dict]) -> dict:
     """Build a manifest entry from per-source OAS reports.
 
@@ -693,6 +804,12 @@ def main() -> None:
                              "Recommended for CI; opt-in locally.")
     parser.add_argument("--no-invariants", action="store_true",
                         help="Skip the post-flush invariant audit entirely.")
+    parser.add_argument("--sample", type=int, default=0, metavar="N",
+                        help="Dev/CI shortcut: skip spec sync, load cached specs from "
+                             "<output-dir>/spec_cache (falling back to ./build/spec_cache "
+                             "if the per-output cache is empty), truncate each provider to "
+                             "the first N endpoints, and run the full pipeline against a "
+                             "tiny graph. Use 0 (default) for the real full build.")
     args = parser.parse_args()
 
     output_dir: Path = args.output_dir.resolve()
@@ -717,7 +834,18 @@ def main() -> None:
 
     # 2. Sync API specs
     print("\n[2/6] Refreshing API documentation...")
-    specs, sync_health = _sync_specs(cache_dir)
+    if args.sample and args.sample > 0:
+        # Prefer the per-output cache so --output-dir is respected; fall
+        # back to the standard ./build/spec_cache populated by a prior
+        # real build when the per-output cache hasn't been warmed yet.
+        sample_cache = cache_dir
+        if not sample_cache.is_dir() or not any(sample_cache.iterdir()):
+            fallback = Path("build/spec_cache").resolve()
+            if fallback.is_dir():
+                sample_cache = fallback
+        specs, sync_health = _load_cached_specs_sample(sample_cache, args.sample)
+    else:
+        specs, sync_health = _sync_specs(cache_dir)
     if not specs:
         print("⚠ No specs available — database will have no API endpoints.", file=sys.stderr)
 
@@ -763,6 +891,14 @@ def main() -> None:
             )
             db.close()
             sys.exit(2)
+    else:
+        violations = []
+
+    # 3e. Build-health snapshot: absolute current-build counters so the
+    # operator can eyeball whether the graph looks the same shape as
+    # last time. Deliberately no historical comparison / trend tracking.
+    print("\n[3e/6] Build-health snapshot...")
+    _print_build_report(db, schema_stats, violations)
 
     # 4. Sync and populate VSG documentation
     print("\n[4/6] Refreshing and populating VSG documentation...")

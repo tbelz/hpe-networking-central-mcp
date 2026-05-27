@@ -1,5 +1,5 @@
 """Tests for the ingestion overhaul (richest-wins, cross-spec refs,
-inline promotion of oneOf/anyOf/additionalProperties, inheritedFromChain,
+inline promotion of oneOf/anyOf/additionalProperties, allOf composition chains,
 SchemaComponent.supportedDeviceTypes, YangPath reverse index,
 UnresolvedRef placeholder, and bodyShape).
 
@@ -297,10 +297,10 @@ class TestAdditionalPropertiesMap:
         assert rows[0]["n"] == "Item"
 
 
-# ── inheritedFromChain depth ≥ 2 ────────────────────────────────────
+# ── allOf chain depth ≥ 2: traversal via COMPOSED_OF ───────────────
 
 
-class TestInheritedFromChain:
+class TestAllOfChainTraversal:
     def test_two_level_allOf_chain_recorded(self, fresh_db):
         _, conn = fresh_db
         spec = _spec_with(
@@ -331,20 +331,22 @@ class TestInheritedFromChain:
             spec=spec,
             endpoints=[("POST", "/v1/top")],
         )
+        # Walk allOf composition: every leaf must be reachable from Top
+        # via COMPOSED_OF*0..N -> HAS_PROPERTY, and surface declared on the
+        # component that owns it (not duplicated onto Top).
         rows = list(conn.execute(
-            "MATCH (t:SchemaComponent {name: 'Top'})-[:HAS_PROPERTY]->(p:Property) "
-            "RETURN p.name AS n, p.inheritedFrom AS i, p.inheritedFromChain AS chain"
+            "MATCH (t:SchemaComponent {name: 'Top'})-[:COMPOSED_OF*0..5]->(c:SchemaComponent)"
+            "-[:HAS_PROPERTY]->(p:Property) "
+            "RETURN p.name AS n, c.name AS declaredOn"
         ).rows_as_dict())
-        by_name = {r["n"]: r for r in rows}
-        # Top's own inline property
-        assert by_name["top_own"]["i"] == ""
-        assert by_name["top_own"]["chain"] == []
-        # Mid's own contribution surfaces with one hop
-        assert by_name["mid_own"]["i"] == "Mid"
-        assert by_name["mid_own"]["chain"] == ["Mid"]
-        # Base's leaf surfaces with two hops, deepest-first chain
-        assert by_name["base_leaf"]["i"] == "Base"
-        assert by_name["base_leaf"]["chain"] == ["Mid", "Base"], by_name["base_leaf"]
+        by_name = {r["n"]: r["declaredOn"] for r in rows}
+        # Top's own inline property is promoted to a synthetic component
+        # whose name starts with "Top".
+        assert by_name["top_own"].startswith("Top")
+        # Mid's own contribution lives on Mid's synthetic inline component.
+        assert by_name["mid_own"].startswith("Mid")
+        # Base declares its leaf directly.
+        assert by_name["base_leaf"] == "Base"
 
 
 # ── SchemaComponent.supportedDeviceTypes lifted from body ──────────

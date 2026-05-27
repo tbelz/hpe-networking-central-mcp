@@ -56,7 +56,11 @@ which:
 
 Hand-written synthetic specs are retained ONLY for pinning specific
 orthogonal code paths (UnresolvedRefPlaceholder, InlineUnionPromotion,
-AdditionalPropertiesMap, InheritedFromChain, YangPathIndex, BodyShape).
+AdditionalPropertiesMap, AllOfChainTraversal, YangPathIndex, BodyShape).
+Note: the `inheritedFrom` / `inheritedFromChain` columns on `Property`
+were dropped in the schema-overhaul follow-up; leaf properties now live
+only on their declaring component and are reached by walking
+`COMPOSED_OF*0..N` from the parent before `HAS_PROPERTY`.
 They MUST NOT be used to assert ingestion correctness on shapes that
 also exist in the real corpus — the real corpus is the source of
 truth.
@@ -64,7 +68,7 @@ truth.
 ### Tier 2 — Post-flush invariants gate
 
 A new module `src/hpe_networking_central_mcp/graph/invariants.py`
-defines four invariants that every populated knowledge DB must
+defines the invariants that every populated knowledge DB must
 satisfy:
 
 | ID | Invariant |
@@ -72,7 +76,13 @@ satisfy:
 | INV-1 | Every named, non-primitive `SchemaComponent` with an object/union/map body has ≥1 `HAS_PROPERTY`, `COMPOSED_OF`, or `HAS_VALUE_SCHEMA` edge. |
 | INV-2 | `kind = 'primitive'` rows never carry object/union bodies. |
 | INV-3 | `component_id` is globally unique (no duplicate PK rows). |
-| INV-4 | Every `Property.inheritedFromChain` entry resolves to an existing `SchemaComponent` name. |
+| INV-5 | No `SchemaComponent` declares two `HAS_PROPERTY` edges to leaves with the same name (catches re-introduced allOf flattening). |
+| INV-6 | Every named `kind = 'object'` `SchemaComponent` that declares `properties` has ≥1 direct outgoing `HAS_PROPERTY` edge. Genuinely empty object schemas (`{"type":"object"}` with no `properties`) are exempt. |
+| INV-7 | `SchemaComponent.bodyShape` agrees with `kind` for the object/union/map mismatch cases currently checked (any `bodyShape ∈ {object, union-*, allOf-composite, map}` paired with `kind='primitive'`, or `bodyShape='primitive'` paired with `kind='object'`). |
+
+INV-4 (inheritedFromChain resolution) was retired together with the
+`inheritedFrom*` columns; leaf reachability is now expressed structurally
+via INV-6 and the COMPOSED_OF traversal pattern.
 
 Invariants run in three contexts:
 

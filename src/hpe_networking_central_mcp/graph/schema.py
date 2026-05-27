@@ -204,11 +204,9 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
     """,
     # ── Property-level subgraph (ADR 009 Phase 2C) ────────────────────
     # First-class node per leaf field so vendor extensions like
-    # x-supportedDeviceType / x-path become Cypher-queryable. allOf
-    # branches are flattened into HAS_PROPERTY edges with
-    # ``inheritedFrom`` provenance so the agent can ask "what fields
-    # can I send to this endpoint, restricted to Switch CX?" in one
-    # query without parsing JSON skeletons.
+    # x-supportedDeviceType / x-path become Cypher-queryable. Properties
+    # live only on the SchemaComponent that declares them; consumers
+    # gather inherited fields by walking COMPOSED_OF*0..N before HAS_PROPERTY.
     """
     CREATE NODE TABLE IF NOT EXISTS Property (
         property_id          STRING,
@@ -222,8 +220,6 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         supportedDeviceTypes STRING[],
         yangPath             STRING,
         extensionsJson       STRING,
-        inheritedFrom        STRING,
-        inheritedFromChain   STRING[],
         readOnly             BOOLEAN,
         PRIMARY KEY (property_id)
     )
