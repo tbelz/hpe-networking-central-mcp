@@ -333,3 +333,52 @@ class TestGetRawSchema:
         assert parsed["cap_bytes"] == 1000
         assert "hint" in parsed
         assert "bodyJson" not in parsed
+
+
+# ── Tool aliasing (query_api_schema / query_fts / query_topology / query_yang) ──
+
+
+class TestQueryAliases:
+    ALIASES = ("query_graph", "query_api_schema", "query_fts", "query_topology", "query_yang")
+
+    def test_all_aliases_registered(self, gm):
+        tools = _make_tools(gm)
+        for name in self.ALIASES:
+            assert name in tools, f"missing tool alias {name}"
+
+    def test_each_alias_executes_simple_query(self, gm):
+        tools = _make_tools(gm)
+        for alias in self.ALIASES:
+            out = tools[alias](cypher="RETURN 1 AS n")
+            assert json.loads(out) == [{"n": 1}], f"{alias} failed RETURN 1"
+
+    def test_each_alias_respects_byte_caps(self, gm, monkeypatch):
+        monkeypatch.setenv("MCP_GRAPH_PER_CELL_BYTES", "100")
+        tools = _make_tools(gm)
+        big = "x" * 500
+        for alias in self.ALIASES:
+            out = tools[alias](
+                cypher="UNWIND [$s] AS v RETURN v",
+                parameters=json.dumps({"s": big}),
+            )
+            cell = json.loads(out)[0]["v"]
+            assert isinstance(cell, dict) and cell.get("_truncated") is True, (
+                f"{alias} did not apply per-cell cap"
+            )
+
+    def test_each_alias_empty_cypher_raises(self, gm):
+        tools = _make_tools(gm)
+        for alias in self.ALIASES:
+            with pytest.raises(ToolError, match="empty"):
+                tools[alias](cypher="  ")
+
+    def test_each_alias_docstring_within_budget(self, gm):
+        # Each focused docstring should stay under ~4000 chars so clients
+        # that cap tool descriptions around 4 KB don't truncate guidance.
+        tools = _make_tools(gm)
+        for alias in self.ALIASES:
+            doc = tools[alias].__doc__ or ""
+            assert len(doc) < 4000, (
+                f"{alias} docstring is {len(doc)} chars — keep it under 4000 "
+                "so tool-description-capping clients don't truncate guidance."
+            )
