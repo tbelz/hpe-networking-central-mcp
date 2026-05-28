@@ -27,18 +27,15 @@ nodes instead of paging through raw OpenAPI blobs.
 │   MCP Server (FastMCP)                                                 │
 │                                                                        │
 │  Tools                                                                 │
-│  ├─ list_api                       Category-grouped METHOD /path       │
-│  ├─ describe_endpoint_for_device   Body / parameter guide for one      │
-│  │                                  endpoint, device-aware             │
 │  ├─ query_graph                    Cypher reads against LadybugDB      │
 │  ├─ write_graph                    Cypher writes to enrich the graph   │
-│  ├─ call_central_api               Central REST API (gated)            │
-│  ├─ call_greenlake_api             GreenLake Platform API (gated)      │
+│  ├─ call_central_api               Central REST API                    │
+│  ├─ call_greenlake_api             GreenLake Platform API              │
 │  ├─ list_scripts / get_script_content / save_script                    │
 │  └─ execute_script                 Run scripts with central_helpers    │
 │                                                                        │
 │  Resources                                                             │
-│  ├─ api://endpoint-catalog         Same catalog as list_api            │
+│  ├─ api://endpoint-catalog         Full METHOD /path catalog           │
 │  ├─ docs://endpoint-catalog        Alias for clients filtering api://  │
 │  ├─ graph://schema                 Live LadybugDB schema + Cypher      │
 │  ├─ graph://seed-status            Startup seed execution results      │
@@ -55,57 +52,17 @@ nodes instead of paging through raw OpenAPI blobs.
 
 ## Knowledge Graph (LadybugDB)
 
-The server ships with a pre-built LadybugDB graph database that is updated
-nightly by GitHub Actions and downloaded on first launch. It contains two
-layers:
+The server ships with a pre-built LadybugDB graph database updated nightly and
+downloaded on first launch. It has two layers:
 
-1. **Knowledge layer** — the entire OpenAPI surface of Central and GreenLake
-   modelled as a structured subgraph: `ApiEndpoint`, `Parameter`,
-   `RequestBody`, `Response`, `SchemaComponent`, `Property`, plus
-   `ApiCategory`, `DocSection`, and `Script`. Populated at build time from
-   the upstream OpenAPI specs.
-2. **Domain layer** — live network state (`Org`, `SiteCollection`, `Site`,
-   `Device`, `DeviceGroup`, `UnmanagedDevice`) populated at runtime by seed
-   scripts that call the Central APIs.
-
-### Domain layer
-
-```mermaid
-flowchart LR
-    Org -->|HAS_COLLECTION| SiteCollection
-    Org -->|HAS_SITE| Site
-    SiteCollection -->|CONTAINS_SITE| Site
-    Site -->|HAS_DEVICE| Device
-    DeviceGroup -->|HAS_MEMBER| Device
-    Site -->|HAS_UNMANAGED| UnmanagedDevice
-    Device -->|CONNECTED_TO| Device
-    Device -->|LINKED_TO| UnmanagedDevice
-```
-
-### API discovery subgraph (knowledge layer)
-
-```mermaid
-flowchart LR
-    ApiEndpoint -->|BELONGS_TO_CATEGORY| ApiCategory
-    ApiEndpoint -->|HAS_PARAMETER| Parameter
-    ApiEndpoint -->|HAS_REQUEST_BODY| RequestBody
-    ApiEndpoint -->|HAS_RESPONSE| Response
-    RequestBody -->|BODY_REFERENCES| SchemaComponent
-    Response -->|RESPONSE_REFERENCES| SchemaComponent
-    SchemaComponent -->|HAS_PROPERTY| Property
-    SchemaComponent -->|COMPOSED_OF| SchemaComponent
-    SchemaComponent -->|REFERENCES| SchemaComponent
-    Property -->|PROPERTY_OF_TYPE| SchemaComponent
-```
-
-`Property` nodes carry the `x-supportedDeviceType` extension as a typed list
-(`supportedDeviceTypes`) and the YANG mapping (`yangPath`) as first-class
-properties, so a single Cypher query answers questions like *"which fields of
-the NTP profile apply to Switch CX, and what is their YANG path?"*.
-
-See [docs/adr/009-graph-as-primary-api-discovery.md](docs/adr/009-graph-as-primary-api-discovery.md)
-for the rationale; the full canned-Cypher pattern set is embedded in
-`graph://schema`.
+- **Knowledge layer** — the entire OpenAPI surface of Central and GreenLake
+  modelled as a graph (`ApiEndpoint`, `Parameter`, `RequestBody`,
+  `SchemaComponent`, and related nodes). Populated at build time from the
+  upstream specs. Use `query_graph` for endpoint discovery and schema
+  navigation; canned Cypher patterns are embedded in `graph://schema`.
+- **Domain layer** — live network state (`Org`, `SiteCollection`, `Site`,
+  `Device`, `DeviceGroup`) populated at runtime by seed scripts that call
+  the Central APIs.
 
 ## Prerequisites
 
@@ -185,7 +142,7 @@ GREENLAKE_CLIENT_SECRET=your_glp_client_secret
 | `GREENLAKE_CLIENT_SECRET` | No | Central client secret | GreenLake Platform client secret |
 | `GLP_BASE_URL` | No | `https://global.api.greenlake.hpe.com` | GreenLake API base URL |
 | `GLP_INCLUDED_SLUGS` | No | — | Comma-separated service slugs to include (or empty for default set) |
-| `READ_ONLY` | No | `false` | When set to `true` / `1` / `yes` / `on`, the server refuses any non-GET Central / GreenLake API call (both via tools and from inside scripts) and hides mutating endpoints from `list_api`. Local operations (`write_graph`, `save_script`, `execute_script`) remain available. |
+| `READ_ONLY` | No | `false` | When set to `true` / `1` / `yes` / `on`, the server refuses any non-GET Central / GreenLake API call (both via tools and from inside scripts) and hides mutating endpoints from the `api://endpoint-catalog` resource. Local operations (`write_graph`, `save_script`, `execute_script`) remain available. |
 
 ### Startup behaviour
 
@@ -207,8 +164,7 @@ Start the container with `READ_ONLY=true` to lock the server into a
   and `DELETE` with a `READ_ONLY` error.
 - The same restriction is enforced inside scripts — `api.post(...)` and
   friends fail with `CentralAPIError(403, "READ_ONLY", ...)`.
-- Mutating endpoints are filtered out of `list_api` and the embedded API
-  catalog so the model never sees them.
+- Mutating endpoints are filtered out of the `api://endpoint-catalog` resource so the model never sees them.
 - A banner is prepended to the MCP system prompt so the assistant knows it
   must not attempt configuration changes.
 - Local-only operations (graph writes, saving / editing scripts, executing
@@ -216,15 +172,9 @@ Start the container with `READ_ONLY=true` to lock the server into a
   reporting workflows.
 
 > **Scope of enforcement.** READ_ONLY is an *agent behavioural guardrail*,
-> not a hard sandbox. Scripts run as subprocesses with the OAuth
-> credentials available in their environment. Enforcement happens at the
-> HTTP-client layer in two places: `BaseHTTPClient._request` (covers
-> `central_helpers.api` / `glp`, the documented script API) and an
-> `httpx.Client` / `httpx.AsyncClient` monkey-patch installed via a
-> `sitecustomize` module that is added to the script subprocess
-> `PYTHONPATH` only when READ_ONLY is active. A deliberately malicious
-> script that uses `urllib`, `requests`, or raw sockets could still issue
-> mutating calls — do not expose READ_ONLY mode to untrusted authors.
+> not a hard sandbox. Enforcement happens at the HTTP-client layer inside
+> `central_helpers` and via a `sitecustomize` hook injected into script
+> subprocesses. Do not expose READ_ONLY mode to untrusted script authors.
 
 ## Claude Desktop / Claude Code Configuration
 
@@ -311,22 +261,14 @@ if you prefer environment variables.
 
 | Tool | Description |
 |------|-------------|
-| `list_api` | Category-grouped path-tree of every available `METHOD /path` for Central and GreenLake. Same content as the `api://endpoint-catalog` resource. |
-| `describe_endpoint_for_device` | Field-by-field guide for one endpoint: parameters (path / query / header) plus every leaf property of the request body (or `200` response if no body), already flattened across `allOf` branches. Optional `deviceType` filter uses the `x-supportedDeviceType` extension. Recording an inspection here is what unlocks `call_central_api` for that endpoint. |
-| `query_graph` | Read-only Cypher against the LadybugDB graph. Primary tool for cross-endpoint structural questions, hierarchy navigation, and `$ref` traversal. Soft cap 200 rows / hard cap 2000. Accepts a `parameters` JSON-string for parameterised queries. |
+| `query_graph` | Read-only Cypher against the LadybugDB graph. Primary tool for endpoint discovery, hierarchy navigation, and schema traversal. Soft cap 200 rows / hard cap 2000. Accepts a `parameters` JSON-string for parameterised queries. |
 | `write_graph` | Cypher writes (`CREATE`, `MERGE`, `SET`, `DELETE`) to enrich the domain layer of the graph from runtime discoveries. |
-| `call_central_api` | Make authenticated requests to any Central API endpoint. Gated on a prior `describe_endpoint_for_device` call (or an explicit `endpoint_id="METHOD:/path"` attestation) for the target endpoint in the same session. |
+| `call_central_api` | Make authenticated requests to any Central API endpoint. Runs stateless pre-flight validation against the graph on every call; schema context is included in any validation error so the agent can self-correct. |
 | `call_greenlake_api` | Same as `call_central_api`, against the GreenLake Platform API. Only registered when GreenLake credentials are configured. |
 | `list_scripts` | List all scripts in the automation library, optionally filtered by tag. |
 | `get_script_content` | Read the source code of a script. |
 | `save_script` | Save a Python script to the library for reuse. |
 | `execute_script` | Execute a script with Central / GreenLake credentials and the `central_helpers` SDK injected. |
-
-The call gate is template-aware: inspecting
-`/.../gateways/{serial-number}/dhcp-pools` authorises any concrete
-instantiation such as `/.../gateways/DL0006948/dhcp-pools`. When a call is
-blocked, the gate inlines the matched endpoint's property summary into the
-error response, so the agent recovers in a single turn.
 
 ## Development
 
