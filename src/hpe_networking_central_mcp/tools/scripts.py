@@ -56,7 +56,7 @@ def _validate_filename(filename: str) -> str | None:
     return None
 
 
-def register_script_tools(mcp, settings: Settings, graph_manager: GraphManager):
+def register_script_tools(mcp, settings: Settings, graph_manager: GraphManager, offline_mode: bool = False):
     """Register script library management tools with the MCP server."""
     global _graph_manager
     _graph_manager = graph_manager
@@ -263,6 +263,13 @@ def register_script_tools(mcp, settings: Settings, graph_manager: GraphManager):
         }
 
         if execute:
+            if offline_mode:
+                return json.dumps({
+                    "error": (
+                        "execute=True is not available in discovery-only mode. "
+                        "Save the script, then run it from a connected workspace."
+                    )
+                })
             exec_result_json = _run_script(settings, filename, None)
             exec_result = json.loads(exec_result_json)
             save_result["execution"] = exec_result

@@ -12,10 +12,12 @@ import sys
 import threading
 from pathlib import Path
 
+import httpx
+
 from mcp.server.fastmcp import FastMCP
 
 from .api_tree import render_path_tree
-from .central_client import CentralClient, GreenLakeClient
+from .central_client import CentralAPIError, CentralClient, GreenLakeClient
 from .config import load_settings
 from .graph import GraphManager
 from .graph.ipc_server import GraphIPCServer
@@ -55,6 +57,7 @@ def _parse_server_args() -> None:
             "no live Central / GreenLake API calls)."
         ),
         add_help=False,  # don't shadow FastMCP's own --help if it ever adds one
+        allow_abbrev=False,  # prevent partial-flag matching from swallowing launcher args
     )
     parser.add_argument("--central-url", dest="central_url", default=None,
                         help="Central API base URL (sets CENTRAL_BASE_URL).")
@@ -94,6 +97,25 @@ settings = load_settings()
 # does not register the tools that talk to live Central / GreenLake. This
 # supports the workflow where an agent designs API calls and writes scripts
 # the user reviews before running against a real environment.
+# Detect partial / misconfigured credentials and surface the problem loudly
+# rather than silently falling through to discovery-only mode.
+_cred_set = bool(settings.central_base_url), bool(settings.central_client_id), bool(settings.central_client_secret)
+if any(_cred_set) and not all(_cred_set):
+    _missing = [name for name, present in zip(
+        ("CENTRAL_BASE_URL", "CENTRAL_CLIENT_ID", "CENTRAL_CLIENT_SECRET"), _cred_set
+    ) if not present]
+    logger.error(
+        "partial_credentials_detected",
+        hint=(
+            "Some but not all Central credentials are set. This is probably a "
+            "configuration mistake. Provide all three (CENTRAL_BASE_URL, "
+            "CENTRAL_CLIENT_ID, CENTRAL_CLIENT_SECRET) for connected mode, or "
+            "none of them for discovery-only mode."
+        ),
+        missing=_missing,
+    )
+    sys.exit(1)
+
 _offline_mode = not settings.has_credentials
 client: CentralClient | None = None
 if _offline_mode:
@@ -117,13 +139,17 @@ else:
         )
         client.validate()
         logger.info("credentials_validated")
-    except Exception as exc:
+    except (CentralAPIError, httpx.HTTPError, OSError) as exc:
         logger.error(
             "startup_failed",
             reason="Credential validation failed — could not obtain OAuth2 token.",
             error=str(exc),
         )
         sys.exit(1)
+    except Exception:
+        # Unexpected error (e.g. coding regression, missing dep) — surface the
+        # full traceback rather than masking it as a credential failure.
+        raise
 
 # ── Download knowledge DB from GitHub release (if configured) ─────────
 # Try to download knowledge DB before initializing graph
@@ -380,7 +406,7 @@ def _bg_auto_run_seeds():
 # and the execute_script tool — the agent designs and saves scripts that
 # the user reviews before running in a connected workspace.
 register_graph_tools(mcp, settings, graph_manager)
-register_script_tools(mcp, settings, graph_manager)
+register_script_tools(mcp, settings, graph_manager, offline_mode=_offline_mode)
 if _offline_mode:
     logger.info(
         "connected_tools_disabled",

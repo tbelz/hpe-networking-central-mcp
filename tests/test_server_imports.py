@@ -46,6 +46,13 @@ def test_server_module_imports_cleanly(monkeypatch, tmp_path):
     monkeypatch.setattr(cc.GreenLakeClient, "validate", lambda self: None)
 
     # Ensure a fresh import — server.py runs all its setup at module scope.
+    # Stop any IPC server from a previous import before evicting the module
+    # to avoid leaking background threads into subsequent tests.
+    _prev = sys.modules.get("hpe_networking_central_mcp.server")
+    if _prev is not None:
+        _ipc = getattr(_prev, "ipc_server", None)
+        if _ipc is not None:
+            _ipc.stop()
     sys.modules.pop("hpe_networking_central_mcp.server", None)
 
     module = importlib.import_module("hpe_networking_central_mcp.server")
@@ -84,6 +91,12 @@ def test_server_module_imports_offline(monkeypatch, tmp_path):
     monkeypatch.setenv("GRAPH_DB_PATH", str(tmp_path / "graph.db"))
     monkeypatch.setenv("KNOWLEDGE_RELEASE_REPO", "")  # skip download path
 
+    # Stop any IPC server from a previous import before evicting the module.
+    _prev = sys.modules.get("hpe_networking_central_mcp.server")
+    if _prev is not None:
+        _ipc = getattr(_prev, "ipc_server", None)
+        if _ipc is not None:
+            _ipc.stop()
     sys.modules.pop("hpe_networking_central_mcp.server", None)
 
     module = importlib.import_module("hpe_networking_central_mcp.server")
