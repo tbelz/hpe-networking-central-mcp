@@ -721,3 +721,55 @@ class TestSupportedDeviceTypesNullSemantic:
         ).rows_as_dict())
         names = sorted(r["name"] for r in rows)
         assert names == ["annotated", "unannotated"]
+
+
+# ── Warning logs ─────────────────────────────────────────────────────
+
+
+class TestPopulatorWarningLogs:
+    """Best-effort failures during population must emit structured warnings
+    instead of being silently swallowed."""
+
+    def test_warning_logged_when_requestbody_has_no_schema(self, fresh_db):
+        """A requestBody with content but no resolvable schema must log a
+        ``requestbody_without_schema_root`` warning so operators can spot
+        malformed specs without diffing the DB."""
+        import structlog
+
+        _, conn = fresh_db
+        _seed_endpoint(conn, "POST", "/v1/no-schema")
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "x"},
+            "paths": {
+                "/v1/no-schema": {
+                    "post": {
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/json": {
+                                    # no `schema` key on purpose
+                                },
+                            },
+                        },
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                }
+            },
+        }
+        from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph
+        with structlog.testing.capture_logs() as cap:
+            populate_schema_graph(
+                conn,
+                spec_source="central",
+                spec=spec,
+                endpoints=[("POST", "/v1/no-schema")],
+            )
+        events = [e for e in cap if e.get("event") == "requestbody_without_schema_root"]
+        assert events, f"expected requestbody_without_schema_root warning, got {cap!r}"
+        ev = events[0]
+        assert ev["endpoint_id"] == "POST:/v1/no-schema"
+        assert ev["method"] == "POST"
+        assert ev["path"] == "/v1/no-schema"
+        assert "application/json" in ev["content_types"]
+        assert ev["log_level"] == "warning"

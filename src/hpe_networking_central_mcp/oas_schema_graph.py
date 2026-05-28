@@ -30,13 +30,17 @@ import json
 from typing import Any
 
 import pyarrow as pa
+import structlog
 
 from .oas_normalize import (
+
     _extract_referenced_components,
     _follow_ref,
     _strip_skeleton_keys,
     schema_richness,
 )
+
+logger = structlog.get_logger("oas_schema_graph")
 
 
 # ── Legacy JSON-blob decoder ────────────────────────────────────────
@@ -677,11 +681,15 @@ class _Batch:
                     "DETACH DELETE c, p",
                     parameters={"cid": cid, "prefix": cid + "#"},
                 )
-            except Exception:
+            except Exception as exc:
                 # Best-effort: COPY's ignore_errors=true will still
                 # protect us; a leftover orphan is preferable to a
                 # raised exception breaking the flush.
-                pass
+                logger.warning(
+                    "schemacomponent_detach_delete_failed",
+                    component_id=cid,
+                    error=str(exc),
+                )
 
         # ── Node tables (in dependency order) ──
         _copy_node_table(
@@ -991,6 +999,14 @@ def _collect_spec_into_batch(
             media, schema = _pick_media_schema(content)
             rb_id = f"{eid}#requestBody"
             root_ref = _root_ref(schema) or ""
+            if not root_ref:
+                logger.warning(
+                    "requestbody_without_schema_root",
+                    endpoint_id=eid,
+                    method=method,
+                    path=path,
+                    content_types=list(content.keys()),
+                )
             batch.add_request_body({
                 "request_body_id": rb_id,
                 "endpoint_id": eid,
