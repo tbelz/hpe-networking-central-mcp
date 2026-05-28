@@ -501,8 +501,9 @@ MATCH (e:ApiEndpoint {method: $m, path: $p})
 MATCH (root)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)
       -[:HAS_PROPERTY]->(p:Property)
 WHERE $deviceType = ''
-   OR $deviceType IN p.supportedDeviceTypes
+   OR p.supportedDeviceTypes IS NULL
    OR size(p.supportedDeviceTypes) = 0
+   OR $deviceType IN p.supportedDeviceTypes
 RETURN c.name AS host, c.bodyShape AS shape,
        p.name, p.type, p.required, p.enumValues,
        p.yangPath
@@ -638,8 +639,9 @@ MATCH (e:ApiEndpoint {method: $m, path: $p})
 MATCH (root)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)
       -[:HAS_PROPERTY]->(p:Property)
 WHERE $deviceType = ''
-   OR $deviceType IN p.supportedDeviceTypes
+   OR p.supportedDeviceTypes IS NULL
    OR size(p.supportedDeviceTypes) = 0
+   OR $deviceType IN p.supportedDeviceTypes
 RETURN c.name AS host, c.bodyShape AS shape,
        p.name, p.type, p.required, p.enumValues,
        p.supportedDeviceTypes

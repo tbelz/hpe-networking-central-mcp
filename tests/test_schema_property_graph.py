@@ -605,3 +605,119 @@ class TestInlineSchemaMaterialisation:
             "RETURN p.name AS name ORDER BY p.name"
         ).rows_as_dict())
         assert [r["name"] for r in rows] == ["address", "prefer"]
+
+
+# ── EC1: absent x-supportedDeviceType lifts to NULL ─────────────────
+
+
+def _make_spec_with_unannotated_property() -> dict:
+    """Spec where one property has NO x-supportedDeviceType extension.
+
+    Used to assert that absent ⇒ NULL (not empty list), so consumers
+    can filter with ``p.supportedDeviceTypes IS NULL OR ...`` to mean
+    "applies to all device types".
+    """
+    return {
+        "openapi": "3.0.0",
+        "info": {"title": "EC1 fixture"},
+        "components": {
+            "schemas": {
+                "MixedConfig": {
+                    "type": "object",
+                    "properties": {
+                        "annotated": {
+                            "type": "string",
+                            "x-supportedDeviceType": ["Switch CX"],
+                        },
+                        "unannotated": {
+                            "type": "string",
+                        },
+                    },
+                }
+            }
+        },
+        "paths": {
+            "/v1/mixed": {
+                "post": {
+                    "operationId": "postMixed",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/MixedConfig"}
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    }
+
+
+class TestSupportedDeviceTypesNullSemantic:
+    def test_property_without_extension_is_null(self, fresh_db):
+        _, conn = fresh_db
+        _seed_endpoint(conn, "POST", "/v1/mixed")
+        from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph
+        populate_schema_graph(
+            conn,
+            spec_source="central",
+            spec=_make_spec_with_unannotated_property(),
+            endpoints=[("POST", "/v1/mixed")],
+        )
+        rows = list(conn.execute(
+            "MATCH (:SchemaComponent {name: 'MixedConfig'})"
+            "-[:HAS_PROPERTY]->(p:Property {name: 'unannotated'}) "
+            "RETURN p.supportedDeviceTypes AS sdt"
+        ).rows_as_dict())
+        assert rows, "unannotated property should still exist"
+        assert rows[0]["sdt"] is None, (
+            "absent x-supportedDeviceType should lift to NULL, "
+            f"got {rows[0]['sdt']!r}"
+        )
+
+    def test_property_with_extension_keeps_list(self, fresh_db):
+        _, conn = fresh_db
+        _seed_endpoint(conn, "POST", "/v1/mixed")
+        from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph
+        populate_schema_graph(
+            conn,
+            spec_source="central",
+            spec=_make_spec_with_unannotated_property(),
+            endpoints=[("POST", "/v1/mixed")],
+        )
+        rows = list(conn.execute(
+            "MATCH (:SchemaComponent {name: 'MixedConfig'})"
+            "-[:HAS_PROPERTY]->(p:Property {name: 'annotated'}) "
+            "RETURN p.supportedDeviceTypes AS sdt"
+        ).rows_as_dict())
+        assert rows[0]["sdt"] == ["Switch CX"]
+
+    def test_canonical_is_null_filter_returns_all_devices_properties(self, fresh_db):
+        """The EC1 fix: ``IS NULL OR $deviceType IN ...`` returns both
+        the device-specific annotated row AND the unannotated row that
+        "applies to every device"."""
+        _, conn = fresh_db
+        _seed_endpoint(conn, "POST", "/v1/mixed")
+        from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph
+        populate_schema_graph(
+            conn,
+            spec_source="central",
+            spec=_make_spec_with_unannotated_property(),
+            endpoints=[("POST", "/v1/mixed")],
+        )
+        rows = list(conn.execute(
+            "MATCH (e:ApiEndpoint {endpoint_id: 'POST:/v1/mixed'})"
+            "-[:HAS_REQUEST_BODY]->(:RequestBody)-[:BODY_REFERENCES]->"
+            "(root:SchemaComponent) "
+            "MATCH (root)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)"
+            "-[:HAS_PROPERTY]->(p:Property) "
+            "WHERE p.supportedDeviceTypes IS NULL "
+            "   OR size(p.supportedDeviceTypes) = 0 "
+            "   OR $dt IN p.supportedDeviceTypes "
+            "RETURN p.name AS name ORDER BY p.name",
+            parameters={"dt": "Switch CX"},
+        ).rows_as_dict())
+        names = sorted(r["name"] for r in rows)
+        assert names == ["annotated", "unannotated"]
