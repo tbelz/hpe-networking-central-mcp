@@ -269,3 +269,67 @@ class TestQueryGraphByteCaps:
         # Defaults still apply: small result is a bare list.
         assert isinstance(parsed, list)
         assert len(parsed) == 3
+
+
+# ── get_raw_schema tool ─────────────────────────────────────────────
+
+
+def _make_tools(gm):
+    settings = Settings(
+        central_base_url="https://x",
+        central_client_id="cid",
+        central_client_secret="csec",
+        read_only=True,
+    )
+    mcp = FastMCP("test-grs")
+    register_graph_tools(mcp, settings, gm)
+    return {t.name: t.fn for t in mcp._tool_manager._tools.values()}
+
+
+def _insert_schema_component(gm, cid: str, body_json: str, name: str = "TestComp") -> None:
+    gm.execute(
+        "CREATE (c:SchemaComponent {"
+        "  component_id: $cid, spec_source: 'test', section: 'schemas',"
+        "  name: $name, type: 'object', kind: 'object',"
+        "  bodyShape: 'object', required: [], enumValues: [],"
+        "  supportedDeviceTypes: [], bodyJson: $body"
+        "})",
+        {"cid": cid, "name": name, "body": body_json},
+    )
+
+
+class TestGetRawSchema:
+    def test_returns_bodyjson_blob(self, gm):
+        _insert_schema_component(gm, "test:schemas:Foo", "RAW_BODY_PAYLOAD", "Foo")
+        tools = _make_tools(gm)
+        out = tools["get_raw_schema"](component_id="test:schemas:Foo")
+        parsed = json.loads(out)
+        assert parsed["component_id"] == "test:schemas:Foo"
+        assert parsed["name"] == "Foo"
+        assert parsed["section"] == "schemas"
+        assert parsed["bodyShape"] == "object"
+        assert parsed["bodyJson"] == "RAW_BODY_PAYLOAD"
+
+    def test_unknown_component_raises(self, gm):
+        tools = _make_tools(gm)
+        with pytest.raises(ToolError, match="No SchemaComponent"):
+            tools["get_raw_schema"](component_id="does:not:exist")
+
+    def test_empty_component_id_raises(self, gm):
+        tools = _make_tools(gm)
+        with pytest.raises(ToolError, match="empty"):
+            tools["get_raw_schema"](component_id="  ")
+
+    def test_oversize_blob_returns_hint_envelope(self, gm, monkeypatch):
+        big = "a" * 5000
+        _insert_schema_component(gm, "test:schemas:Big", big, "Big")
+        monkeypatch.setenv("MCP_GRAPH_RAW_SCHEMA_MAX_BYTES", "1000")
+        tools = _make_tools(gm)
+        out = tools["get_raw_schema"](component_id="test:schemas:Big")
+        parsed = json.loads(out)
+        assert "error" in parsed
+        assert parsed["component_id"] == "test:schemas:Big"
+        assert parsed["size_bytes"] > 1000
+        assert parsed["cap_bytes"] == 1000
+        assert "hint" in parsed
+        assert "bodyJson" not in parsed

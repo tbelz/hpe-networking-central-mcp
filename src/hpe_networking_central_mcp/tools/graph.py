@@ -549,6 +549,75 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         return json.dumps(rows, indent=2, default=str)
 
     @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
+    )
+    def get_raw_schema(component_id: str) -> str:
+        """Fetch the raw OpenAPI ``bodyJson`` for one ``SchemaComponent`` by id.
+
+        Escape hatch for the per-cell truncation envelope returned by
+        ``query_graph`` when ``RETURN c.bodyJson`` would be too large. Prefer
+        walking ``(:SchemaComponent)-[:COMPOSED_OF*0..5]->()-[:HAS_PROPERTY]->(:Property)``
+        for structural exploration; reach for this tool only when you need
+        the literal JSON (e.g. to read a vendor extension not surfaced as a
+        graph property).
+
+        Args:
+            component_id: The ``SchemaComponent.component_id`` primary key
+                (e.g. ``"central:schemas:VlanInterface"``).
+
+        Returns:
+            JSON object ``{"component_id": "...", "name": "...", "section": "...",
+            "bodyShape": "...", "bodyJson": "..."}``. If the body exceeds
+            ~200 KB, returns ``{"error": "...", "size_bytes": N, "hint":
+            "walk COMPOSED_OF/HAS_PROPERTY instead"}``.
+        """
+        if not component_id or not component_id.strip():
+            raise ToolError("component_id cannot be empty.")
+
+        try:
+            rows = graph.query(
+                "MATCH (c:SchemaComponent {component_id: $cid}) "
+                "RETURN c.component_id AS component_id, c.name AS name, "
+                "       c.section AS section, c.bodyShape AS bodyShape, "
+                "       c.bodyJson AS bodyJson",
+                params={"cid": component_id},
+                read_only=True,
+            )
+        except Exception as exc:
+            raise ToolError(f"Lookup failed: {exc}")
+
+        if not rows:
+            raise ToolError(
+                f"No SchemaComponent with component_id={component_id!r}. "
+                "Use query_graph to list candidates: "
+                "MATCH (c:SchemaComponent) WHERE c.name CONTAINS '<frag>' "
+                "RETURN c.component_id, c.name LIMIT 25"
+            )
+
+        row = rows[0]
+        body = row.get("bodyJson") or ""
+        max_blob = _env_int("MCP_GRAPH_RAW_SCHEMA_MAX_BYTES", 200_000)
+        if len(body) > max_blob:
+            return json.dumps(
+                {
+                    "error": "bodyJson exceeds raw-schema cap",
+                    "component_id": row.get("component_id"),
+                    "name": row.get("name"),
+                    "size_bytes": len(body),
+                    "cap_bytes": max_blob,
+                    "hint": (
+                        "Walk the property graph instead: "
+                        "MATCH (root:SchemaComponent {component_id: $cid})"
+                        "-[:COMPOSED_OF*0..5]->(c)-[:HAS_PROPERTY]->(p:Property) "
+                        "RETURN c.name, p.name, p.type, p.required"
+                    ),
+                },
+                indent=2,
+            )
+
+        return json.dumps(row, indent=2, default=str)
+
+    @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, openWorldHint=False),
     )
     def write_graph(cypher: str, parameters: str = "{}") -> str:
