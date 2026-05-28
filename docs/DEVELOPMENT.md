@@ -6,6 +6,24 @@ The graph schema uses a single bootstrap DDL layer:
 
 1. **Bootstrap DDL** ([src/hpe_networking_central_mcp/graph/schema.py](src/hpe_networking_central_mcp/graph/schema.py)) — Static node/relationship tables for the core domain model (Org, Site, Device, ConfigProfile, etc.) and knowledge layer (ApiEndpoint, ApiCategory, DocSection, Script).
 
+## Runtime modes
+
+The server has two startup modes:
+
+- **Connected** — `CENTRAL_BASE_URL` / `CENTRAL_CLIENT_ID` /
+  `CENTRAL_CLIENT_SECRET` are set (via env vars or the equivalent
+  `--central-url` / `--client-id` / `--client-secret` CLI args). The
+  OAuth2 token is validated at startup, the auto-run seeds populate the
+  domain graph, and the live-API tools (`call_central_api`,
+  `call_greenlake_api`, `execute_script`) are registered.
+- **Discovery-only** — no Central credentials configured. The server
+  boots without contacting Central, skips the auto-run seeds, and only
+  registers `query_graph`, `write_graph`, and the script-CRUD tools.
+  Useful for local UI work and for review sessions where the agent
+  drafts API calls / scripts that the user runs later in a connected
+  workspace. Locally: `uv run hpe-networking-central-mcp` with an empty
+  env.
+
 ## Key Modules
 
 | Module | Purpose |

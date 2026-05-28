@@ -234,10 +234,30 @@ Claude Desktop reads its MCP servers from
 Claude Code reads `~/.config/claude-code/config.json` and uses the same
 schema.
 
-Paste the snippet below into the `mcpServers` block, replace the five
-placeholders, and restart the client. No `.env` file is needed — secrets
-are passed inline via Docker `-e` flags. The included `*-readonly` entry
-runs the same image with `READ_ONLY=true` for inspection-only sessions.
+Paste the snippet below into the `mcpServers` block, replace the
+placeholders, and restart the client. No `.env` file is needed — the
+credentials are passed as plain CLI arguments to the server binary
+running inside the container, so there is no separate `env` block to
+keep in sync. Three profiles are shown:
+
+- **`hpe-networking-central-mcp`** — full access; can read **and** write
+  via the Central / GreenLake APIs.
+- **`hpe-networking-central-mcp-readonly`** — same image with
+  `--read-only`; mutating endpoints are refused at the HTTP client layer.
+- **`hpe-networking-central-mcp-discovery-only`** — **no credentials**.
+  The server boots in *discovery-only* mode: `query_graph`,
+  `write_graph`, and the script-CRUD tools are available so the agent
+  can design API calls and draft scripts, but no live API tools
+  (`call_central_api`, `call_greenlake_api`, `execute_script`) are
+  registered. Use this for review / authoring sessions before granting
+  network access.
+
+> **Security note**: CLI arguments to a process are visible to anyone
+> who can run `docker inspect` or `ps` on the host. On a shared
+> workstation, swap the inline `--client-secret` / `--glp-client-secret`
+> for `--env-file /path/to/.env` (Docker) or your platform's secret
+> store; the server still accepts the same values via the
+> `CENTRAL_*` / `GREENLAKE_*` environment variables.
 
 ```json
 {
@@ -247,51 +267,45 @@ runs the same image with `READ_ONLY=true` for inspection-only sessions.
       "args": [
         "run", "-i", "--rm", "--pull", "always",
         "-v", "central-scripts:/scripts/library",
-        "-e", "CENTRAL_BASE_URL",
-        "-e", "CENTRAL_CLIENT_ID",
-        "-e", "CENTRAL_CLIENT_SECRET",
-        "-e", "GREENLAKE_CLIENT_ID",
-        "-e", "GREENLAKE_CLIENT_SECRET",
-        "ghcr.io/tbelz/hpe-networking-central-mcp:main"
-      ],
-      "env": {
-        "CENTRAL_BASE_URL": "https://apigw-YOUR_CLUSTER.central.arubanetworks.com",
-        "CENTRAL_CLIENT_ID": "REPLACE_WITH_YOUR_CENTRAL_CLIENT_ID",
-        "CENTRAL_CLIENT_SECRET": "REPLACE_WITH_YOUR_CENTRAL_CLIENT_SECRET",
-        "GREENLAKE_CLIENT_ID": "REPLACE_WITH_YOUR_GLP_CLIENT_ID",
-        "GREENLAKE_CLIENT_SECRET": "REPLACE_WITH_YOUR_GLP_CLIENT_SECRET"
-      }
+        "ghcr.io/tbelz/hpe-networking-central-mcp:main",
+        "--central-url", "https://apigw-YOUR_CLUSTER.central.arubanetworks.com",
+        "--client-id", "REPLACE_WITH_YOUR_CENTRAL_CLIENT_ID",
+        "--client-secret", "REPLACE_WITH_YOUR_CENTRAL_CLIENT_SECRET",
+        "--glp-client-id", "REPLACE_WITH_YOUR_GLP_CLIENT_ID",
+        "--glp-client-secret", "REPLACE_WITH_YOUR_GLP_CLIENT_SECRET"
+      ]
     },
     "hpe-networking-central-mcp-readonly": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm", "--pull", "always",
         "-v", "central-scripts:/scripts/library",
-        "-e", "CENTRAL_BASE_URL",
-        "-e", "CENTRAL_CLIENT_ID",
-        "-e", "CENTRAL_CLIENT_SECRET",
-        "-e", "GREENLAKE_CLIENT_ID",
-        "-e", "GREENLAKE_CLIENT_SECRET",
-        "-e", "READ_ONLY",
+        "ghcr.io/tbelz/hpe-networking-central-mcp:main",
+        "--central-url", "https://apigw-YOUR_CLUSTER.central.arubanetworks.com",
+        "--client-id", "REPLACE_WITH_YOUR_CENTRAL_CLIENT_ID",
+        "--client-secret", "REPLACE_WITH_YOUR_CENTRAL_CLIENT_SECRET",
+        "--glp-client-id", "REPLACE_WITH_YOUR_GLP_CLIENT_ID",
+        "--glp-client-secret", "REPLACE_WITH_YOUR_GLP_CLIENT_SECRET",
+        "--read-only"
+      ]
+    },
+    "hpe-networking-central-mcp-discovery-only": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm", "--pull", "always",
+        "-v", "central-scripts:/scripts/library",
         "ghcr.io/tbelz/hpe-networking-central-mcp:main"
-      ],
-      "env": {
-        "CENTRAL_BASE_URL": "https://apigw-YOUR_CLUSTER.central.arubanetworks.com",
-        "CENTRAL_CLIENT_ID": "REPLACE_WITH_YOUR_CENTRAL_CLIENT_ID",
-        "CENTRAL_CLIENT_SECRET": "REPLACE_WITH_YOUR_CENTRAL_CLIENT_SECRET",
-        "GREENLAKE_CLIENT_ID": "REPLACE_WITH_YOUR_GLP_CLIENT_ID",
-        "GREENLAKE_CLIENT_SECRET": "REPLACE_WITH_YOUR_GLP_CLIENT_SECRET",
-        "READ_ONLY": "true"
-      }
+      ]
     }
   }
 }
 ```
 
-The same `env` / `-e` pattern works for any other MCP client that supports
-the standard `command` + `args` + `env` schema. Drop the second entry if you
-don't need a read-only profile, or drop the `GREENLAKE_*` lines if you're
-only using Central APIs.
+The same flat-`args` pattern works for any other MCP client that
+supports the standard `command` + `args` schema. Drop profiles you do
+not need, omit the `--glp-*` flags if you're only using Central APIs,
+or fall back to the equivalent `-e CENTRAL_BASE_URL=...` Docker flags
+if you prefer environment variables.
 
 ## Tools
 

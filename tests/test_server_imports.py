@@ -46,6 +46,13 @@ def test_server_module_imports_cleanly(monkeypatch, tmp_path):
     monkeypatch.setattr(cc.GreenLakeClient, "validate", lambda self: None)
 
     # Ensure a fresh import — server.py runs all its setup at module scope.
+    # Stop any IPC server from a previous import before evicting the module
+    # to avoid leaking background threads into subsequent tests.
+    _prev = sys.modules.get("hpe_networking_central_mcp.server")
+    if _prev is not None:
+        _ipc = getattr(_prev, "ipc_server", None)
+        if _ipc is not None:
+            _ipc.stop()
     sys.modules.pop("hpe_networking_central_mcp.server", None)
 
     module = importlib.import_module("hpe_networking_central_mcp.server")
@@ -54,3 +61,61 @@ def test_server_module_imports_cleanly(monkeypatch, tmp_path):
     assert hasattr(module, "mcp")
     assert hasattr(module, "settings")
     assert hasattr(module, "logger")
+    assert module._offline_mode is False
+    assert module.client is not None
+
+
+def test_server_module_imports_offline(monkeypatch, tmp_path):
+    """Without credentials, the server must boot in discovery-only mode.
+
+    Guards against regressions in the credential gate: prior to the
+    discovery-only mode the server module called ``sys.exit(1)`` at import
+    time when no credentials were configured, which made the offline
+    deployment story impossible. The expected behaviour is now:
+
+      * module imports cleanly (no ``SystemExit``);
+      * ``_offline_mode`` is True and ``client`` is None;
+      * the connected-only tools (``call_central_api``, ``call_greenlake_api``,
+        ``execute_script``) are not registered on the FastMCP instance.
+    """
+    for var in (
+        "CENTRAL_BASE_URL",
+        "CENTRAL_CLIENT_ID",
+        "CENTRAL_CLIENT_SECRET",
+        "GREENLAKE_CLIENT_ID",
+        "GREENLAKE_CLIENT_SECRET",
+        "READ_ONLY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("SCRIPT_LIBRARY_PATH", str(tmp_path / "scripts"))
+    monkeypatch.setenv("GRAPH_DB_PATH", str(tmp_path / "graph.db"))
+    monkeypatch.setenv("KNOWLEDGE_RELEASE_REPO", "")  # skip download path
+
+    # Stop any IPC server from a previous import before evicting the module.
+    _prev = sys.modules.get("hpe_networking_central_mcp.server")
+    if _prev is not None:
+        _ipc = getattr(_prev, "ipc_server", None)
+        if _ipc is not None:
+            _ipc.stop()
+    sys.modules.pop("hpe_networking_central_mcp.server", None)
+
+    module = importlib.import_module("hpe_networking_central_mcp.server")
+
+    assert module._offline_mode is True
+    assert module.client is None
+    assert module.glp_client is None
+
+    # FastMCP stores registered tools on the underlying tool manager; the
+    # exact attribute name has been stable across recent FastMCP releases
+    # but we look it up defensively so this test does not become a tight
+    # coupling.
+    tool_mgr = getattr(module.mcp, "_tool_manager", None)
+    assert tool_mgr is not None, "FastMCP changed tool-manager attribute name"
+    tool_names = {t.name for t in tool_mgr._tools.values()}
+    for connected_only in ("call_central_api", "call_greenlake_api", "execute_script"):
+        assert connected_only not in tool_names, (
+            f"{connected_only} must not be registered in discovery-only mode"
+        )
+    # Discovery tools must still be present.
+    for must_have in ("query_graph", "write_graph", "list_scripts", "save_script"):
+        assert must_have in tool_names, f"{must_have} missing in discovery-only mode"
