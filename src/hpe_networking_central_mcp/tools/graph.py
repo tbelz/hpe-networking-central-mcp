@@ -42,6 +42,98 @@ def _default_stale_threshold_seconds() -> int:
         return 900
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        v = int(raw)
+        return v if v > 0 else default
+    except ValueError:
+        return default
+
+
+def _per_cell_byte_cap() -> int:
+    return _env_int("MCP_GRAPH_PER_CELL_BYTES", 4096)
+
+
+def _per_response_byte_cap() -> int:
+    return _env_int("MCP_GRAPH_PER_RESPONSE_BYTES", 50_000)
+
+
+def _truncate_cell(value: str, cap: int) -> dict:
+    """Replace an oversize string cell with a typed truncation envelope.
+
+    Keeps the agent aware the value exists (and how to fetch it) instead of
+    silently inlining a 100 KB JSON blob like ``bodyJson``.
+    """
+    return {
+        "_truncated": True,
+        "preview": value[:200],
+        "size_bytes": len(value),
+        "hint": (
+            "Cell exceeded per-cell cap. Use get_raw_schema(component_id) "
+            "for raw JSON, or walk COMPOSED_OF/HAS_PROPERTY to enumerate "
+            "fields structurally."
+        ),
+    }
+
+
+def _apply_per_cell_cap(rows: list[dict], cap: int) -> list[dict]:
+    """Walk rows in place; replace string cells longer than ``cap`` with envelopes."""
+    if not rows or cap <= 0:
+        return rows
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key, val in list(row.items()):
+            if isinstance(val, str) and len(val) > cap:
+                row[key] = _truncate_cell(val, cap)
+    return rows
+
+
+def _apply_response_byte_cap(
+    rows: list[dict], cap: int, base_envelope: dict | None = None
+) -> tuple[list[dict], dict | None]:
+    """If the JSON-serialised rows exceed ``cap``, drop rows until they fit.
+
+    Returns ``(rows_to_emit, envelope_or_None)``. When trimming occurs, the
+    envelope is the wrapper to serialise instead of the raw row array.
+    """
+    if cap <= 0 or not rows:
+        return rows, None
+    total = len(json.dumps(rows, default=str))
+    if total <= cap:
+        return rows, None
+    # Binary-search the largest prefix that fits under the cap.
+    lo, hi = 0, len(rows)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if len(json.dumps(rows[:mid], default=str)) <= cap:
+            lo = mid
+        else:
+            hi = mid - 1
+    kept = rows[:lo]
+    env = {
+        "truncated": True,
+        "reason": "response_byte_cap",
+        "cap_bytes": cap,
+        "total_bytes": total,
+        "rows_returned": len(kept),
+        "rows_dropped": len(rows) - len(kept),
+        "warning": (
+            "Response exceeded byte cap. Add LIMIT/WHERE, project fewer "
+            "columns, or avoid RETURN c.bodyJson; use get_raw_schema for "
+            "single-component raw fetches."
+        ),
+        "rows": kept,
+    }
+    if base_envelope:
+        for k, v in base_envelope.items():
+            env.setdefault(k, v)
+    return kept, env
+
+
 def _coerce_datetime(value: object) -> datetime | None:
     """Best-effort conversion of a graph value to a timezone-aware datetime."""
     if value is None:
@@ -351,6 +443,16 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
           ``{"truncated": true, "cap": 200, "rows": [...], "warning": "..."}``.
         - Hard cap: 2000 rows. Queries returning more than that are rejected;
           add ``LIMIT``/``WHERE`` filters or aggregate.
+        - Per-cell cap: string cells > ~4 KB (e.g. ``RETURN c.bodyJson``) are
+          replaced with ``{"_truncated": true, "preview": "...", "size_bytes":
+          N, "hint": "use get_raw_schema(component_id) ..."}``. Walk the
+          property graph via COMPOSED_OF/HAS_PROPERTY instead of reading
+          ``bodyJson`` whenever possible.
+        - Per-response cap: ~50 KB serialised. If exceeded, rows are dropped
+          and the response wraps as ``{"truncated": true, "reason":
+          "response_byte_cap", "cap_bytes": 50000, "rows": [...]}``.
+          Both byte caps are overridable via ``MCP_GRAPH_PER_CELL_BYTES`` and
+          ``MCP_GRAPH_PER_RESPONSE_BYTES`` env vars.
 
         Args:
             cypher: A read-only Cypher query string (or a
@@ -399,6 +501,11 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
             _scan_freshness(rows, threshold, cypher) if threshold > 0 else []
         )
 
+        # Per-cell byte cap: replace oversize string cells (e.g. bodyJson)
+        # with a typed truncation envelope BEFORE row-cap envelope so the
+        # serialised payload stays small.
+        rows = _apply_per_cell_cap(rows, _per_cell_byte_cap())
+
         if n > soft_cap:
             envelope = {
                 "truncated": True,
@@ -413,7 +520,26 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
             }
             if freshness_warnings:
                 envelope["freshness_warnings"] = freshness_warnings
+            # Per-response byte cap on the row-trimmed envelope: if still too
+            # big (e.g. 200 wide rows), shrink further into a byte-cap envelope.
+            kept, byte_env = _apply_response_byte_cap(
+                envelope["rows"], _per_response_byte_cap(),
+            )
+            if byte_env is not None:
+                if freshness_warnings:
+                    byte_env["freshness_warnings"] = freshness_warnings
+                byte_env["row_cap"] = soft_cap
+                byte_env["total_returned"] = n
+                return json.dumps(byte_env, indent=2, default=str)
             return json.dumps(envelope, indent=2, default=str)
+
+        # Per-response byte cap on un-truncated result.
+        kept, byte_env = _apply_response_byte_cap(rows, _per_response_byte_cap())
+        if byte_env is not None:
+            if freshness_warnings:
+                byte_env["freshness_warnings"] = freshness_warnings
+            return json.dumps(byte_env, indent=2, default=str)
+
         if freshness_warnings:
             return json.dumps(
                 {"rows": rows, "freshness_warnings": freshness_warnings},

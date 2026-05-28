@@ -204,3 +204,68 @@ class TestQueryGraphFreshness:
         assert isinstance(parsed, list), (
             f"threshold=0 should disable freshness wrapping, got {type(parsed)}"
         )
+
+
+# ── Byte caps (per-cell, per-response) ──────────────────────────────
+
+
+class TestQueryGraphByteCaps:
+    def test_per_cell_cap_truncates_large_string_value(self, gm, monkeypatch):
+        monkeypatch.setenv("MCP_GRAPH_PER_CELL_BYTES", "200")
+        qg = _make_query_tool(gm)
+        big = "x" * 1000
+        out = qg(
+            cypher="UNWIND [$s] AS v RETURN v",
+            parameters=json.dumps({"s": big}),
+        )
+        parsed = json.loads(out)
+        assert isinstance(parsed, list)
+        cell = parsed[0]["v"]
+        assert isinstance(cell, dict)
+        assert cell.get("_truncated") is True
+        assert cell.get("size_bytes") == 1000
+        assert len(cell.get("preview", "")) <= 200
+        assert "hint" in cell
+
+    def test_per_cell_cap_leaves_small_values_alone(self, gm, monkeypatch):
+        monkeypatch.setenv("MCP_GRAPH_PER_CELL_BYTES", "200")
+        qg = _make_query_tool(gm)
+        out = qg(
+            cypher="UNWIND [$s] AS v RETURN v",
+            parameters=json.dumps({"s": "small"}),
+        )
+        parsed = json.loads(out)
+        assert parsed == [{"v": "small"}]
+
+    def test_per_response_byte_cap_returns_envelope(self, gm, monkeypatch):
+        # Force a very small response cap so a small bare list trips it.
+        monkeypatch.setenv("MCP_GRAPH_PER_RESPONSE_BYTES", "100")
+        qg = _make_query_tool(gm)
+        out = qg(cypher="UNWIND range(1, 50) AS i RETURN i")
+        parsed = json.loads(out)
+        assert isinstance(parsed, dict)
+        assert parsed.get("truncated") is True
+        assert parsed.get("reason") == "response_byte_cap"
+        assert parsed.get("cap_bytes") == 100
+        assert "rows" in parsed
+        assert "warning" in parsed
+        # We dropped at least one row.
+        assert parsed.get("rows_dropped", 0) >= 1
+
+    def test_response_byte_cap_respects_env_default(self, gm):
+        # No env override → default 50_000; a small result must pass through.
+        qg = _make_query_tool(gm)
+        out = qg(cypher="UNWIND range(1, 5) AS i RETURN i")
+        parsed = json.loads(out)
+        assert isinstance(parsed, list)
+        assert len(parsed) == 5
+
+    def test_invalid_env_falls_back_to_default(self, gm, monkeypatch):
+        monkeypatch.setenv("MCP_GRAPH_PER_CELL_BYTES", "not-a-number")
+        monkeypatch.setenv("MCP_GRAPH_PER_RESPONSE_BYTES", "0")
+        qg = _make_query_tool(gm)
+        out = qg(cypher="UNWIND range(1, 3) AS i RETURN i")
+        parsed = json.loads(out)
+        # Defaults still apply: small result is a bare list.
+        assert isinstance(parsed, list)
+        assert len(parsed) == 3
