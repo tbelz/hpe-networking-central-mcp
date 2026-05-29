@@ -244,6 +244,49 @@ def check_body_shape_kind_agreement(conn) -> InvariantViolation | None:
     )
 
 
+def check_no_orphaned_properties(conn) -> InvariantViolation | None:
+    """INV-8: every ``Property`` must have at least one incoming
+    ``HAS_PROPERTY`` edge — otherwise it is an orphan unreachable from
+    any SchemaComponent.
+
+    Orphans appear when the populator buffers a ``Property`` row plus a
+    ``HAS_PROPERTY`` edge from an inline child SchemaComponent, then
+    drops the inline child's component row during a richer-wins
+    eviction without also dropping the dependent edge. ``COPY`` silently
+    rejects the foreign-key-violating edge row under ``ignore_errors=true``
+    and the Property is left dangling. A clean rebuild should always
+    report zero rows.
+    """
+    rows = _rows(
+        conn,
+        """
+        MATCH (p:Property)
+        WHERE NOT EXISTS { MATCH (:SchemaComponent)-[:HAS_PROPERTY]->(p) }
+        RETURN p.property_id AS property_id, p.name AS name
+        LIMIT 25
+        """,
+    )
+    if not rows:
+        return None
+    total = _rows(
+        conn,
+        """
+        MATCH (p:Property)
+        WHERE NOT EXISTS { MATCH (:SchemaComponent)-[:HAS_PROPERTY]->(p) }
+        RETURN COUNT(p) AS n
+        """,
+    )
+    n = total[0]["n"] if total else len(rows)
+    return InvariantViolation(
+        invariant="INV-8",
+        detail=(
+            f"{n} Property nodes have no incoming HAS_PROPERTY edge "
+            "(orphaned by populator eviction or stale preseed)"
+        ),
+        sample=rows,
+    )
+
+
 _CHECKS = (
     check_named_components_decompose,
     check_no_primitive_with_object_body,
@@ -251,6 +294,7 @@ _CHECKS = (
     check_no_duplicate_property_names_per_parent,
     check_named_object_components_have_properties,
     check_body_shape_kind_agreement,
+    check_no_orphaned_properties,
 )
 
 
