@@ -605,3 +605,171 @@ class TestInlineSchemaMaterialisation:
             "RETURN p.name AS name ORDER BY p.name"
         ).rows_as_dict())
         assert [r["name"] for r in rows] == ["address", "prefer"]
+
+
+# ── EC1: absent x-supportedDeviceType lifts to NULL ─────────────────
+
+
+def _make_spec_with_unannotated_property() -> dict:
+    """Spec where one property has NO x-supportedDeviceType extension.
+
+    Used to assert that absent ⇒ NULL (not empty list), so consumers
+    can filter with ``p.supportedDeviceTypes IS NULL OR ...`` to mean
+    "applies to all device types".
+    """
+    return {
+        "openapi": "3.0.0",
+        "info": {"title": "EC1 fixture"},
+        "components": {
+            "schemas": {
+                "MixedConfig": {
+                    "type": "object",
+                    "properties": {
+                        "annotated": {
+                            "type": "string",
+                            "x-supportedDeviceType": ["Switch CX"],
+                        },
+                        "unannotated": {
+                            "type": "string",
+                        },
+                    },
+                }
+            }
+        },
+        "paths": {
+            "/v1/mixed": {
+                "post": {
+                    "operationId": "postMixed",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/MixedConfig"}
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    }
+
+
+class TestSupportedDeviceTypesNullSemantic:
+    def test_property_without_extension_is_null(self, fresh_db):
+        _, conn = fresh_db
+        _seed_endpoint(conn, "POST", "/v1/mixed")
+        from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph
+        populate_schema_graph(
+            conn,
+            spec_source="central",
+            spec=_make_spec_with_unannotated_property(),
+            endpoints=[("POST", "/v1/mixed")],
+        )
+        rows = list(conn.execute(
+            "MATCH (:SchemaComponent {name: 'MixedConfig'})"
+            "-[:HAS_PROPERTY]->(p:Property {name: 'unannotated'}) "
+            "RETURN p.supportedDeviceTypes AS sdt"
+        ).rows_as_dict())
+        assert rows, "unannotated property should still exist"
+        assert rows[0]["sdt"] is None, (
+            "absent x-supportedDeviceType should lift to NULL, "
+            f"got {rows[0]['sdt']!r}"
+        )
+
+    def test_property_with_extension_keeps_list(self, fresh_db):
+        _, conn = fresh_db
+        _seed_endpoint(conn, "POST", "/v1/mixed")
+        from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph
+        populate_schema_graph(
+            conn,
+            spec_source="central",
+            spec=_make_spec_with_unannotated_property(),
+            endpoints=[("POST", "/v1/mixed")],
+        )
+        rows = list(conn.execute(
+            "MATCH (:SchemaComponent {name: 'MixedConfig'})"
+            "-[:HAS_PROPERTY]->(p:Property {name: 'annotated'}) "
+            "RETURN p.supportedDeviceTypes AS sdt"
+        ).rows_as_dict())
+        assert rows[0]["sdt"] == ["Switch CX"]
+
+    def test_canonical_is_null_filter_returns_all_devices_properties(self, fresh_db):
+        """The EC1 fix: ``IS NULL OR $deviceType IN ...`` returns both
+        the device-specific annotated row AND the unannotated row that
+        "applies to every device"."""
+        _, conn = fresh_db
+        _seed_endpoint(conn, "POST", "/v1/mixed")
+        from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph
+        populate_schema_graph(
+            conn,
+            spec_source="central",
+            spec=_make_spec_with_unannotated_property(),
+            endpoints=[("POST", "/v1/mixed")],
+        )
+        rows = list(conn.execute(
+            "MATCH (e:ApiEndpoint {endpoint_id: 'POST:/v1/mixed'})"
+            "-[:HAS_REQUEST_BODY]->(:RequestBody)-[:BODY_REFERENCES]->"
+            "(root:SchemaComponent) "
+            "MATCH (root)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)"
+            "-[:HAS_PROPERTY]->(p:Property) "
+            "WHERE p.supportedDeviceTypes IS NULL "
+            "   OR size(p.supportedDeviceTypes) = 0 "
+            "   OR $dt IN p.supportedDeviceTypes "
+            "RETURN p.name AS name ORDER BY p.name",
+            parameters={"dt": "Switch CX"},
+        ).rows_as_dict())
+        names = sorted(r["name"] for r in rows)
+        assert names == ["annotated", "unannotated"]
+
+
+# ── Warning logs ─────────────────────────────────────────────────────
+
+
+class TestPopulatorWarningLogs:
+    """Best-effort failures during population must emit structured warnings
+    instead of being silently swallowed."""
+
+    def test_warning_logged_when_requestbody_has_no_schema(self, fresh_db):
+        """A requestBody with content but no resolvable schema must log a
+        ``requestbody_without_schema_root`` warning so operators can spot
+        malformed specs without diffing the DB."""
+        import structlog
+
+        _, conn = fresh_db
+        _seed_endpoint(conn, "POST", "/v1/no-schema")
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "x"},
+            "paths": {
+                "/v1/no-schema": {
+                    "post": {
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/json": {
+                                    # no `schema` key on purpose
+                                },
+                            },
+                        },
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                }
+            },
+        }
+        from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph
+        with structlog.testing.capture_logs() as cap:
+            populate_schema_graph(
+                conn,
+                spec_source="central",
+                spec=spec,
+                endpoints=[("POST", "/v1/no-schema")],
+            )
+        events = [e for e in cap if e.get("event") == "requestbody_without_schema_root"]
+        assert events, f"expected requestbody_without_schema_root warning, got {cap!r}"
+        ev = events[0]
+        assert ev["endpoint_id"] == "POST:/v1/no-schema"
+        assert ev["method"] == "POST"
+        assert ev["path"] == "/v1/no-schema"
+        assert "application/json" in ev["content_types"]
+        assert ev["log_level"] == "warning"

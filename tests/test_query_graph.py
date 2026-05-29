@@ -204,3 +204,181 @@ class TestQueryGraphFreshness:
         assert isinstance(parsed, list), (
             f"threshold=0 should disable freshness wrapping, got {type(parsed)}"
         )
+
+
+# ── Byte caps (per-cell, per-response) ──────────────────────────────
+
+
+class TestQueryGraphByteCaps:
+    def test_per_cell_cap_truncates_large_string_value(self, gm, monkeypatch):
+        monkeypatch.setenv("MCP_GRAPH_PER_CELL_BYTES", "200")
+        qg = _make_query_tool(gm)
+        big = "x" * 1000
+        out = qg(
+            cypher="UNWIND [$s] AS v RETURN v",
+            parameters=json.dumps({"s": big}),
+        )
+        parsed = json.loads(out)
+        assert isinstance(parsed, list)
+        cell = parsed[0]["v"]
+        assert isinstance(cell, dict)
+        assert cell.get("_truncated") is True
+        assert cell.get("size_bytes") == 1000
+        assert len(cell.get("preview", "")) <= 200
+        assert "hint" in cell
+
+    def test_per_cell_cap_leaves_small_values_alone(self, gm, monkeypatch):
+        monkeypatch.setenv("MCP_GRAPH_PER_CELL_BYTES", "200")
+        qg = _make_query_tool(gm)
+        out = qg(
+            cypher="UNWIND [$s] AS v RETURN v",
+            parameters=json.dumps({"s": "small"}),
+        )
+        parsed = json.loads(out)
+        assert parsed == [{"v": "small"}]
+
+    def test_per_response_byte_cap_returns_envelope(self, gm, monkeypatch):
+        # Force a very small response cap so a small bare list trips it.
+        monkeypatch.setenv("MCP_GRAPH_PER_RESPONSE_BYTES", "100")
+        qg = _make_query_tool(gm)
+        out = qg(cypher="UNWIND range(1, 50) AS i RETURN i")
+        parsed = json.loads(out)
+        assert isinstance(parsed, dict)
+        assert parsed.get("truncated") is True
+        assert parsed.get("reason") == "response_byte_cap"
+        assert parsed.get("cap_bytes") == 100
+        assert "rows" in parsed
+        assert "warning" in parsed
+        # We dropped at least one row.
+        assert parsed.get("rows_dropped", 0) >= 1
+
+    def test_response_byte_cap_respects_env_default(self, gm):
+        # No env override → default 50_000; a small result must pass through.
+        qg = _make_query_tool(gm)
+        out = qg(cypher="UNWIND range(1, 5) AS i RETURN i")
+        parsed = json.loads(out)
+        assert isinstance(parsed, list)
+        assert len(parsed) == 5
+
+    def test_invalid_env_falls_back_to_default(self, gm, monkeypatch):
+        monkeypatch.setenv("MCP_GRAPH_PER_CELL_BYTES", "not-a-number")
+        monkeypatch.setenv("MCP_GRAPH_PER_RESPONSE_BYTES", "0")
+        qg = _make_query_tool(gm)
+        out = qg(cypher="UNWIND range(1, 3) AS i RETURN i")
+        parsed = json.loads(out)
+        # Defaults still apply: small result is a bare list.
+        assert isinstance(parsed, list)
+        assert len(parsed) == 3
+
+
+# ── get_raw_schema tool ─────────────────────────────────────────────
+
+
+def _make_tools(gm):
+    settings = Settings(
+        central_base_url="https://x",
+        central_client_id="cid",
+        central_client_secret="csec",
+        read_only=True,
+    )
+    mcp = FastMCP("test-grs")
+    register_graph_tools(mcp, settings, gm)
+    return {t.name: t.fn for t in mcp._tool_manager._tools.values()}
+
+
+def _insert_schema_component(gm, cid: str, body_json: str, name: str = "TestComp") -> None:
+    gm.execute(
+        "CREATE (c:SchemaComponent {"
+        "  component_id: $cid, spec_source: 'test', section: 'schemas',"
+        "  name: $name, type: 'object', kind: 'object',"
+        "  bodyShape: 'object', required: [], enumValues: [],"
+        "  supportedDeviceTypes: [], bodyJson: $body"
+        "})",
+        {"cid": cid, "name": name, "body": body_json},
+    )
+
+
+class TestGetRawSchema:
+    def test_returns_bodyjson_blob(self, gm):
+        _insert_schema_component(gm, "test:schemas:Foo", "RAW_BODY_PAYLOAD", "Foo")
+        tools = _make_tools(gm)
+        out = tools["get_raw_schema"](component_id="test:schemas:Foo")
+        parsed = json.loads(out)
+        assert parsed["component_id"] == "test:schemas:Foo"
+        assert parsed["name"] == "Foo"
+        assert parsed["section"] == "schemas"
+        assert parsed["bodyShape"] == "object"
+        assert parsed["bodyJson"] == "RAW_BODY_PAYLOAD"
+
+    def test_unknown_component_raises(self, gm):
+        tools = _make_tools(gm)
+        with pytest.raises(ToolError, match="No SchemaComponent"):
+            tools["get_raw_schema"](component_id="does:not:exist")
+
+    def test_empty_component_id_raises(self, gm):
+        tools = _make_tools(gm)
+        with pytest.raises(ToolError, match="empty"):
+            tools["get_raw_schema"](component_id="  ")
+
+    def test_oversize_blob_returns_hint_envelope(self, gm, monkeypatch):
+        big = "a" * 5000
+        _insert_schema_component(gm, "test:schemas:Big", big, "Big")
+        monkeypatch.setenv("MCP_GRAPH_RAW_SCHEMA_MAX_BYTES", "1000")
+        tools = _make_tools(gm)
+        out = tools["get_raw_schema"](component_id="test:schemas:Big")
+        parsed = json.loads(out)
+        assert "error" in parsed
+        assert parsed["component_id"] == "test:schemas:Big"
+        assert parsed["size_bytes"] > 1000
+        assert parsed["cap_bytes"] == 1000
+        assert "hint" in parsed
+        assert "bodyJson" not in parsed
+
+
+# ── Tool aliasing (query_api_schema / query_fts / query_topology / query_yang) ──
+
+
+class TestQueryAliases:
+    ALIASES = ("query_graph", "query_api_schema", "query_fts", "query_topology", "query_yang")
+
+    def test_all_aliases_registered(self, gm):
+        tools = _make_tools(gm)
+        for name in self.ALIASES:
+            assert name in tools, f"missing tool alias {name}"
+
+    def test_each_alias_executes_simple_query(self, gm):
+        tools = _make_tools(gm)
+        for alias in self.ALIASES:
+            out = tools[alias](cypher="RETURN 1 AS n")
+            assert json.loads(out) == [{"n": 1}], f"{alias} failed RETURN 1"
+
+    def test_each_alias_respects_byte_caps(self, gm, monkeypatch):
+        monkeypatch.setenv("MCP_GRAPH_PER_CELL_BYTES", "100")
+        tools = _make_tools(gm)
+        big = "x" * 500
+        for alias in self.ALIASES:
+            out = tools[alias](
+                cypher="UNWIND [$s] AS v RETURN v",
+                parameters=json.dumps({"s": big}),
+            )
+            cell = json.loads(out)[0]["v"]
+            assert isinstance(cell, dict) and cell.get("_truncated") is True, (
+                f"{alias} did not apply per-cell cap"
+            )
+
+    def test_each_alias_empty_cypher_raises(self, gm):
+        tools = _make_tools(gm)
+        for alias in self.ALIASES:
+            with pytest.raises(ToolError, match="empty"):
+                tools[alias](cypher="  ")
+
+    def test_each_alias_docstring_within_budget(self, gm):
+        # Each focused docstring should stay under ~4000 chars so clients
+        # that cap tool descriptions around 4 KB don't truncate guidance.
+        tools = _make_tools(gm)
+        for alias in self.ALIASES:
+            doc = tools[alias].__doc__ or ""
+            assert len(doc) < 4000, (
+                f"{alias} docstring is {len(doc)} chars — keep it under 4000 "
+                "so tool-description-capping clients don't truncate guidance."
+            )

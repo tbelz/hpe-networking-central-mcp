@@ -501,8 +501,9 @@ MATCH (e:ApiEndpoint {method: $m, path: $p})
 MATCH (root)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)
       -[:HAS_PROPERTY]->(p:Property)
 WHERE $deviceType = ''
-   OR $deviceType IN p.supportedDeviceTypes
+   OR p.supportedDeviceTypes IS NULL
    OR size(p.supportedDeviceTypes) = 0
+   OR $deviceType IN p.supportedDeviceTypes
 RETURN c.name AS host, c.bodyShape AS shape,
        p.name, p.type, p.required, p.enumValues,
        p.yangPath
@@ -552,7 +553,9 @@ RETURN e.method, e.path
 ```cypher
 // Headline use case: which fields of an NTP profile apply to Switch CX?
 MATCH (c:SchemaComponent {name: $componentName})-[:COMPOSED_OF*0..5]->(host:SchemaComponent)-[:HAS_PROPERTY]->(p:Property)
-WHERE 'Switch CX' IN p.supportedDeviceTypes
+WHERE p.supportedDeviceTypes IS NULL
+   OR size(p.supportedDeviceTypes) = 0
+   OR 'Switch CX' IN p.supportedDeviceTypes
 RETURN host.name AS declaredOn, p.name, p.type, p.required, p.yangPath
 ORDER BY p.name
 ```
@@ -638,8 +641,9 @@ MATCH (e:ApiEndpoint {method: $m, path: $p})
 MATCH (root)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)
       -[:HAS_PROPERTY]->(p:Property)
 WHERE $deviceType = ''
-   OR $deviceType IN p.supportedDeviceTypes
+   OR p.supportedDeviceTypes IS NULL
    OR size(p.supportedDeviceTypes) = 0
+   OR $deviceType IN p.supportedDeviceTypes
 RETURN c.name AS host, c.bodyShape AS shape,
        p.name, p.type, p.required, p.enumValues,
        p.supportedDeviceTypes

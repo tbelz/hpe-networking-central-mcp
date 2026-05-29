@@ -18,11 +18,61 @@ The server has two startup modes:
   `call_greenlake_api`, `execute_script`) are registered.
 - **Discovery-only** — no Central credentials configured. The server
   boots without contacting Central, skips the auto-run seeds, and only
-  registers `query_graph`, `write_graph`, and the script-CRUD tools.
+  registers the graph query/write tools and the script-CRUD tools.
   Useful for local UI work and for review sessions where the agent
   drafts API calls / scripts that the user runs later in a connected
   workspace. Locally: `uv run hpe-networking-central-mcp` with an empty
   env.
+
+## Graph query tools (ADR-012)
+
+The graph surface is exposed through **five `query_*` tools** that share
+one Cypher executor, the same row caps, and the same byte caps. They
+differ only in their docstrings (canned patterns) so clients with
+limited per-tool description budgets can pull in only the docs they
+need:
+
+| Tool | Use when |
+|------|----------|
+| `query_graph` | Generic escape hatch. Use when none of the focused aliases fit. |
+| `query_api_schema` | Walking the OpenAPI surface — endpoints, components, properties, `COMPOSED_OF`, `PROPERTY_OF_TYPE`, `supportedDeviceTypes` filter. |
+| `query_fts` | Full-text search via `CALL QUERY_FTS_INDEX(...)` over `api_fts`, `doc_fts`, `script_fts`, `device_fts`, `site_fts`, `config_fts`. |
+| `query_topology` | Live network — Org / SiteCollection / Site / Device / DeviceGroup / UnmanagedDevice and their `HAS_*` / `CONNECTED_TO` / `LINKED_TO` edges. |
+| `query_yang` | `YangPath`, `PROPERTY_AT_YANG`, `CONFIGURES_YANG` provenance. |
+
+All five are read-only and idempotent. Writes go through `write_graph`.
+
+### Response caps and `get_raw_schema`
+
+Two byte caps protect agent context budgets:
+
+| Env var | Default | What it caps |
+|---------|---------|--------------|
+| `MCP_GRAPH_PER_CELL_BYTES` | `4096` | Per-cell string size. Larger cells are replaced with a `{"_truncated": true, "preview": ..., "size_bytes": N, "hint": "..."}` envelope. |
+| `MCP_GRAPH_PER_RESPONSE_BYTES` | `50000` | Total response size after row capping. Over-cap responses come back as `{"truncated": true, "reason": "response_byte_cap", ...}` with as many rows as fit. |
+| `MCP_GRAPH_RAW_SCHEMA_MAX_BYTES` | `200000` | Hard cap on `get_raw_schema(component_id)`. Above this the call is refused with a hint to walk `COMPOSED_OF*0..5` → `HAS_PROPERTY` instead of pulling the blob. |
+
+`get_raw_schema(component_id)` is the escape hatch for the per-cell
+envelope: it returns the raw `bodyJson` string for a single
+`SchemaComponent`, subject to the hard cap above.
+
+### `supportedDeviceTypes` semantic
+
+`Property.supportedDeviceTypes` is `NULL` when the property carries no
+`x-supportedDeviceType` vendor extension (i.e. it applies to **all**
+device types). An empty list (`[]`) is reserved for "explicitly
+restricted to no device types" and should not occur in healthy graphs.
+The canonical device-type filter is therefore:
+
+```cypher
+WHERE $deviceType = ''
+   OR p.supportedDeviceTypes IS NULL
+   OR size(p.supportedDeviceTypes) = 0
+   OR $deviceType IN p.supportedDeviceTypes
+```
+
+The `size(...) = 0` clause is a one-release safety net for graphs built
+against the pre-ADR-012 populator.
 
 ## Key Modules
 

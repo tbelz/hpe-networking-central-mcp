@@ -30,13 +30,17 @@ import json
 from typing import Any
 
 import pyarrow as pa
+import structlog
 
 from .oas_normalize import (
+
     _extract_referenced_components,
     _follow_ref,
     _strip_skeleton_keys,
     schema_richness,
 )
+
+logger = structlog.get_logger("oas_schema_graph")
 
 
 # ── Legacy JSON-blob decoder ────────────────────────────────────────
@@ -677,11 +681,15 @@ class _Batch:
                     "DETACH DELETE c, p",
                     parameters={"cid": cid, "prefix": cid + "#"},
                 )
-            except Exception:
+            except Exception as exc:
                 # Best-effort: COPY's ignore_errors=true will still
                 # protect us; a leftover orphan is preferable to a
                 # raised exception breaking the flush.
-                pass
+                logger.warning(
+                    "schemacomponent_detach_delete_failed",
+                    component_id=cid,
+                    error=str(exc),
+                )
 
         # ── Node tables (in dependency order) ──
         _copy_node_table(
@@ -829,17 +837,17 @@ def _rows_to_pa(rows: list[dict], schema: pa.Schema) -> pa.Table:
     """Materialise a list[dict] as a PyArrow table conforming to ``schema``.
 
     Missing keys are coerced to type-appropriate empty values
-    (``""`` / ``[]`` / ``False``).  This intentionally collapses NULL
-    into the empty value because none of the OAS-graph consumers rely
-    on ``IS NULL`` semantics — an absent ``readOnly`` is read as "not
-    read-only", an absent ``enumValues`` as "no enum constraint", etc.
+    (``""`` / ``[]`` / ``False``) for most columns. ``supportedDeviceTypes``
+    is the exception: ``None`` is preserved (yielding SQL NULL) so
+    consumers can distinguish "applies to all device types" (NULL) from
+    "explicitly restricted to no device types" (empty list).
     Column order follows ``schema``.
     """
     cols: dict[str, list] = {f.name: [] for f in schema}
     for r in rows:
         for f in schema:
             v = r.get(f.name)
-            if v is None:
+            if v is None and f.name != "supportedDeviceTypes":
                 if pa.types.is_string(f.type):
                     v = ""
                 elif pa.types.is_list(f.type):
@@ -991,6 +999,14 @@ def _collect_spec_into_batch(
             media, schema = _pick_media_schema(content)
             rb_id = f"{eid}#requestBody"
             root_ref = _root_ref(schema) or ""
+            if not root_ref:
+                logger.warning(
+                    "requestbody_without_schema_root",
+                    endpoint_id=eid,
+                    method=method,
+                    path=path,
+                    content_types=list(content.keys()),
+                )
             batch.add_request_body({
                 "request_body_id": rb_id,
                 "endpoint_id": eid,
@@ -1312,7 +1328,7 @@ def _compute_body_shape(body: dict) -> str:
     return "primitive"
 
 
-def _lift_supported_device_types(body: dict) -> list[str]:
+def _lift_supported_device_types(body: dict) -> list[str] | None:
     """Lift ``x-supportedDeviceType`` from a component body, if present.
 
     Many Aruba Central CX configuration schemas carry the device-type
@@ -1320,15 +1336,22 @@ def _lift_supported_device_types(body: dict) -> list[str]:
     of) on each leaf property. Surfacing it on the SchemaComponent lets
     callers slice ``MATCH (c:SchemaComponent) WHERE 'Switch CX' IN
     c.supportedDeviceTypes`` without descending into properties.
+
+    Returns ``None`` when the extension is absent so that consumers can
+    distinguish "applies to all device types" (NULL) from "explicitly
+    no device types" (empty list). An empty list in the source spec is
+    preserved as ``[]``.
     """
     if not isinstance(body, dict):
-        return []
+        return None
+    if "x-supportedDeviceType" not in body:
+        return None
     raw = body.get("x-supportedDeviceType")
     if isinstance(raw, list):
         return [v for v in raw if isinstance(v, str)]
     if isinstance(raw, str):
         return [raw]
-    return []
+    return None
 
 
 def _yang_module_for(yang_path: str) -> str:
@@ -1407,7 +1430,7 @@ def _ensure_component_node(
                     "bodyShape": "unresolved",
                     "required": [],
                     "enumValues": [],
-                    "supportedDeviceTypes": [],
+                    "supportedDeviceTypes": None,
                     "bodyJson": "",
                 },
                 richness=0,
@@ -1594,13 +1617,18 @@ def _emit_one_property(
     for k, v in _collect_x_extensions(resolved).items():
         extensions.setdefault(k, v)
 
-    sdt_raw = extensions.get(_TYPED_EXT_DEVICE_TYPE) or []
-    if isinstance(sdt_raw, list):
-        sdt = [v for v in sdt_raw if isinstance(v, str)]
-    elif isinstance(sdt_raw, str):
-        sdt = [sdt_raw]
+    if _TYPED_EXT_DEVICE_TYPE in extensions:
+        sdt_raw = extensions.get(_TYPED_EXT_DEVICE_TYPE)
+        if isinstance(sdt_raw, list):
+            sdt: list[str] | None = [v for v in sdt_raw if isinstance(v, str)]
+        elif isinstance(sdt_raw, str):
+            sdt = [sdt_raw]
+        else:
+            sdt = None
     else:
-        sdt = []
+        # Absent extension → property applies to every device type.
+        # Stored as NULL so consumers filter with `IS NULL OR ...`.
+        sdt = None
 
     yang_path_raw = extensions.get(_TYPED_EXT_YANG_PATH) or ""
     yang_path = yang_path_raw if isinstance(yang_path_raw, str) else ""

@@ -42,6 +42,107 @@ def _default_stale_threshold_seconds() -> int:
         return 900
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        v = int(raw)
+        return v if v > 0 else default
+    except ValueError:
+        return default
+
+
+def _per_cell_byte_cap() -> int:
+    return _env_int("MCP_GRAPH_PER_CELL_BYTES", 4096)
+
+
+def _per_response_byte_cap() -> int:
+    return _env_int("MCP_GRAPH_PER_RESPONSE_BYTES", 50_000)
+
+
+def _truncate_cell(value: str, cap: int) -> dict:
+    """Replace an oversize string cell with a typed truncation envelope.
+
+    Keeps the agent aware the value exists (and how to fetch it) instead of
+    silently inlining a 100 KB JSON blob like ``bodyJson``.
+    """
+    # Use UTF-8 byte length — multi-byte characters would otherwise cause the
+    # reported size and cap enforcement to diverge from the actual wire size.
+    byte_len = len(value.encode("utf-8"))
+    return {
+        "_truncated": True,
+        "preview": value[:200],
+        "size_bytes": byte_len,
+        "hint": (
+            "Cell exceeded per-cell cap. Use get_raw_schema(component_id) "
+            "for raw JSON, or walk COMPOSED_OF/HAS_PROPERTY to enumerate "
+            "fields structurally."
+        ),
+    }
+
+
+def _apply_per_cell_cap(rows: list[dict], cap: int) -> list[dict]:
+    """Walk rows in place; replace string cells longer than ``cap`` with envelopes."""
+    if not rows or cap <= 0:
+        return rows
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key, val in list(row.items()):
+            if isinstance(val, str) and len(val.encode("utf-8")) > cap:
+                row[key] = _truncate_cell(val, cap)
+    return rows
+
+
+def _apply_response_byte_cap(
+    rows: list[dict], cap: int, base_envelope: dict | None = None
+) -> tuple[list[dict], dict | None]:
+    """If the JSON-serialised rows exceed ``cap``, drop rows until they fit.
+
+    Returns ``(rows_to_emit, envelope_or_None)``. When trimming occurs, the
+    envelope is the wrapper to serialise instead of the raw row array.
+    """
+    def _measure(r: list[dict]) -> int:
+        # Measure UTF-8 bytes of the indented form — matching what the tool
+        # actually serialises — so the cap is a true byte budget, not a
+        # character count of compact JSON.
+        return len(json.dumps(r, default=str, indent=2).encode("utf-8"))
+
+    if cap <= 0 or not rows:
+        return rows, None
+    total = _measure(rows)
+    if total <= cap:
+        return rows, None
+    # Binary-search the largest prefix that fits under the cap.
+    lo, hi = 0, len(rows)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _measure(rows[:mid]) <= cap:
+            lo = mid
+        else:
+            hi = mid - 1
+    kept = rows[:lo]
+    env = {
+        "truncated": True,
+        "reason": "response_byte_cap",
+        "cap_bytes": cap,
+        "total_bytes": total,
+        "rows_returned": len(kept),
+        "rows_dropped": len(rows) - len(kept),
+        "warning": (
+            "Response exceeded byte cap. Add LIMIT/WHERE, project fewer "
+            "columns, or avoid RETURN c.bodyJson; use get_raw_schema for "
+            "single-component raw fetches."
+        ),
+        "rows": kept,
+    }
+    if base_envelope:
+        for k, v in base_envelope.items():
+            env.setdefault(k, v)
+    return kept, env
+
+
 def _coerce_datetime(value: object) -> datetime | None:
     """Best-effort conversion of a graph value to a timezone-aware datetime."""
     if value is None:
@@ -231,139 +332,19 @@ def _build_error_hint(error_msg: str, cypher: str = "") -> str:
 def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
     """Register graph query and write tools with the MCP server."""
 
-    @mcp.tool(
-        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
-    )
-    def query_graph(cypher: str, parameters: str = "{}") -> str:
-        """Execute a read-only Cypher query against the Central graph (incl. the API schema subgraph).
+    def _run_query(cypher: str, parameters: str, tool_label: str) -> str:
+        """Shared body for ``query_graph`` and its focused aliases.
 
-        The graph models the Aruba Central hierarchy / physical L2 topology
-        AND the full OpenAPI surface (ApiEndpoint, Parameter, RequestBody,
-        Response, SchemaComponent, Property, YangPath, plus REFERENCES /
-        COMPOSED_OF / HAS_PROPERTY / CONFIGURES_YANG edges). This is the
-        **only** structural discovery tool — there is no separate search
-        endpoint; combine Cypher with FTS (see below) to find what you need.
-
-        For write operations (CREATE, MERGE, SET, DELETE), use ``write_graph``.
-
-        ## Node tables (most-used)
-
-        - ``ApiEndpoint(method, path, summary, description, operationId, category)``
-        - ``ApiCategory(name)`` — ``BELONGS_TO_CATEGORY`` from endpoints
-        - ``Parameter(name, location, required, type, inferredHint)``
-        - ``RequestBody`` / ``Response(status)``
-        - ``SchemaComponent(component_id PK, name, section, kind, bodyShape, supportedDeviceTypes, bodyJson)``
-          - ``bodyShape ∈ {object, union-oneOf, union-anyOf, allOf-composite, map, array, primitive, unresolved}``
-          - ``section='inline'`` indicates a synthetic component promoted from an inline
-            allOf/oneOf/anyOf/items branch; its ``component_id`` contains ``#``.
-        - ``Property(property_id PK, parent_component_id, name, type, required,
-          enumValues, supportedDeviceTypes, yangPath, readOnly)``
-        - ``YangPath(yangPath PK, module)``
-        - Live tables: ``Org``, ``SiteCollection``, ``Site``, ``Device``, ``DeviceGroup``, ``UnmanagedDevice``, ``DocSection``, ``Script``.
-
-        ## Relationship tables (most-used)
-
-        - ``(ApiEndpoint)-[:HAS_PARAMETER]->(Parameter)``
-        - ``(ApiEndpoint)-[:HAS_REQUEST_BODY]->(RequestBody)``
-        - ``(ApiEndpoint)-[:HAS_RESPONSE]->(Response)``
-        - ``(RequestBody)-[:BODY_REFERENCES]->(SchemaComponent)``
-        - ``(Response)-[:RESPONSE_REFERENCES]->(SchemaComponent)``
-        - ``(SchemaComponent)-[:COMPOSED_OF {kind}]->(SchemaComponent)`` — allOf/oneOf/anyOf
-        - ``(SchemaComponent)-[:HAS_PROPERTY]->(Property)`` — direct fields only
-        - ``(SchemaComponent)-[:HAS_VALUE_SCHEMA]->(SchemaComponent)`` — map value shape
-        - ``(Property)-[:PROPERTY_OF_TYPE]->(SchemaComponent)`` — ref'd nested shape
-        - ``(Property)-[:PROPERTY_AT_YANG]->(YangPath)``
-        - ``(ApiEndpoint)-[:CONFIGURES_YANG]->(YangPath)`` — derived shortcut
-
-        ## CANONICAL PATTERN: walk a request body's fields
-
-        **Properties live only on the component that declares them.** Walk
-        ``COMPOSED_OF*0..N`` first to gather inherited fields from allOf
-        parents and promoted-inline branches. Use this instead of reading
-        ``bodyJson`` strings:
-
-        ```cypher
-        MATCH (e:ApiEndpoint {method: $m, path: $p})
-              -[:HAS_REQUEST_BODY]->(:RequestBody)
-              -[:BODY_REFERENCES]->(root:SchemaComponent)
-        MATCH (root)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)
-              -[:HAS_PROPERTY]->(p:Property)
-        RETURN c.name AS declaredOn, p.name, p.type, p.required,
-               p.enumValues, p.supportedDeviceTypes, p.yangPath
-        ORDER BY c.name, p.required DESC, p.name
-        ```
-
-        Filter ``WHERE $deviceType IN p.supportedDeviceTypes OR size(p.supportedDeviceTypes)=0``
-        to scope to one platform (e.g. ``'Switch CX'``).
-
-        ## FTS DISCOVERY (use Cypher, no separate tool)
-
-        Full-text indexes are pre-built. Call them through Cypher with
-        ``CALL QUERY_FTS_INDEX(table, index, query) YIELD node, score``.
-        Use FTS when you need keyword-based discovery (path-grep often misses
-        — e.g. VRF config lives only under ``/stacks/`` because the path
-        doesn't mention "vrf"; the description does):
-
-        ```cypher
-        // Find endpoints mentioning "vrf" anywhere (path, summary, description, operationId)
-        CALL QUERY_FTS_INDEX('ApiEndpoint', 'api_fts', 'vrf')
-        YIELD node, score
-        RETURN node.method, node.path, node.summary, score
-        ORDER BY score DESC LIMIT 25
-        ```
-
-        Available FTS indexes: ``api_fts`` (ApiEndpoint: summary, description,
-        path, operationId), ``doc_fts`` (DocSection), ``script_fts`` (Script),
-        runtime ``device_fts`` / ``site_fts`` / ``config_fts``.
-
-        Combine FTS with structural follow-up in a single query:
-
-        ```cypher
-        CALL QUERY_FTS_INDEX('ApiEndpoint', 'api_fts', 'mvrp')
-        YIELD node AS e, score
-        MATCH (e)-[:HAS_REQUEST_BODY]->(:RequestBody)-[:BODY_REFERENCES]->(c:SchemaComponent)
-        RETURN e.method, e.path, c.name, score ORDER BY score DESC LIMIT 10
-        ```
-
-        ## Other common patterns
-
-        ```cypher
-        // All endpoints in a category
-        MATCH (e:ApiEndpoint {category: 'Network Services', method: 'GET'})
-        RETURN e.path, e.summary ORDER BY e.path
-
-        // Required parameters of an endpoint
-        MATCH (e:ApiEndpoint {method: $m, path: $p})-[:HAS_PARAMETER]->(p:Parameter {required: true})
-        RETURN p.name, p.location, p.type
-
-        // Endpoints that touch a given YANG path (fast path)
-        MATCH (e:ApiEndpoint)-[:CONFIGURES_YANG]->(:YangPath {yangPath: $yp})
-        RETURN DISTINCT e.method, e.path ORDER BY e.path
-
-        // Branches of a union component
-        MATCH (c:SchemaComponent {name: $name})-[r:COMPOSED_OF]->(b:SchemaComponent)
-        WHERE c.bodyShape IN ['union-oneOf','union-anyOf']
-        RETURN r.kind, b.name, b.bodyShape
-        ```
-
-        Row caps (to keep responses agent-friendly):
-        - Soft cap: 200 rows. Larger result sets come back as
-          ``{"truncated": true, "cap": 200, "rows": [...], "warning": "..."}``.
-        - Hard cap: 2000 rows. Queries returning more than that are rejected;
-          add ``LIMIT``/``WHERE`` filters or aggregate.
-
-        Args:
-            cypher: A read-only Cypher query string (or a
-                    ``CALL QUERY_FTS_INDEX(...)`` invocation as shown above).
-            parameters: JSON-encoded parameter dict for parameterised queries
-                    (default: ``"{}"``). Example: ``{"site": "hq-1"}``.
-
-        Returns:
-            JSON array of result rows under the soft cap, otherwise a JSON
-            object with ``truncated``/``rows``/``cap``/``warning`` keys.
+        All 5 read tools (``query_graph``, ``query_api_schema``, ``query_fts``,
+        ``query_topology``, ``query_yang``) delegate here. They differ only
+        in docstring focus so each gets its own ~1500-char guidance budget
+        without overflowing one giant tool description; the caps, error
+        hints, and freshness scanning are identical.
         """
         if not cypher or not cypher.strip():
-            raise ToolError("Cypher query cannot be empty. Read graph://schema for the schema.")
+            raise ToolError(
+                "Cypher query cannot be empty. Read graph://schema for the schema."
+            )
 
         try:
             params = json.loads(parameters) if parameters else {}
@@ -393,11 +374,16 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
                 "Add LIMIT or WHERE filters, or aggregate with COUNT/COLLECT."
             )
 
-        logger.info("query_graph_done", rows=n)
+        logger.info("query_done", tool=tool_label, rows=n)
         threshold = _default_stale_threshold_seconds()
         freshness_warnings = (
             _scan_freshness(rows, threshold, cypher) if threshold > 0 else []
         )
+
+        # Per-cell byte cap: replace oversize string cells (e.g. bodyJson)
+        # with a typed truncation envelope BEFORE row-cap envelope so the
+        # serialised payload stays small.
+        rows = _apply_per_cell_cap(rows, _per_cell_byte_cap())
 
         if n > soft_cap:
             envelope = {
@@ -413,7 +399,23 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
             }
             if freshness_warnings:
                 envelope["freshness_warnings"] = freshness_warnings
+            kept, byte_env = _apply_response_byte_cap(
+                envelope["rows"], _per_response_byte_cap(),
+            )
+            if byte_env is not None:
+                if freshness_warnings:
+                    byte_env["freshness_warnings"] = freshness_warnings
+                byte_env["row_cap"] = soft_cap
+                byte_env["total_returned"] = n
+                return json.dumps(byte_env, indent=2, default=str)
             return json.dumps(envelope, indent=2, default=str)
+
+        kept, byte_env = _apply_response_byte_cap(rows, _per_response_byte_cap())
+        if byte_env is not None:
+            if freshness_warnings:
+                byte_env["freshness_warnings"] = freshness_warnings
+            return json.dumps(byte_env, indent=2, default=str)
+
         if freshness_warnings:
             return json.dumps(
                 {"rows": rows, "freshness_warnings": freshness_warnings},
@@ -421,6 +423,420 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
                 default=str,
             )
         return json.dumps(rows, indent=2, default=str)
+
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
+    )
+    def query_graph(cypher: str, parameters: str = "{}") -> str:
+        """Run a read-only Cypher query against the Central graph (general escape hatch).
+
+        **Prefer one of the focused aliases first** — each has a smaller,
+        topic-specific docstring with the right canonical query templates:
+
+        - ``query_api_schema`` — walk OpenAPI endpoints, schemas, properties,
+          YANG paths; the right tool for "what fields does endpoint X take".
+        - ``query_fts`` — keyword search across endpoints / docs / scripts /
+          devices / sites / configs via ``CALL QUERY_FTS_INDEX(...)``.
+        - ``query_topology`` — Org / SiteCollection / Site / Device /
+          DeviceGroup / UnmanagedDevice and their HAS_* / LINKED_TO edges.
+        - ``query_yang`` — YangPath nodes, CONFIGURES_YANG /
+          PROPERTY_AT_YANG (forward and reverse lookups).
+
+        Reach for ``query_graph`` only when your query spans those topics
+        (e.g. joining a topology MATCH to an FTS YIELD) or uses node tables
+        none of the aliases describe (``DocSection``, ``Script``,
+        ``ApiCategory``, custom-added labels via ``write_graph``).
+
+        For writes, use ``write_graph``. For raw schema JSON of a single
+        component, use ``get_raw_schema(component_id)``.
+
+        Schema reference: read ``graph://schema``. Node tables include
+        ``ApiEndpoint``, ``Parameter``, ``RequestBody``, ``Response``,
+        ``SchemaComponent``, ``Property``, ``YangPath``, ``Org``,
+        ``SiteCollection``, ``Site``, ``Device``, ``DeviceGroup``,
+        ``UnmanagedDevice``, ``DocSection``, ``Script``, ``ApiCategory``.
+
+        Row caps: soft 200, hard 2000 (rejected).
+        Byte caps: per-cell ~4 KB, per-response ~50 KB. Oversize string
+        cells (typically ``bodyJson``) come back as
+        ``{"_truncated": true, "preview": "...", "size_bytes": N,
+        "hint": "use get_raw_schema(...)"}``. All caps overridable via
+        ``MCP_GRAPH_PER_CELL_BYTES`` / ``MCP_GRAPH_PER_RESPONSE_BYTES``.
+
+        Args:
+            cypher: A read-only Cypher query (or ``CALL QUERY_FTS_INDEX``).
+            parameters: JSON-encoded parameter dict (default ``"{}"``).
+
+        Returns:
+            JSON array of rows, or a truncation envelope when caps trip.
+        """
+        return _run_query(cypher, parameters, "query_graph")
+
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
+    )
+    def query_api_schema(cypher: str, parameters: str = "{}") -> str:
+        """Cypher over the OpenAPI subgraph: endpoints, schemas, properties, YANG.
+
+        Node tables: ``ApiEndpoint(method, path, summary, description,
+        operationId, category)``, ``Parameter(name, location, required, type,
+        inferredHint)``, ``RequestBody``, ``Response(status)``,
+        ``SchemaComponent(component_id PK, name, section, kind, bodyShape,
+        supportedDeviceTypes, bodyJson)``,
+        ``Property(property_id PK, parent_component_id, name, type, required,
+        enumValues, supportedDeviceTypes, yangPath, readOnly)``,
+        ``YangPath(yangPath PK, module)``.
+
+        ``bodyShape`` ∈ {object, union-oneOf, union-anyOf, allOf-composite,
+        map, array, primitive, unresolved}. ``section='inline'`` marks a
+        synthetic component promoted from an inline allOf/oneOf/items branch
+        (its ``component_id`` contains ``#``).
+
+        Edges: ``HAS_PARAMETER``, ``HAS_REQUEST_BODY``, ``HAS_RESPONSE``,
+        ``BODY_REFERENCES``, ``RESPONSE_REFERENCES``,
+        ``COMPOSED_OF {kind}`` (allOf/oneOf/anyOf, between SchemaComponents),
+        ``HAS_PROPERTY`` (component → its direct fields only),
+        ``HAS_VALUE_SCHEMA`` (map value shape),
+        ``PROPERTY_OF_TYPE`` (property → referenced nested SchemaComponent),
+        ``PROPERTY_AT_YANG``, ``CONFIGURES_YANG``.
+
+        ## CANONICAL — walk all fields of a request body
+
+        Properties live ONLY on the component that declares them. ALWAYS
+        ``COMPOSED_OF*0..5`` first to pick up allOf parents / promoted inline
+        branches, and ALWAYS use ``DISTINCT`` (multi-path traversals double-
+        count when a property is reachable via two COMPOSED_OF edges):
+
+        ```cypher
+        MATCH (e:ApiEndpoint {method: $m, path: $p})
+              -[:HAS_REQUEST_BODY]->(:RequestBody)
+              -[:BODY_REFERENCES]->(root:SchemaComponent)
+        MATCH (root)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)
+              -[:HAS_PROPERTY]->(p:Property)
+        RETURN DISTINCT c.name AS declaredOn, p.name, p.type, p.required,
+               p.enumValues, p.supportedDeviceTypes, p.yangPath
+        ORDER BY declaredOn, p.required DESC, p.name
+        ```
+
+        Device-type filter (covers NULL = "applies to all", empty list, and
+        explicit match):
+
+        ```
+        WHERE p.supportedDeviceTypes IS NULL
+           OR size(p.supportedDeviceTypes) = 0
+           OR $deviceType IN p.supportedDeviceTypes
+        ```
+
+        ## CANONICAL — descend into nested object properties (``type=""``)
+
+        A property with empty ``type`` is usually a ref to another
+        SchemaComponent. Follow ``PROPERTY_OF_TYPE`` and recurse with the
+        canonical walk above on the target component:
+
+        ```cypher
+        MATCH (p:Property {parent_component_id: $cid, name: $field})
+              -[:PROPERTY_OF_TYPE]->(child:SchemaComponent)
+        MATCH (child)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)
+              -[:HAS_PROPERTY]->(np:Property)
+        RETURN DISTINCT c.name, np.name, np.type, np.required
+        ```
+
+        ## Other patterns
+
+        ```cypher
+        // Endpoints in a category
+        MATCH (e:ApiEndpoint {category: $cat, method: 'GET'})
+        RETURN e.path, e.summary ORDER BY e.path
+
+        // Required parameters of an endpoint
+        MATCH (e:ApiEndpoint {method: $m, path: $p})
+              -[:HAS_PARAMETER]->(p:Parameter {required: true})
+        RETURN p.name, p.location, p.type
+
+        // Branches of a union component
+        MATCH (c:SchemaComponent {name: $name})-[r:COMPOSED_OF]->(b:SchemaComponent)
+        WHERE c.bodyShape IN ['union-oneOf','union-anyOf']
+        RETURN r.kind, b.name, b.bodyShape
+        ```
+
+        Caps and ``get_raw_schema`` escape hatch behave as in ``query_graph``.
+
+        Args:
+            cypher: Read-only Cypher.
+            parameters: JSON-encoded parameter dict (default ``"{}"``).
+        """
+        return _run_query(cypher, parameters, "query_api_schema")
+
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
+    )
+    def query_fts(cypher: str, parameters: str = "{}") -> str:
+        """Full-text search over the graph via ``CALL QUERY_FTS_INDEX(...)``.
+
+        FTS is REQUIRED for keyword discovery — path-grep misses cases like
+        "vrf config" (which lives only under ``/stacks/``; the path doesn't
+        mention vrf, the description does). Each FTS hit yields ``node`` +
+        ``score``, which you can chain into a structural follow-up MATCH in
+        the same Cypher block.
+
+        Invocation shape:
+
+        ```cypher
+        CALL QUERY_FTS_INDEX($table, $index, $query)
+        YIELD node, score
+        RETURN ... ORDER BY score DESC LIMIT 25
+        ```
+
+        Available indexes (table → index → fields):
+
+        - ``ApiEndpoint`` → ``api_fts`` → summary, description, path, operationId
+        - ``DocSection`` → ``doc_fts`` → title, body
+        - ``Script`` → ``script_fts`` → name, description
+        - ``Device`` → ``device_fts`` → name, serial, model (runtime, populated
+          by live seed)
+        - ``Site`` → ``site_fts`` → name, address (runtime)
+        - ``SchemaComponent`` / config nodes → ``config_fts`` (runtime)
+
+        ## Canonical: keyword → endpoint
+
+        ```cypher
+        CALL QUERY_FTS_INDEX('ApiEndpoint', 'api_fts', 'vrf')
+        YIELD node, score
+        RETURN node.method, node.path, node.summary, score
+        ORDER BY score DESC LIMIT 25
+        ```
+
+        ## Canonical: keyword → endpoint → schema (one query)
+
+        ```cypher
+        CALL QUERY_FTS_INDEX('ApiEndpoint', 'api_fts', 'mvrp')
+        YIELD node AS e, score
+        MATCH (e)-[:HAS_REQUEST_BODY]->(:RequestBody)
+              -[:BODY_REFERENCES]->(c:SchemaComponent)
+        RETURN e.method, e.path, c.name, score
+        ORDER BY score DESC LIMIT 10
+        ```
+
+        ## Canonical: keyword → docs
+
+        ```cypher
+        CALL QUERY_FTS_INDEX('DocSection', 'doc_fts', 'firmware compliance')
+        YIELD node, score
+        RETURN node.title, node.section_id, score
+        ORDER BY score DESC LIMIT 10
+        ```
+
+        Tips: the third arg accepts Lucene-style terms (``"foo bar"``,
+        ``foo*``, ``foo OR bar``). For multi-word phrases prefer quoting.
+        If FTS returns 0 rows, fall back to ``CONTAINS`` on a property:
+        ``MATCH (e:ApiEndpoint) WHERE e.description CONTAINS $kw RETURN ...``.
+
+        Caps as in ``query_graph``.
+
+        Args:
+            cypher: Read-only Cypher beginning with ``CALL QUERY_FTS_INDEX``
+                (chaining a MATCH after the YIELD is encouraged).
+            parameters: JSON-encoded parameter dict (default ``"{}"``).
+        """
+        return _run_query(cypher, parameters, "query_fts")
+
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
+    )
+    def query_topology(cypher: str, parameters: str = "{}") -> str:
+        """Cypher over the live Aruba Central network topology subgraph.
+
+        Node tables (all carry ``lastSyncedAt TIMESTAMP``; volatile fields
+        flagged in ``freshness_warnings`` when stale):
+
+        - ``Org(scopeId PK, name)``
+        - ``SiteCollection(scopeId PK, name, parent_scope_id)``
+        - ``Site(scopeId PK, name, address, city, country, latitude, longitude)``
+        - ``Device(serial PK, name, model, deviceType, status, ipv4, mac,
+          firmware, persona, deviceFunction, siteId, siteName, partNumber,
+          deployment, configStatus, deviceGroupId, deviceGroupName)``
+        - ``DeviceGroup(scopeId PK, name, deviceCount)``
+        - ``UnmanagedDevice(mac PK, name, model, deviceType, health, status,
+          ipv4, siteId)``
+
+        Edges (parent → child unless noted):
+
+        - ``(Org)-[:HAS_COLLECTION]->(SiteCollection)``
+        - ``(Org)-[:HAS_SITE]->(Site)`` (standalone site, no collection)
+        - ``(SiteCollection)-[:CONTAINS_SITE]->(Site)``
+        - ``(Site)-[:HAS_DEVICE]->(Device)``
+        - ``(Site)-[:HAS_UNMANAGED]->(UnmanagedDevice)``
+        - ``(DeviceGroup)-[:HAS_MEMBER]->(Device)`` (cross-site grouping)
+        - ``(Device)-[:CONNECTED_TO]->(Device)`` — LLDP/CDP neighbour
+        - ``(Device)-[:LINKED_TO]->(UnmanagedDevice)`` — edge-of-managed
+
+        ## Canonical: all devices at a site
+
+        ```cypher
+        MATCH (s:Site {name: $siteName})-[:HAS_DEVICE]->(d:Device)
+        RETURN d.serial, d.name, d.model, d.deviceType, d.status
+        ORDER BY d.deviceType, d.name
+        ```
+
+        ## Canonical: blast radius (all devices in a device group across sites)
+
+        ```cypher
+        MATCH (g:DeviceGroup {name: $groupName})-[:HAS_MEMBER]->(d:Device)
+        MATCH (s:Site)-[:HAS_DEVICE]->(d)
+        RETURN s.name AS site, d.serial, d.name, d.model
+        ORDER BY site, d.name
+        ```
+
+        ## Canonical: L2 neighbours of a switch
+
+        ```cypher
+        MATCH (d:Device {serial: $serial})-[:CONNECTED_TO]->(n:Device)
+        RETURN n.serial, n.name, n.deviceType, n.model
+        ```
+
+        Freshness: when you SELECT a volatile field (``status``, ``ip``,
+        ``firmware``, ...) and the node's ``lastSyncedAt`` is older than
+        ~15 min, the response wraps as ``{"rows": [...],
+        "freshness_warnings": [...]}``. Override the staleness threshold
+        via ``MCP_GRAPH_STALE_THRESHOLD_SECONDS``.
+
+        Caps as in ``query_graph``.
+
+        Args:
+            cypher: Read-only Cypher.
+            parameters: JSON-encoded parameter dict (default ``"{}"``).
+        """
+        return _run_query(cypher, parameters, "query_topology")
+
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
+    )
+    def query_yang(cypher: str, parameters: str = "{}") -> str:
+        """Cypher over the YANG reverse-index subgraph (Phase 3).
+
+        Lets you map a known YANG path (e.g. from a legacy CLI/YANG config
+        or telemetry stream) back to the API endpoints that configure it,
+        or to the property/schema-component where it surfaces.
+
+        Node table: ``YangPath(yangPath PK, module)``.
+
+        Edges:
+
+        - ``(Property)-[:PROPERTY_AT_YANG]->(YangPath)`` — direct: property
+          carries an ``x-path`` extension annotating its YANG location.
+        - ``(ApiEndpoint)-[:CONFIGURES_YANG]->(YangPath)`` — derived: rolled
+          up from the endpoint's request-body property graph.
+
+        ## Canonical: endpoint → YANG paths it touches
+
+        ```cypher
+        MATCH (e:ApiEndpoint {method: $m, path: $p})
+              -[:CONFIGURES_YANG]->(y:YangPath)
+        RETURN y.yangPath, y.module ORDER BY y.yangPath
+        ```
+
+        ## Canonical: YANG path → endpoints (reverse)
+
+        ```cypher
+        MATCH (e:ApiEndpoint)-[:CONFIGURES_YANG]->(:YangPath {yangPath: $yp})
+        RETURN DISTINCT e.method, e.path ORDER BY e.path
+        ```
+
+        ## Canonical: YANG path → properties that surface it
+
+        ```cypher
+        MATCH (p:Property)-[:PROPERTY_AT_YANG]->(:YangPath {yangPath: $yp})
+        MATCH (c:SchemaComponent {component_id: p.parent_component_id})
+        RETURN c.name AS schema, p.name, p.type, p.required
+        ORDER BY c.name, p.name
+        ```
+
+        ## Canonical: all YANG paths under a module
+
+        ```cypher
+        MATCH (y:YangPath {module: $mod}) RETURN y.yangPath ORDER BY y.yangPath
+        ```
+
+        Module name appears as the prefix in the YANG path (e.g.
+        ``ac-ntp`` for ``/ac-ntp:ntp/...``). Use it to scope queries to a
+        single feature area.
+
+        Caps as in ``query_graph``.
+
+        Args:
+            cypher: Read-only Cypher.
+            parameters: JSON-encoded parameter dict (default ``"{}"``).
+        """
+        return _run_query(cypher, parameters, "query_yang")
+
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
+    )
+    def get_raw_schema(component_id: str) -> str:
+        """Fetch the raw OpenAPI ``bodyJson`` for one ``SchemaComponent`` by id.
+
+        Escape hatch for the per-cell truncation envelope returned by
+        ``query_graph`` when ``RETURN c.bodyJson`` would be too large. Prefer
+        walking ``(:SchemaComponent)-[:COMPOSED_OF*0..5]->()-[:HAS_PROPERTY]->(:Property)``
+        for structural exploration; reach for this tool only when you need
+        the literal JSON (e.g. to read a vendor extension not surfaced as a
+        graph property).
+
+        Args:
+            component_id: The ``SchemaComponent.component_id`` primary key
+                (e.g. ``"central:schemas:VlanInterface"``).
+
+        Returns:
+            JSON object ``{"component_id": "...", "name": "...", "section": "...",
+            "bodyShape": "...", "bodyJson": "..."}``. If the body exceeds
+            ~200 KB, returns ``{"error": "...", "size_bytes": N, "hint":
+            "walk COMPOSED_OF/HAS_PROPERTY instead"}``.
+        """
+        if not component_id or not component_id.strip():
+            raise ToolError("component_id cannot be empty.")
+
+        try:
+            rows = graph.query(
+                "MATCH (c:SchemaComponent {component_id: $cid}) "
+                "RETURN c.component_id AS component_id, c.name AS name, "
+                "       c.section AS section, c.bodyShape AS bodyShape, "
+                "       c.bodyJson AS bodyJson",
+                params={"cid": component_id},
+                read_only=True,
+            )
+        except Exception as exc:
+            raise ToolError(f"Lookup failed: {exc}") from exc
+
+        if not rows:
+            raise ToolError(
+                f"No SchemaComponent with component_id={component_id!r}. "
+                "Use query_graph to list candidates: "
+                "MATCH (c:SchemaComponent) WHERE c.name CONTAINS '<frag>' "
+                "RETURN c.component_id, c.name LIMIT 25"
+            )
+
+        row = rows[0]
+        body = row.get("bodyJson") or ""
+        max_blob = _env_int("MCP_GRAPH_RAW_SCHEMA_MAX_BYTES", 200_000)
+        if len(body) > max_blob:
+            return json.dumps(
+                {
+                    "error": "bodyJson exceeds raw-schema cap",
+                    "component_id": row.get("component_id"),
+                    "name": row.get("name"),
+                    "size_bytes": len(body),
+                    "cap_bytes": max_blob,
+                    "hint": (
+                        "Walk the property graph instead: "
+                        "MATCH (root:SchemaComponent {component_id: $cid})"
+                        "-[:COMPOSED_OF*0..5]->(c)-[:HAS_PROPERTY]->(p:Property) "
+                        "RETURN c.name, p.name, p.type, p.required"
+                    ),
+                },
+                indent=2,
+            )
+
+        return json.dumps(row, indent=2, default=str)
 
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, openWorldHint=False),
