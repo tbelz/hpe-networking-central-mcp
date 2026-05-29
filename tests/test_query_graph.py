@@ -382,3 +382,95 @@ class TestQueryAliases:
                 f"{alias} docstring is {len(doc)} chars — keep it under 4000 "
                 "so tool-description-capping clients don't truncate guidance."
             )
+
+
+class TestQueryBatchMode:
+    """``queries=[...]`` batch dispatch shared by all 5 read tools."""
+
+    ALIASES = ("query_graph", "query_api_schema", "query_fts", "query_topology", "query_yang")
+
+    def test_batch_executes_in_order(self, gm):
+        qg = _make_query_tool(gm)
+        out = qg(queries=[
+            {"cypher": "RETURN 1 AS n", "label": "one"},
+            {"cypher": "RETURN 2 AS n", "label": "two"},
+            {"cypher": "RETURN 3 AS n"},
+        ])
+        env = json.loads(out)
+        assert env["batch"] is True
+        assert env["total"] == 3
+        assert env["ok"] == 3
+        assert env["failed"] == 0
+        labels = [r["label"] for r in env["results"]]
+        assert labels == ["one", "two", None]
+        values = [r["result"][0]["n"] for r in env["results"]]
+        assert values == [1, 2, 3]
+
+    def test_batch_continue_on_error(self, gm):
+        qg = _make_query_tool(gm)
+        out = qg(queries=[
+            {"cypher": "RETURN 1 AS n"},
+            {"cypher": "   ", "label": "blank"},          # empty cypher
+            {"cypher": "RETURN 2 AS n", "label": "after"},
+        ])
+        env = json.loads(out)
+        assert env["total"] == 3
+        assert env["ok"] == 2
+        assert env["failed"] == 1
+        assert env["results"][0]["ok"] is True
+        assert env["results"][1]["ok"] is False
+        assert "empty" in env["results"][1]["error"].lower()
+        assert env["results"][2]["ok"] is True
+        assert env["results"][2]["label"] == "after"
+
+    def test_batch_size_cap_enforced(self, gm, monkeypatch):
+        monkeypatch.setenv("MCP_GRAPH_BATCH_MAX_ITEMS", "3")
+        qg = _make_query_tool(gm)
+        with pytest.raises(ToolError, match="per-batch cap"):
+            qg(queries=[{"cypher": "RETURN 1 AS n"}] * 4)
+
+    def test_batch_accepts_dict_parameters(self, gm):
+        qg = _make_query_tool(gm)
+        out = qg(queries=[
+            {"cypher": "RETURN $x AS x", "parameters": {"x": 7}},
+            {"cypher": "RETURN $x AS x", "parameters": json.dumps({"x": 8})},
+        ])
+        env = json.loads(out)
+        assert env["ok"] == 2
+        assert env["results"][0]["result"] == [{"x": 7}]
+        assert env["results"][1]["result"] == [{"x": 8}]
+
+    def test_batch_empty_list_raises(self, gm):
+        qg = _make_query_tool(gm)
+        with pytest.raises(ToolError, match="empty"):
+            qg(queries=[])
+
+    def test_batch_total_response_cap_drops_trailing_items(self, gm, monkeypatch):
+        # Tiny aggregate cap forces tail-trimming. Each item still respects
+        # its own per-response cap.
+        monkeypatch.setenv("MCP_GRAPH_BATCH_RESPONSE_BYTES", "500")
+        qg = _make_query_tool(gm)
+        out = qg(queries=[
+            {"cypher": "UNWIND range(1, 10) AS i RETURN i", "label": f"q{n}"}
+            for n in range(5)
+        ])
+        env = json.loads(out)
+        assert env.get("truncated") is True
+        assert env["kept_items"] < 5
+        assert len(env["results"]) == env["kept_items"]
+        # Order preserved: kept items are the leading prefix.
+        labels = [r["label"] for r in env["results"]]
+        assert labels == [f"q{n}" for n in range(len(labels))]
+
+    @pytest.mark.parametrize("alias", ALIASES)
+    def test_each_alias_supports_batch(self, gm, alias):
+        tools = _make_tools(gm)
+        out = tools[alias](queries=[
+            {"cypher": "RETURN 1 AS n", "label": "a"},
+            {"cypher": "RETURN 2 AS n", "label": "b"},
+        ])
+        env = json.loads(out)
+        assert env["batch"] is True
+        assert env["ok"] == 2
+        assert [r["label"] for r in env["results"]] == ["a", "b"]
+

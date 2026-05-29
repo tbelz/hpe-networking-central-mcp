@@ -424,10 +424,114 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
             )
         return json.dumps(rows, indent=2, default=str)
 
+    def _run_batch(queries: list[dict], tool_label: str) -> str:
+        """Sequentially dispatch a list of {cypher, parameters?, label?}
+        dicts via ``_run_query``, returning a single envelope.
+
+        Continues on per-item errors. Item caps (rows, per-cell bytes,
+        per-response bytes) are applied INSIDE each ``_run_query`` call
+        so individual items stay bounded; a top-level byte cap then
+        trims trailing items if the aggregate would exceed
+        ``MCP_GRAPH_BATCH_RESPONSE_BYTES``.
+
+        Per-item envelope::
+            {"ok": bool, "label": str|None, "result": <parsed _run_query JSON>}
+        or on failure::
+            {"ok": false, "label": str|None, "error": str}
+
+        Top-level envelope::
+            {"batch": true, "total": N, "ok": K, "failed": N-K, "results": [...],
+             "truncated"?: true, "kept_items"?: int}
+        """
+        max_items = _env_int("MCP_GRAPH_BATCH_MAX_ITEMS", 25)
+        if not queries:
+            raise ToolError("queries list is empty.")
+        if not isinstance(queries, list):
+            raise ToolError("queries must be a JSON array of {cypher, ...} objects.")
+        if len(queries) > max_items:
+            raise ToolError(
+                f"queries list has {len(queries)} items but the per-batch cap "
+                f"is {max_items}. Split the batch or raise MCP_GRAPH_BATCH_MAX_ITEMS."
+            )
+
+        results: list[dict] = []
+        ok_count = 0
+        fail_count = 0
+        for i, item in enumerate(queries):
+            label = None
+            if not isinstance(item, dict):
+                fail_count += 1
+                results.append({
+                    "ok": False, "label": None,
+                    "error": f"item {i}: expected a JSON object, got {type(item).__name__}",
+                })
+                continue
+            label = item.get("label")
+            cypher = item.get("cypher", "")
+            raw_params = item.get("parameters", "{}")
+            params_str = (
+                json.dumps(raw_params) if isinstance(raw_params, dict)
+                else (raw_params if isinstance(raw_params, str) else "{}")
+            )
+            try:
+                result_json = _run_query(cypher, params_str, tool_label)
+                # _run_query returns a JSON-serialised payload; parse so it
+                # nests cleanly in the batch envelope instead of being a
+                # string-of-JSON.
+                results.append({
+                    "ok": True, "label": label,
+                    "result": json.loads(result_json),
+                })
+                ok_count += 1
+            except ToolError as exc:
+                fail_count += 1
+                results.append({"ok": False, "label": label, "error": str(exc)})
+            except Exception as exc:  # defensive: never crash the batch
+                fail_count += 1
+                results.append({
+                    "ok": False, "label": label,
+                    "error": f"unexpected: {exc}",
+                })
+
+        envelope: dict = {
+            "batch": True,
+            "total": len(queries),
+            "ok": ok_count,
+            "failed": fail_count,
+            "results": results,
+        }
+        cap_bytes = _env_int(
+            "MCP_GRAPH_BATCH_RESPONSE_BYTES", 200_000,
+        )
+        payload = json.dumps(envelope, indent=2, default=str)
+        if len(payload.encode("utf-8")) > cap_bytes:
+            kept: list[dict] = []
+            for r in results:
+                kept.append(r)
+                trial = {
+                    **envelope,
+                    "results": kept,
+                    "truncated": True,
+                    "kept_items": len(kept),
+                }
+                if len(json.dumps(trial, indent=2, default=str).encode("utf-8")) > cap_bytes:
+                    kept.pop()
+                    break
+            envelope["results"] = kept
+            envelope["truncated"] = True
+            envelope["kept_items"] = len(kept)
+            payload = json.dumps(envelope, indent=2, default=str)
+        logger.info(
+            "batch_done", tool=tool_label, total=len(queries),
+            ok=ok_count, failed=fail_count,
+            truncated=envelope.get("truncated", False),
+        )
+        return payload
+
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
     )
-    def query_graph(cypher: str, parameters: str = "{}") -> str:
+    def query_graph(cypher: str = "", parameters: str = "{}", queries: list[dict] | None = None) -> str:
         """Run a read-only Cypher query against the Central graph (general escape hatch).
 
         **Prefer one of the focused aliases first** — each has a smaller,
@@ -463,19 +567,35 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         "hint": "use get_raw_schema(...)"}``. All caps overridable via
         ``MCP_GRAPH_PER_CELL_BYTES`` / ``MCP_GRAPH_PER_RESPONSE_BYTES``.
 
+        **Batch mode**: pass ``queries=[{"cypher": ..., "parameters":
+        {...}, "label": "opt"}, ...]`` (up to 25 items via
+        ``MCP_GRAPH_BATCH_MAX_ITEMS``) to run several reads in one tool
+        invocation. Queries run sequentially, continue on error, and each
+        gets its own envelope in ``results``. When ``queries`` is set the
+        top-level ``cypher`` / ``parameters`` are ignored. Per-item caps
+        (row + byte) still apply; a top-level byte cap
+        (``MCP_GRAPH_BATCH_RESPONSE_BYTES``, default 200 KB) drops
+        trailing items if the aggregate is too large.
+
         Args:
             cypher: A read-only Cypher query (or ``CALL QUERY_FTS_INDEX``).
+                Ignored when ``queries`` is set.
             parameters: JSON-encoded parameter dict (default ``"{}"``).
+            queries: Optional list of ``{cypher, parameters?, label?}``
+                dicts for batch mode (cap 25).
 
         Returns:
-            JSON array of rows, or a truncation envelope when caps trip.
+            Single mode: JSON array of rows, or truncation envelope.
+            Batch mode: ``{batch: true, total, ok, failed, results: [...]}``.
         """
+        if queries is not None:
+            return _run_batch(queries, "query_graph")
         return _run_query(cypher, parameters, "query_graph")
 
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
     )
-    def query_api_schema(cypher: str, parameters: str = "{}") -> str:
+    def query_api_schema(cypher: str = "", parameters: str = "{}", queries: list[dict] | None = None) -> str:
         """Cypher over the OpenAPI subgraph: endpoints, schemas, properties, YANG.
 
         Node tables: ``ApiEndpoint(method, path, summary, description,
@@ -564,13 +684,16 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         Args:
             cypher: Read-only Cypher.
             parameters: JSON-encoded parameter dict (default ``"{}"``).
+            queries: Optional batch (cap 25); see ``query_graph``.
         """
+        if queries is not None:
+            return _run_batch(queries, "query_api_schema")
         return _run_query(cypher, parameters, "query_api_schema")
 
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
     )
-    def query_fts(cypher: str, parameters: str = "{}") -> str:
+    def query_fts(cypher: str = "", parameters: str = "{}", queries: list[dict] | None = None) -> str:
         """Full-text search over the graph via ``CALL QUERY_FTS_INDEX(...)``.
 
         FTS is REQUIRED for keyword discovery — path-grep misses cases like
@@ -657,13 +780,16 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
             cypher: Read-only Cypher beginning with ``CALL QUERY_FTS_INDEX``
                 (chaining a MATCH after the YIELD is encouraged).
             parameters: JSON-encoded parameter dict (default ``"{}"``).
+            queries: Optional batch (cap 25); see ``query_graph``.
         """
+        if queries is not None:
+            return _run_batch(queries, "query_fts")
         return _run_query(cypher, parameters, "query_fts")
 
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
     )
-    def query_topology(cypher: str, parameters: str = "{}") -> str:
+    def query_topology(cypher: str = "", parameters: str = "{}", queries: list[dict] | None = None) -> str:
         """Cypher over the live Aruba Central network topology subgraph.
 
         Node tables (all carry ``lastSyncedAt TIMESTAMP``; volatile fields
@@ -725,13 +851,16 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         Args:
             cypher: Read-only Cypher.
             parameters: JSON-encoded parameter dict (default ``"{}"``).
+            queries: Optional batch (cap 25); see ``query_graph``.
         """
+        if queries is not None:
+            return _run_batch(queries, "query_topology")
         return _run_query(cypher, parameters, "query_topology")
 
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
     )
-    def query_yang(cypher: str, parameters: str = "{}") -> str:
+    def query_yang(cypher: str = "", parameters: str = "{}", queries: list[dict] | None = None) -> str:
         """Cypher over the YANG reverse-index subgraph (Phase 3).
 
         Lets you map a known YANG path (e.g. from a legacy CLI/YANG config
@@ -786,7 +915,10 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         Args:
             cypher: Read-only Cypher.
             parameters: JSON-encoded parameter dict (default ``"{}"``).
+            queries: Optional batch (cap 25); see ``query_graph``.
         """
+        if queries is not None:
+            return _run_batch(queries, "query_yang")
         return _run_query(cypher, parameters, "query_yang")
 
     @mcp.tool(
