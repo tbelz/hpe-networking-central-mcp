@@ -226,6 +226,7 @@ class GraphManager:
           - Device: name, serial, model, deviceType
           - Site: name, address, city, country
           - Script: filename, description
+          - Property: name, description, yangPath (ADR-013)
 
         Returns the number of indexes created, or 0 if FTS is unavailable.
         """
@@ -240,6 +241,10 @@ class GraphManager:
             ("device_fts", "Device", ["name", "serial", "model", "deviceType"]),
             ("site_fts", "Site", ["name", "address", "city", "country"]),
             ("script_fts", "Script", ["filename", "description"]),
+            # Property.enumValues is STRING[]; Kuzu FTS indexes scalar columns
+            # only, so we omit it and rely on ``$val IN p.enumValues`` for enum
+            # lookups. Mirror of the entry in build_knowledge_db._create_fts_indexes.
+            ("property_fts", "Property", ["name", "description", "yangPath"]),
         ]
 
         created = 0

@@ -85,7 +85,7 @@ RETURN p.property_id, p.name LIMIT 25
 ```
 
 plus a `COUNT(p)` for the exact total. Any orphans surface as an
-`InvariantViolation('no_orphaned_properties', ...)`. The check fires
+`InvariantViolation('INV-8', ...)`. The check fires
 automatically from every existing caller of `assert_graph_invariants`:
 the `[3d/6] Auditing graph invariants` step of `build_knowledge_db.py`
 and `tests/test_real_spec_ingest_smoke.py`.
@@ -147,10 +147,12 @@ arguments are ignored, mirroring `call_central_api(calls=...)`.
 `SchemaComponent` entry in `graph://schema` all spell out the
 canonical id shape:
 
-```
-<provider>:<section>:<Name>          e.g. central:schemas:VlanInterface
-<provider>:<section>:<Name>#allOf:N   inline allOf branch
-<provider>:<section>:<Name>#item      inline array item
+```text
+<provider>:<section>:<Name>                       e.g. central:schemas:VlanInterface
+<provider>:<section>:<Name>#allOf:N               inline allOf branch
+<provider>:<section>:<Name>#oneOf:N               inline oneOf branch
+<provider>:<section>:<Name>#prop:<field>#items    inline array-item shape
+<provider>:<section>:<Name>#additionalProperties  inline map value shape
 ```
 
 …plus the recommended name-lookup query

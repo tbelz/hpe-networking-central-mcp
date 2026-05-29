@@ -52,8 +52,8 @@ from hits to whatever you actually want.
 | Table | Index | Indexed columns | Notes |
 |-------|-------|-----------------|-------|
 | `ApiEndpoint` | `api_fts` | `summary, description, path, operationId` | Endpoint discovery. |
-| `DocSection` | `doc_fts` | `title, body` | OpenAPI Markdown docs. |
-| `Script` | `script_fts` | `name, description` | Built-in scripts. |
+| `DocSection` | `doc_fts` | `title, content` | OpenAPI Markdown docs. |
+| `Script` | `script_fts` | `filename, description` | Built-in scripts. |
 | `Property` | `property_fts` | `name, description, yangPath` | Field-level discovery ("vrf binding", "ntp server"). Hops to owning component via `HAS_PROPERTY` then to endpoints via `BODY_REFERENCES` / `COMPOSED_OF*`. `enumValues` is a `STRING[]` and is intentionally not FTS-indexed (Kuzu limitation); use `$val IN p.enumValues`. |
 | `Device` | `device_fts` | runtime | Populated by live seed. |
 | `Site` | `site_fts` | runtime | Populated by live seed. |
@@ -99,7 +99,7 @@ Every `SchemaComponent.component_id` follows
 | `<provider>:<section>:<Name>` | `central:schemas:VlanInterface` | Top-level named component from a spec. |
 | `...:<Name>#allOf:N` | `central:schemas:VlanInterface#allOf:1` | Inline allOf branch promoted to a synthetic component. |
 | `...:<Name>#oneOf:N` / `#anyOf:N` | — | Inline union branch. |
-| `...:<Name>#item` | — | Inline array item shape. |
+| `...:<Name>#prop:<field>#items` | `central:schemas:VlanInterface#prop:vlan_ids#items` | Inline array-item shape. |
 | `...:<Name>#additionalProperties` | — | Inline map value shape. |
 
 Look one up by name when you only know the friendly name:

@@ -948,7 +948,7 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         ``section='inline'``::
 
             central:schemas:NtpprofileSchema#allOf:2
-            central:schemas:VlanInterface#prop:vlan_id[items]
+            central:schemas:VlanInterface#prop:vlan_ids#items
 
         Look up the exact id first if you only know the bare name::
 
