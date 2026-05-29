@@ -782,9 +782,30 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         the literal JSON (e.g. to read a vendor extension not surfaced as a
         graph property).
 
+        ## Component ID format
+
+        ``component_id`` is the canonical primary key
+        ``<provider>:<section>:<Name>``, e.g.::
+
+            central:schemas:VlanInterface
+            central:parameters:TenantId
+            glp:schemas:Device
+
+        Inline-promoted branches (oneOf/anyOf/allOf items, ``additionalProperties``
+        value shapes, array items) carry a ``#`` suffix and live in
+        ``section='inline'``::
+
+            central:schemas:NtpprofileSchema#allOf:2
+            central:schemas:VlanInterface#prop:vlan_id[items]
+
+        Look up the exact id first if you only know the bare name::
+
+            MATCH (c:SchemaComponent) WHERE c.name = $name
+            RETURN c.component_id, c.section LIMIT 5
+
         Args:
-            component_id: The ``SchemaComponent.component_id`` primary key
-                (e.g. ``"central:schemas:VlanInterface"``).
+            component_id: The ``SchemaComponent.component_id`` primary key.
+                Must be the EXACT id — this tool does not suffix-match.
 
         Returns:
             JSON object ``{"component_id": "...", "name": "...", "section": "...",
@@ -810,9 +831,11 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         if not rows:
             raise ToolError(
                 f"No SchemaComponent with component_id={component_id!r}. "
-                "Use query_graph to list candidates: "
-                "MATCH (c:SchemaComponent) WHERE c.name CONTAINS '<frag>' "
-                "RETURN c.component_id, c.name LIMIT 25"
+                "IDs are EXACT — the canonical shape is "
+                "'<provider>:<section>:<Name>' (e.g. 'central:schemas:VlanInterface'). "
+                "If you only know the bare name, look it up first: "
+                "MATCH (c:SchemaComponent) WHERE c.name = $name "
+                "RETURN c.component_id, c.section LIMIT 5"
             )
 
         row = rows[0]

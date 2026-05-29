@@ -428,8 +428,11 @@ required fields without ever materialising a full skeleton.
   parameters, requestBodies, responses) AND every promoted inline
   schema (oneOf/anyOf/allOf branches, additionalProperties value
   shapes, array items, nested objects). Properties: `component_id`
-  (PK), `spec_source`, `section` (`schemas` / `parameters` / ... /
-  `inline` for synthesised nodes), `name`, `type`, `kind`,
+  (PK — canonical shape `<provider>:<section>:<Name>`, e.g.
+  `central:schemas:VlanInterface`; inline-promoted branches add
+  a `#` suffix such as `central:schemas:NtpprofileSchema#allOf:2`
+  and live in `section='inline'`), `spec_source`, `section`
+  (`schemas` / `parameters` / ... / `inline` for synthesised nodes), `name`, `type`, `kind`,
   `bodyShape` (single-word structural signature: `object`,
   `array`, `primitive`, `union-oneOf`, `union-anyOf`,
   `allOf-composite`, `map`, `unresolved`), `required`,
