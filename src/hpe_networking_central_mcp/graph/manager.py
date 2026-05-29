@@ -226,6 +226,7 @@ class GraphManager:
           - Device: name, serial, model, deviceType
           - Site: name, address, city, country
           - Script: filename, description
+          - Property: name, description, yangPath (ADR-013)
 
         Returns the number of indexes created, or 0 if FTS is unavailable.
         """
@@ -240,6 +241,10 @@ class GraphManager:
             ("device_fts", "Device", ["name", "serial", "model", "deviceType"]),
             ("site_fts", "Site", ["name", "address", "city", "country"]),
             ("script_fts", "Script", ["filename", "description"]),
+            # Property.enumValues is STRING[]; Kuzu FTS indexes scalar columns
+            # only, so we omit it and rely on ``$val IN p.enumValues`` for enum
+            # lookups. Mirror of the entry in build_knowledge_db._create_fts_indexes.
+            ("property_fts", "Property", ["name", "description", "yangPath"]),
         ]
 
         created = 0
@@ -428,8 +433,11 @@ required fields without ever materialising a full skeleton.
   parameters, requestBodies, responses) AND every promoted inline
   schema (oneOf/anyOf/allOf branches, additionalProperties value
   shapes, array items, nested objects). Properties: `component_id`
-  (PK), `spec_source`, `section` (`schemas` / `parameters` / ... /
-  `inline` for synthesised nodes), `name`, `type`, `kind`,
+  (PK — canonical shape `<provider>:<section>:<Name>`, e.g.
+  `central:schemas:VlanInterface`; inline-promoted branches add
+  a `#` suffix such as `central:schemas:NtpprofileSchema#allOf:2`
+  and live in `section='inline'`), `spec_source`, `section`
+  (`schemas` / `parameters` / ... / `inline` for synthesised nodes), `name`, `type`, `kind`,
   `bodyShape` (single-word structural signature: `object`,
   `array`, `primitive`, `union-oneOf`, `union-anyOf`,
   `allOf-composite`, `map`, `unresolved`), `required`,

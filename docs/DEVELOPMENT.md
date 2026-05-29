@@ -36,11 +36,44 @@ need:
 |------|----------|
 | `query_graph` | Generic escape hatch. Use when none of the focused aliases fit. |
 | `query_api_schema` | Walking the OpenAPI surface — endpoints, components, properties, `COMPOSED_OF`, `PROPERTY_OF_TYPE`, `supportedDeviceTypes` filter. |
-| `query_fts` | Full-text search via `CALL QUERY_FTS_INDEX(...)` over `api_fts`, `doc_fts`, `script_fts`, `device_fts`, `site_fts`, `config_fts`. |
+| `query_fts` | Full-text search via `CALL QUERY_FTS_INDEX(...)` over `api_fts`, `doc_fts`, `script_fts`, `property_fts`, `device_fts`, `site_fts`, `config_fts`. |
 | `query_topology` | Live network — Org / SiteCollection / Site / Device / DeviceGroup / UnmanagedDevice and their `HAS_*` / `CONNECTED_TO` / `LINKED_TO` edges. |
 | `query_yang` | `YangPath`, `PROPERTY_AT_YANG`, `CONFIGURES_YANG` provenance. |
 
 All five are read-only and idempotent. Writes go through `write_graph`.
+
+### FTS indexes
+
+Built by `_create_fts_indexes` in `scripts/build_knowledge_db.py`. Use
+them via `CALL QUERY_FTS_INDEX('<table>', '<index>', '<query>') YIELD
+node, score` and then chain a `MATCH` in the same Cypher block to hop
+from hits to whatever you actually want.
+
+| Table | Index | Indexed columns | Notes |
+|-------|-------|-----------------|-------|
+| `ApiEndpoint` | `api_fts` | `summary, description, path, operationId` | Endpoint discovery. |
+| `DocSection` | `doc_fts` | `title, content` | OpenAPI Markdown docs. |
+| `Script` | `script_fts` | `filename, description` | Built-in scripts. |
+| `Property` | `property_fts` | `name, description, yangPath` | Field-level discovery ("vrf binding", "ntp server"). Hops to owning component via `HAS_PROPERTY` then to endpoints via `BODY_REFERENCES` / `COMPOSED_OF*`. `enumValues` is a `STRING[]` and is intentionally not FTS-indexed (Kuzu limitation); use `$val IN p.enumValues`. |
+| `Device` | `device_fts` | runtime | Populated by live seed. |
+| `Site` | `site_fts` | runtime | Populated by live seed. |
+| Config nodes | `config_fts` | runtime | Populated by live seed. |
+
+### Batch mode on read tools
+
+Every `query_*` tool accepts an optional `queries: list[dict]`
+argument. Each item is a `{cypher, parameters?, label?}` dict.
+When `queries` is set the single-call `cypher` / `parameters`
+arguments are ignored (mirrors `call_central_api(calls=...)`).
+
+| Env var | Default | What it caps |
+|---------|---------|--------------|
+| `MCP_GRAPH_BATCH_MAX_ITEMS` | `25` | Maximum items per batch. Over-cap calls fail fast with a `ToolError`. |
+| `MCP_GRAPH_BATCH_RESPONSE_BYTES` | `200000` | Aggregate byte cap on the whole batch envelope. Trailing items are dropped and `truncated: true, kept_items: N` is set. Per-item caps still apply. |
+
+Batches run sequentially, continue-on-error, and return
+`{batch: true, total, ok, failed, results: [...]}`. Each item's
+envelope is `{ok: bool, label, result | error}`.
 
 ### Response caps and `get_raw_schema`
 
@@ -55,6 +88,36 @@ Two byte caps protect agent context budgets:
 `get_raw_schema(component_id)` is the escape hatch for the per-cell
 envelope: it returns the raw `bodyJson` string for a single
 `SchemaComponent`, subject to the hard cap above.
+
+### `component_id` convention
+
+Every `SchemaComponent.component_id` follows
+`<provider>:<section>:<Name>`:
+
+| Shape | Example | Meaning |
+|-------|---------|---------|
+| `<provider>:<section>:<Name>` | `central:schemas:VlanInterface` | Top-level named component from a spec. |
+| `...:<Name>#allOf:N` | `central:schemas:VlanInterface#allOf:1` | Inline allOf branch promoted to a synthetic component. |
+| `...:<Name>#oneOf:N` / `#anyOf:N` | — | Inline union branch. |
+| `...:<Name>#prop:<field>#items` | `central:schemas:VlanInterface#prop:vlan_ids#items` | Inline array-item shape. |
+| `...:<Name>#additionalProperties` | — | Inline map value shape. |
+
+Look one up by name when you only know the friendly name:
+
+```cypher
+MATCH (c:SchemaComponent {name: $n})
+RETURN c.component_id
+```
+
+### Invariants (build-time guards)
+
+`graph/invariants.py` exposes `assert_graph_invariants(conn, strict=...)`,
+run by `[3d/6] Auditing graph invariants` in `build_knowledge_db.py`
+and by `tests/test_real_spec_ingest_smoke.py`. Each check raises
+`InvariantViolation(invariant, detail, sample)` on failure. INV-8
+(`no_orphaned_properties`) catches `Property` rows that are not
+reachable from any `SchemaComponent` via `HAS_PROPERTY` — the failure
+mode behind ADR-013's eviction fix.
 
 ### `supportedDeviceTypes` semantic
 

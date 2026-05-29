@@ -768,6 +768,10 @@ def _create_fts_indexes(db: lb.Database) -> int:
         ("api_fts", "ApiEndpoint", ["summary", "description", "path", "operationId"]),
         ("doc_fts", "DocSection", ["title", "content"]),
         ("script_fts", "Script", ["filename", "description"]),
+        # ``Property.enumValues`` is STRING[]; Kuzu FTS only indexes scalar
+        # string columns, so the array is excluded — enum-value lookup goes
+        # via Cypher (``$val IN p.enumValues``) instead.
+        ("property_fts", "Property", ["name", "description", "yangPath"]),
         # Data-node indexes are only useful at runtime (nodes populated by seeds),
         # but we create them at build time so the schema is ready.
         ("device_fts", "Device", ["name", "serial", "model", "deviceType"]),

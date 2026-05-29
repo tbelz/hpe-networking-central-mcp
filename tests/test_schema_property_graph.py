@@ -399,6 +399,168 @@ class TestAllOfFlattening:
         )
 
 
+# ── Eviction integrity (richer-wins replacement) ─────────────────────
+
+
+class TestEvictionPreservesGraphIntegrity:
+    """Regression tests for the orphaned-Property bug.
+
+    When a SchemaComponent is replaced by a richer body, the eviction
+    helper must drop ALL buffered rows owned by the component AND by its
+    inline descendants (e.g. ``{cid}#allOf:0``). A previous version only
+    filtered direct-child properties (``{cid}#prop:*``) and edges with
+    ``a == cid``, leaving inline-descendant HAS_PROPERTY edges in the
+    buffer whose source SchemaComponent had been wiped. ``COPY`` then
+    silently dropped those edges (foreign-key violation under
+    ``ignore_errors=true``), orphaning ~42% of Property nodes on a real
+    rebuild.
+    """
+
+    @staticmethod
+    def _stub_spec() -> dict:
+        """First definition of ``CommonProfile`` — allOf with ONE inline
+        branch. Emits Properties whose ids carry the inline-child prefix
+        (``CommonProfile#allOf:0#prop:*``), which the buggy eviction
+        failed to clear from the dedup sets when the richer body
+        arrived.
+        """
+        return {
+            "openapi": "3.0.0",
+            "info": {"title": "Stub"},
+            "components": {
+                "schemas": {
+                    "CommonProfile": {
+                        "allOf": [
+                            {
+                                "type": "object",
+                                "properties": {"id": {"type": "string"}},
+                            }
+                        ],
+                    }
+                }
+            },
+            "paths": {
+                "/v1/stub": {
+                    "get": {
+                        "operationId": "getStub",
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "$ref": "#/components/schemas/CommonProfile"
+                                        }
+                                    }
+                                },
+                            }
+                        },
+                    }
+                }
+            },
+        }
+
+    @staticmethod
+    def _rich_spec() -> dict:
+        """Richer second definition that adds inline allOf branches with
+        their own properties — exercises the inline-descendant eviction
+        path that the bug missed.
+        """
+        return {
+            "openapi": "3.0.0",
+            "info": {"title": "Rich"},
+            "components": {
+                "schemas": {
+                    "CommonProfile": {
+                        "allOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "label": {"type": "string"},
+                                },
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "tags": {"type": "string"},
+                                    "owner": {"type": "string"},
+                                },
+                            },
+                        ],
+                    }
+                }
+            },
+            "paths": {
+                "/v1/rich": {
+                    "get": {
+                        "operationId": "getRich",
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "$ref": "#/components/schemas/CommonProfile"
+                                        }
+                                    }
+                                },
+                            }
+                        },
+                    }
+                }
+            },
+        }
+
+    def _seed_both(self, conn) -> None:
+        from hpe_networking_central_mcp.oas_schema_graph import populate_schema_graph
+
+        _seed_endpoint(conn, "GET", "/v1/stub")
+        populate_schema_graph(
+            conn,
+            spec_source="central",
+            spec=self._stub_spec(),
+            endpoints=[("GET", "/v1/stub")],
+        )
+        _seed_endpoint(conn, "GET", "/v1/rich")
+        populate_schema_graph(
+            conn,
+            spec_source="central",
+            spec=self._rich_spec(),
+            endpoints=[("GET", "/v1/rich")],
+        )
+
+    def test_no_orphaned_properties_after_richest_wins_replacement(self, fresh_db):
+        """INV-8 in spirit: every Property must have at least one
+        incoming HAS_PROPERTY edge.
+        """
+        _, conn = fresh_db
+        self._seed_both(conn)
+        rows = list(conn.execute(
+            "MATCH (p:Property) "
+            "WHERE NOT EXISTS { MATCH (:SchemaComponent)-[:HAS_PROPERTY]->(p) } "
+            "RETURN p.property_id AS pid LIMIT 25"
+        ).rows_as_dict())
+        assert rows == [], (
+            f"Found {len(rows)} orphaned Property nodes after eviction: "
+            f"{[r['pid'] for r in rows]}"
+        )
+
+    def test_richer_inline_branches_are_reachable(self, fresh_db):
+        """Walking from the richer-wins component must surface every
+        leaf declared on its inline allOf branches."""
+        _, conn = fresh_db
+        self._seed_both(conn)
+        rows = list(conn.execute(
+            "MATCH (root:SchemaComponent {name: 'CommonProfile'})"
+            "-[:COMPOSED_OF*0..5]->(c:SchemaComponent)"
+            "-[:HAS_PROPERTY]->(p:Property) "
+            "RETURN DISTINCT p.name AS name ORDER BY name"
+        ).rows_as_dict())
+        names = sorted(r["name"] for r in rows)
+        assert names == sorted(["id", "label", "tags", "owner"])
+
+
 # ── Inline schemas (no $ref) materialised as synthetic components ───
 
 
