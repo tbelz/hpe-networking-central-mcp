@@ -446,13 +446,24 @@ class _Batch:
         DB-persisted rows are wiped separately in ``flush()`` via
         DETACH DELETE for ids in ``_replaced_persisted_components``.
         """
-        prop_prefix = f"{cid}#prop:"
         inline_prefix = f"{cid}#"
 
-        stale_props = {p for p in self._seen_properties if p.startswith(prop_prefix)}
+        # `inline_prefix` ("{cid}#") subsumes the old "{cid}#prop:" prefix AND
+        # ALSO matches properties declared on inline descendants
+        # (e.g. ``{cid}#allOf:0#prop:foo``). Filtering by inline_prefix alone
+        # catches both direct properties and inline-descendant properties —
+        # without this, HAS_PROPERTY edges from inline children survived
+        # eviction (a != cid), then silently dropped at COPY time when the
+        # inline parent SchemaComponent row was wiped (foreign-key violation
+        # under ``ignore_errors=true``). That regression orphaned ~42% of
+        # Property nodes on a real-spec rebuild.
+        stale_props = {
+            p for p in self._seen_properties if p.startswith(inline_prefix)
+        }
         self._seen_properties -= stale_props
         self._seen_has_property = {
-            (a, b) for (a, b) in self._seen_has_property if a != cid
+            (a, b) for (a, b) in self._seen_has_property
+            if a != cid and not a.startswith(inline_prefix)
         }
         self._seen_property_of_type = {
             (a, b) for (a, b) in self._seen_property_of_type if a not in stale_props
@@ -461,7 +472,8 @@ class _Batch:
             (a, b) for (a, b) in self._seen_property_at_yang if a not in stale_props
         }
         self._seen_has_value_schema = {
-            (a, b) for (a, b) in self._seen_has_value_schema if a != cid
+            (a, b) for (a, b) in self._seen_has_value_schema
+            if a != cid and not a.startswith(inline_prefix)
         }
         self._seen_composed_of = {
             (a, b, k) for (a, b, k) in self._seen_composed_of
@@ -494,7 +506,10 @@ class _Batch:
             self.properties = [
                 r for r in self.properties if r["property_id"] not in stale_props
             ]
-        self.has_property = [r for r in self.has_property if r["a"] != cid]
+        self.has_property = [
+            r for r in self.has_property
+            if r["a"] != cid and not r["a"].startswith(inline_prefix)
+        ]
         if stale_props:
             self.property_of_type = [
                 r for r in self.property_of_type if r["a"] not in stale_props
@@ -502,7 +517,10 @@ class _Batch:
             self.property_at_yang = [
                 r for r in self.property_at_yang if r["a"] not in stale_props
             ]
-        self.has_value_schema = [r for r in self.has_value_schema if r["a"] != cid]
+        self.has_value_schema = [
+            r for r in self.has_value_schema
+            if r["a"] != cid and not r["a"].startswith(inline_prefix)
+        ]
         self.composed_of = [
             r for r in self.composed_of
             if r["a"] != cid and not r["a"].startswith(inline_prefix)
