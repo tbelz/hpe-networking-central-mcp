@@ -592,6 +592,7 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         - ``ApiEndpoint`` → ``api_fts`` → summary, description, path, operationId
         - ``DocSection`` → ``doc_fts`` → title, body
         - ``Script`` → ``script_fts`` → name, description
+        - ``Property`` → ``property_fts`` → name, description, yangPath
         - ``Device`` → ``device_fts`` → name, serial, model (runtime, populated
           by live seed)
         - ``Site`` → ``site_fts`` → name, address (runtime)
@@ -615,6 +616,25 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
               -[:BODY_REFERENCES]->(c:SchemaComponent)
         RETURN e.method, e.path, c.name, score
         ORDER BY score DESC LIMIT 10
+        ```
+
+        ## Canonical: keyword → property → owning component → endpoints
+
+        Use this when you know what a field DOES (e.g. "ntp server",
+        "vrf binding") but not which schema or endpoint owns it. Free-
+        text matches on Property descriptions and YANG paths in one hop.
+
+        ```cypher
+        CALL QUERY_FTS_INDEX('Property', 'property_fts', 'ntp server')
+        YIELD node AS p, score
+        MATCH (c:SchemaComponent)-[:HAS_PROPERTY]->(p)
+        OPTIONAL MATCH (e:ApiEndpoint)
+                 -[:HAS_REQUEST_BODY|:HAS_RESPONSE]->()
+                 -[:BODY_REFERENCES|:RESPONSE_REFERENCES]->(root:SchemaComponent)
+                 -[:COMPOSED_OF*0..5]->(c)
+        RETURN p.name, p.type, c.name AS declaredOn,
+               e.method, e.path, score
+        ORDER BY score DESC LIMIT 25
         ```
 
         ## Canonical: keyword → docs
