@@ -67,10 +67,13 @@ def _truncate_cell(value: str, cap: int) -> dict:
     Keeps the agent aware the value exists (and how to fetch it) instead of
     silently inlining a 100 KB JSON blob like ``bodyJson``.
     """
+    # Use UTF-8 byte length — multi-byte characters would otherwise cause the
+    # reported size and cap enforcement to diverge from the actual wire size.
+    byte_len = len(value.encode("utf-8"))
     return {
         "_truncated": True,
         "preview": value[:200],
-        "size_bytes": len(value),
+        "size_bytes": byte_len,
         "hint": (
             "Cell exceeded per-cell cap. Use get_raw_schema(component_id) "
             "for raw JSON, or walk COMPOSED_OF/HAS_PROPERTY to enumerate "
@@ -87,7 +90,7 @@ def _apply_per_cell_cap(rows: list[dict], cap: int) -> list[dict]:
         if not isinstance(row, dict):
             continue
         for key, val in list(row.items()):
-            if isinstance(val, str) and len(val) > cap:
+            if isinstance(val, str) and len(val.encode("utf-8")) > cap:
                 row[key] = _truncate_cell(val, cap)
     return rows
 
@@ -100,16 +103,22 @@ def _apply_response_byte_cap(
     Returns ``(rows_to_emit, envelope_or_None)``. When trimming occurs, the
     envelope is the wrapper to serialise instead of the raw row array.
     """
+    def _measure(r: list[dict]) -> int:
+        # Measure UTF-8 bytes of the indented form — matching what the tool
+        # actually serialises — so the cap is a true byte budget, not a
+        # character count of compact JSON.
+        return len(json.dumps(r, default=str, indent=2).encode("utf-8"))
+
     if cap <= 0 or not rows:
         return rows, None
-    total = len(json.dumps(rows, default=str))
+    total = _measure(rows)
     if total <= cap:
         return rows, None
     # Binary-search the largest prefix that fits under the cap.
     lo, hi = 0, len(rows)
     while lo < hi:
         mid = (lo + hi + 1) // 2
-        if len(json.dumps(rows[:mid], default=str)) <= cap:
+        if _measure(rows[:mid]) <= cap:
             lo = mid
         else:
             hi = mid - 1
@@ -643,18 +652,21 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         - ``Org(scopeId PK, name)``
         - ``SiteCollection(scopeId PK, name, parent_scope_id)``
         - ``Site(scopeId PK, name, address, city, country, latitude, longitude)``
-        - ``Device(serial PK, name, model, type, status, ip, mac, firmware,
-          siteScopeId, deviceGroupScopeId)``
-        - ``DeviceGroup(scopeId PK, name, devicePersona)``
-        - ``UnmanagedDevice(mac PK, vendor, lastSeenAt)``
+        - ``Device(serial PK, name, model, deviceType, status, ipv4, mac,
+          firmware, persona, deviceFunction, siteId, siteName, partNumber,
+          deployment, configStatus, deviceGroupId, deviceGroupName)``
+        - ``DeviceGroup(scopeId PK, name, deviceCount)``
+        - ``UnmanagedDevice(mac PK, name, model, deviceType, health, status,
+          ipv4, siteId)``
 
         Edges (parent → child unless noted):
 
-        - ``(Org)-[:HAS_SITE_COLLECTION]->(SiteCollection)``
-        - ``(SiteCollection)-[:HAS_SITE]->(Site)``
+        - ``(Org)-[:HAS_COLLECTION]->(SiteCollection)``
+        - ``(Org)-[:HAS_SITE]->(Site)`` (standalone site, no collection)
+        - ``(SiteCollection)-[:CONTAINS_SITE]->(Site)``
         - ``(Site)-[:HAS_DEVICE]->(Device)``
-        - ``(DeviceGroup)-[:HAS_DEVICE]->(Device)`` (cross-site grouping)
-        - ``(Org)-[:HAS_DEVICE_GROUP]->(DeviceGroup)``
+        - ``(Site)-[:HAS_UNMANAGED]->(UnmanagedDevice)``
+        - ``(DeviceGroup)-[:HAS_MEMBER]->(Device)`` (cross-site grouping)
         - ``(Device)-[:CONNECTED_TO]->(Device)`` — LLDP/CDP neighbour
         - ``(Device)-[:LINKED_TO]->(UnmanagedDevice)`` — edge-of-managed
 
@@ -662,14 +674,14 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
 
         ```cypher
         MATCH (s:Site {name: $siteName})-[:HAS_DEVICE]->(d:Device)
-        RETURN d.serial, d.name, d.model, d.type, d.status
-        ORDER BY d.type, d.name
+        RETURN d.serial, d.name, d.model, d.deviceType, d.status
+        ORDER BY d.deviceType, d.name
         ```
 
         ## Canonical: blast radius (all devices in a device group across sites)
 
         ```cypher
-        MATCH (g:DeviceGroup {name: $groupName})-[:HAS_DEVICE]->(d:Device)
+        MATCH (g:DeviceGroup {name: $groupName})-[:HAS_MEMBER]->(d:Device)
         MATCH (s:Site)-[:HAS_DEVICE]->(d)
         RETURN s.name AS site, d.serial, d.name, d.model
         ORDER BY site, d.name
@@ -679,7 +691,7 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
 
         ```cypher
         MATCH (d:Device {serial: $serial})-[:CONNECTED_TO]->(n:Device)
-        RETURN n.serial, n.name, n.type, n.model
+        RETURN n.serial, n.name, n.deviceType, n.model
         ```
 
         Freshness: when you SELECT a volatile field (``status``, ``ip``,
@@ -793,7 +805,7 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
                 read_only=True,
             )
         except Exception as exc:
-            raise ToolError(f"Lookup failed: {exc}")
+            raise ToolError(f"Lookup failed: {exc}") from exc
 
         if not rows:
             raise ToolError(
