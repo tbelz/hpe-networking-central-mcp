@@ -20,8 +20,12 @@ _BANNED = "ignore_errors=true"
 
 
 def _src_files() -> list[Path]:
-    root = Path(__file__).resolve().parent.parent / "src"
-    return sorted(root.rglob("*.py"))
+    repo = Path(__file__).resolve().parent.parent
+    return sorted(
+        p
+        for folder in ("src", "scripts")
+        for p in (repo / folder).rglob("*.py")
+    )
 
 
 @pytest.mark.parametrize("path", _src_files(), ids=lambda p: p.name)

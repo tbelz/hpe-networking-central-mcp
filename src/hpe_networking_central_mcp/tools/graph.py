@@ -894,8 +894,8 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         Args:
             component_id: A single ``SchemaComponent.component_id`` PK
                 (ignored when ``component_ids`` is provided).
-            component_ids: Optional batch of PKs (cap 25). Mutually
-                exclusive with the single-id path.
+            component_ids: Optional batch of PKs (cap 25). When provided,
+                ``component_id`` is ignored.
 
         Returns:
             JSON object ``{"component_id": ..., "name": ..., "section": ...,

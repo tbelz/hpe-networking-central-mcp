@@ -395,6 +395,7 @@ def check_yang_path_has_module_edge(conn) -> InvariantViolation | None:
         MATCH (y:YangPath)
         WHERE y.module <> ''
         OPTIONAL MATCH (y)-[:IN_MODULE]->(m:YangModule)
+        WHERE m.module = y.module
         WITH y, COUNT(m) AS n
         WHERE n <> 1
         RETURN y.yangPath AS yangPath, y.module AS module, n
@@ -409,6 +410,7 @@ def check_yang_path_has_module_edge(conn) -> InvariantViolation | None:
         MATCH (y:YangPath)
         WHERE y.module <> ''
         OPTIONAL MATCH (y)-[:IN_MODULE]->(m:YangModule)
+        WHERE m.module = y.module
         WITH y, COUNT(m) AS n
         WHERE n <> 1
         RETURN COUNT(y) AS n
