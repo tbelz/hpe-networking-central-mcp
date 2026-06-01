@@ -173,7 +173,7 @@ graph_manager.create_fts_indexes()
 # Existing databases are migrated in place via ``ALTER TABLE ... ADD``
 # at startup, but the version bump triggers a clean rebuild for users
 # who prefer it.
-_KNOWLEDGE_SCHEMA_VERSION = 9
+_KNOWLEDGE_SCHEMA_VERSION = 10
 
 
 def _check_knowledge_schema_version() -> None:

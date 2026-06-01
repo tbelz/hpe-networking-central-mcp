@@ -397,49 +397,43 @@ def register_api_call_tools(
     ) -> str:
         """Make one or more authenticated requests to Central API endpoints.
 
-        For single-item lookups and one-off mutations ONLY.
-        To fetch all items from a collection endpoint (list devices, list sites,
-        etc.), write a script using ``api.paginate()`` instead — never pass
-        ``limit`` to this tool.
+        For single-item lookups and one-off mutations ONLY. To fetch all items
+        from a collection (list devices, list sites, etc.), write a script
+        using ``api.paginate()`` — never pass ``limit`` to this tool.
 
-        **Before calling**, read the ``api://endpoint-catalog`` resource (or
-        scan the API Endpoint Catalog in the system instructions) to find the
-        correct ``METHOD /path``, then use ``query_graph`` against the schema
+        **Before calling**, consult the ``api://endpoint-catalog`` resource
+        (or the catalog in the system instructions) for the correct
+        ``METHOD /path``, then use ``query_graph`` against the schema
         subgraph (``Parameter``, ``RequestBody``, ``SchemaComponent``,
-        ``Property``) to learn the parameter and body shape. See
-        ``graph://schema`` for canned Cypher patterns.
+        ``Property``) for parameter/body shape. See ``graph://schema``.
 
-        For resolved/effective config that includes provenance annotations,
-        add ``effective=true&detailed=true`` to query_params on
+        For resolved/effective config with provenance, add
+        ``effective=true&detailed=true`` to query_params on
         ``network-config/`` endpoints.
 
-        A pre-flight validator runs against the graph before dispatching the
-        request. Missing required query parameters and missing required body
-        fields (POST only) cause the call to be rejected with a structured
-        error containing a schema summary. Unknown body keys appear as
-        warnings on a successful response. If the graph is unavailable the
-        validator fails open.
+        A pre-flight validator runs against the graph. Missing required
+        query params or required body fields (POST only) reject the call
+        with a structured error containing a schema summary. Unknown body
+        keys show as warnings on a successful response. Fails open if the
+        graph is unavailable.
 
-        **Batch mode**: pass ``calls=[{"path": ..., "method": ..., "query_params":
-        ..., "body": ...}, ...]`` (up to 25 items) to run several independent
-        requests in one tool invocation. Calls run sequentially, continue on
-        error, and each item gets its own envelope in the returned
-        ``results`` list. When ``calls`` is set, the top-level ``path`` /
-        ``method`` / ``query_params`` / ``body`` arguments are ignored.
+        **Batch mode**: pass ``calls=[{"path", "method", "query_params",
+        "body"}, ...]`` (cap 25) to run several independent requests
+        sequentially, continue-on-error. Each item gets its own envelope in
+        ``results``. When ``calls`` is set, top-level args are ignored.
 
         Args:
-            path: API path for the single-call form
-                  (e.g., "network-monitoring/v1/device-inventory"). Ignored
-                  when ``calls`` is set. Do not include the base URL.
-            method: HTTP method for the single-call form. Defaults to GET.
-            query_params: Optional query parameters for the single-call form.
+            path: API path for single-call form (e.g.
+                  ``network-monitoring/v1/device-inventory``). No base URL.
+            method: HTTP method for single-call form. Default GET.
+            query_params: Optional query params for single-call form.
             body: Optional JSON request body for POST/PATCH/PUT.
             calls: Optional list of per-call dicts for batch mode (cap 25).
 
         Returns:
-            JSON envelope. Single mode: ``{request, status, response}``
-            (optionally prefixed by a validator warning block). Batch mode:
-            ``{batch: true, total, ok, failed, results: [...]}``.
+            JSON envelope. Single: ``{request, status, response}`` (maybe
+            with a validator-warning prefix). Batch: ``{batch, total, ok,
+            failed, results}``.
         """
         if not settings.has_credentials:
             raise ToolError(

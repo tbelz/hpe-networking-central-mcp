@@ -235,6 +235,30 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         PRIMARY KEY (yangPath)
     )
     """,
+    # ── CLI bridge (ADR-015) ────────────────────────────────────────
+    # CliCommand: harvested from OAS ``x-cliParam`` vendor extension.
+    # Lets agents resolve a CLI keyword to the ApiEndpoint that
+    # configures it in one hop.
+    """
+    CREATE NODE TABLE IF NOT EXISTS CliCommand (
+        command_id     STRING,
+        commandName    STRING,
+        commandUse     STRING,
+        parentCommand  STRING,
+        pathToPrint    STRING,
+        paramKeys      STRING[],
+        PRIMARY KEY (command_id)
+    )
+    """,
+    # YangModule: derived from the ``x-path`` prefix on YangPath nodes.
+    # Lets agents scope queries to a single feature area without
+    # re-parsing YANG paths on every query.
+    """
+    CREATE NODE TABLE IF NOT EXISTS YangModule (
+        module        STRING,
+        PRIMARY KEY (module)
+    )
+    """,
 ]
 
 KNOWLEDGE_REL_TABLES: list[str] = [
@@ -254,6 +278,9 @@ KNOWLEDGE_REL_TABLES: list[str] = [
     # ── YANG reverse-index edges (Phase 3) ───────────────────────────
     "CREATE REL TABLE IF NOT EXISTS PROPERTY_AT_YANG (FROM Property TO YangPath)",
     "CREATE REL TABLE IF NOT EXISTS CONFIGURES_YANG (FROM ApiEndpoint TO YangPath)",
+    # ── CLI bridge edges (ADR-015) ───────────────────────────────────
+    "CREATE REL TABLE IF NOT EXISTS HAS_CLI_COMMAND (FROM ApiEndpoint TO CliCommand)",
+    "CREATE REL TABLE IF NOT EXISTS IN_MODULE (FROM YangPath TO YangModule)",
 ]
 
 # ── Relationship table DDL ───────────────────────────────────────────

@@ -287,6 +287,146 @@ def check_no_orphaned_properties(conn) -> InvariantViolation | None:
     )
 
 
+def check_property_parent_edge_consistency(conn) -> InvariantViolation | None:
+    """INV-9: every ``Property`` has at least one inbound ``HAS_PROPERTY``
+    edge whose source SchemaComponent's ``component_id`` matches the
+    Property's ``parent_component_id``.
+
+    A Property carrying a ``parent_component_id`` but no edge from that
+    exact parent indicates the COPY layer silently dropped a rel row
+    (historically caused by Kuzu 0.15.x ``COPY ... (ignore_errors=true)``
+    which discards valid rows with no diagnostic). A clean rebuild must
+    report zero rows.
+    """
+    rows = _rows(
+        conn,
+        """
+        MATCH (p:Property)
+        WHERE p.parent_component_id <> ''
+          AND NOT EXISTS {
+              MATCH (c:SchemaComponent {component_id: p.parent_component_id})
+                    -[:HAS_PROPERTY]->(p)
+          }
+        RETURN p.property_id AS property_id,
+               p.parent_component_id AS parent_component_id,
+               p.name AS name
+        LIMIT 25
+        """,
+    )
+    if not rows:
+        return None
+    total = _rows(
+        conn,
+        """
+        MATCH (p:Property)
+        WHERE p.parent_component_id <> ''
+          AND NOT EXISTS {
+              MATCH (c:SchemaComponent {component_id: p.parent_component_id})
+                    -[:HAS_PROPERTY]->(p)
+          }
+        RETURN COUNT(p) AS n
+        """,
+    )
+    n = total[0]["n"] if total else len(rows)
+    return InvariantViolation(
+        invariant="INV-9",
+        detail=(
+            f"{n} Property nodes are missing the HAS_PROPERTY edge from "
+            "their declared parent_component_id (silent COPY-time drop)"
+        ),
+        sample=rows,
+    )
+
+
+def check_cli_command_has_single_endpoint(conn) -> InvariantViolation | None:
+    """INV-13: every ``CliCommand`` has exactly one inbound
+    ``HAS_CLI_COMMAND`` edge from an ``ApiEndpoint``.
+
+    Command IDs are deterministic (``<endpoint_id>::<commandName>``), so
+    any duplicate or orphan points at populator bug or silent COPY
+    failure.
+    """
+    rows = _rows(
+        conn,
+        """
+        MATCH (c:CliCommand)
+        OPTIONAL MATCH (e:ApiEndpoint)-[:HAS_CLI_COMMAND]->(c)
+        WITH c, COUNT(e) AS n
+        WHERE n <> 1
+        RETURN c.command_id AS command_id, n
+        LIMIT 25
+        """,
+    )
+    if not rows:
+        return None
+    total = _rows(
+        conn,
+        """
+        MATCH (c:CliCommand)
+        OPTIONAL MATCH (e:ApiEndpoint)-[:HAS_CLI_COMMAND]->(c)
+        WITH c, COUNT(e) AS n
+        WHERE n <> 1
+        RETURN COUNT(c) AS n
+        """,
+    )
+    n = total[0]["n"] if total else len(rows)
+    return InvariantViolation(
+        invariant="INV-13",
+        detail=(
+            f"{n} CliCommand nodes do not have exactly one inbound "
+            "HAS_CLI_COMMAND edge from an ApiEndpoint"
+        ),
+        sample=rows,
+    )
+
+
+def check_yang_path_has_module_edge(conn) -> InvariantViolation | None:
+    """INV-14: every ``YangPath`` with a non-empty ``module`` has exactly
+    one outbound ``IN_MODULE`` edge to the matching ``YangModule``.
+
+    Paths whose ``_yang_module_for`` derivation yielded an empty string
+    are exempted — there is no module to point at. This invariant
+    guards against the populator skipping the module-edge emission when
+    the column is set.
+    """
+    rows = _rows(
+        conn,
+        """
+        MATCH (y:YangPath)
+        WHERE y.module <> ''
+        OPTIONAL MATCH (y)-[:IN_MODULE]->(m:YangModule)
+        WHERE m.module = y.module
+        WITH y, COUNT(m) AS n
+        WHERE n <> 1
+        RETURN y.yangPath AS yangPath, y.module AS module, n
+        LIMIT 25
+        """,
+    )
+    if not rows:
+        return None
+    total = _rows(
+        conn,
+        """
+        MATCH (y:YangPath)
+        WHERE y.module <> ''
+        OPTIONAL MATCH (y)-[:IN_MODULE]->(m:YangModule)
+        WHERE m.module = y.module
+        WITH y, COUNT(m) AS n
+        WHERE n <> 1
+        RETURN COUNT(y) AS n
+        """,
+    )
+    n = total[0]["n"] if total else len(rows)
+    return InvariantViolation(
+        invariant="INV-14",
+        detail=(
+            f"{n} YangPath nodes with a non-empty module lack a single "
+            "IN_MODULE edge to the matching YangModule"
+        ),
+        sample=rows,
+    )
+
+
 _CHECKS = (
     check_named_components_decompose,
     check_no_primitive_with_object_body,
@@ -295,6 +435,9 @@ _CHECKS = (
     check_named_object_components_have_properties,
     check_body_shape_kind_agreement,
     check_no_orphaned_properties,
+    check_property_parent_edge_consistency,
+    check_cli_command_has_single_endpoint,
+    check_yang_path_has_module_edge,
 )
 
 
