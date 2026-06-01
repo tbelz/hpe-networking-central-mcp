@@ -41,30 +41,56 @@ throughout.  Neither is maintainable.
 
 ## Decision
 
-Replace the hand-curated populator with a three-layer compiler pipeline:
+Replace the hand-curated populator with a four-stage compiler pipeline.
+The pipeline is implemented and scoped as four independently shippable
+tasks; the boundaries are chosen so each stage has a single clear
+contract and minimal coupling to the others.
 
 ```
 OAS spec (JSON/YAML)
     │
-    ▼  prance $ref resolution
+    ▼  Task 1 — Resolved Ingestion  (prance)
 ┌───────────────────────────────┐
-│  L1 — Lossless AST            │  build/knowledge_db_ast/
-│  (LadybugDB, never agent-     │
-│   visible)                    │
+│  resolved spec dict           │  in-memory; pure library wrapper
 └───────────────┬───────────────┘
-                │  rule packs (one per vendor extension family)
+                │  Task 2 — Lossless AST Generator  (custom walker)
                 ▼
 ┌───────────────────────────────┐
-│  L2 — Semantic Overlay        │  (ephemeral; rule-pack output)
+│  L1 — Lossless AST            │  build/knowledge_db_ast/
+│  (LadybugDB, never agent-     │  one node per OAS construct;
+│   visible)                    │  no domain logic
 └───────────────┬───────────────┘
-                │  projection pass
+                │  Task 3 — Semantic Overlay  (graph-mutation rule packs)
+                ▼
+┌───────────────────────────────┐
+│  L2 — Semantic Overlay        │  rule packs add typed edges and
+│                               │  semantic nodes onto L1
+└───────────────┬───────────────┘
+                │  Task 4 — Agent Projection  (materializer + MCP tools)
                 ▼
 ┌───────────────────────────────┐
 │  L3 — Agent Projection        │  build/knowledge_db/  (current)
-│  (today's ApiEndpoint /       │
-│   Property / YangPath / …)    │
+│  + MCP tool surface           │  Cypher tools / pre-flight validator
 └───────────────────────────────┘
 ```
+
+The four tasks map to the layer model as follows: Task 1 (ingestion)
+produces the input to L1; Task 2 (AST emission) produces L1; Task 3
+(overlay) produces L2; Task 4 (projection + tools) produces L3 and
+preserves the existing agent surface.
+
+The boundary between Task 1 and Task 2 matters: Task 1 is a thin
+wrapper around an existing library, Task 2 is custom recursive code
+that walks the resolved dict and emits nodes/edges. Bundling them would
+hide that asymmetry and produce an awkward first PR.
+
+The boundary between Task 3 and Task 4 mirrors the **Probability
+Isolation** principle from recent agent-graph research (cf. arXiv
+2510.06002, *Deterministic Legal Agents*): the LLM's stochastic
+reasoning is confined to the initial intent → Cypher translation, and
+all subsequent traversals run against a deterministic, audited graph
+produced by Task 3. The pre-flight validator (ADR 010) is already an
+instance of this pattern.
 
 ### L1 — Lossless AST
 
@@ -108,13 +134,18 @@ A second spec family would add its own pack entry (e.g.
 in V2 — no multi-vendor optimization is attempted — but the design does
 not foreclose it.
 
-### L3 — Agent Projection
+### L3 — Agent Projection and MCP Tool Surface (Task 4)
 
 `compiler/projections.py` materialises the same node-table shape the
 existing agent tools read (`ApiEndpoint`, `Parameter`, `RequestBody`,
 `Response`, `SchemaComponent`, `Property`, `YangPath`, `YangModule`,
-`CliCommand`) into `build/knowledge_db/`.  L3 is the only layer agents
-query.
+`CliCommand`) into `build/knowledge_db/`.
+
+The MCP tool surface (`tools/graph.py`, `tools/api_call.py`, the
+pre-flight validator from ADR 010, `api://endpoint-catalog`) is part of
+this layer. It is the *only* layer the agent sees. The tool contracts
+do not change in this migration — that is the whole point of preserving
+the L3 shape — but they are conceptually owned by Task 4.
 
 L3 closes the gaps that surfaced in the hand-curated populator:
 
