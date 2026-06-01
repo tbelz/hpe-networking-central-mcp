@@ -9,7 +9,7 @@ build/
 
 # uv
 .venv/
-uv.lock
+# uv.lock is committed so CI can use uv sync --frozen (fast, reproducible)
 
 # Environment
 .env
