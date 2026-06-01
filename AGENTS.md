@@ -34,4 +34,30 @@ Required workflow for anything that may take >10s (test suites, builds,
 * Always use `uv run` (e.g. `uv run pytest`, `uv run python scripts/...`).
 * The repo's pytest config lives in `pyproject.toml`; do not pass `--rootdir`.
 
+## Test feedback loops
+
+The full pytest suite is too slow for a per-edit feedback cycle. Use one of:
+
+* `bash scripts/dev_test.sh` — fast unit subset (target <30s). Excludes
+  slow, integration, live_api, and real_spec markers. Use this before
+  every push.
+* `bash scripts/test_changed.sh` — maps changed source files to relevant
+  test files and runs only those. Falls back to `dev_test.sh` for
+  foundational changes (pyproject.toml, conftest.py).
+* `bash scripts/hydrate_test_fixtures.sh` — one-shot download of the
+  real Central spec cache from the latest GitHub release into
+  `tmp/test_fixtures/central_spec_cache/`. Required before running
+  tests marked `@pytest.mark.real_spec`.
+
+To run the opt-in pre-push hook (recommended for agent loops):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+CI (`.github/workflows/tests.yml`) still runs the full suite on every
+PR. The local loop is for tightening agent iteration, not for replacing
+the gate.
+
+
   Don't add anything to AGENTS.md except when I explicitly tell you!

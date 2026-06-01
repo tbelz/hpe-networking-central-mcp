@@ -69,6 +69,19 @@ jobs:
             echo "No VSG cache to pack."
           fi
 
+      - name: Tar Central spec cache for test fixtures
+        if: always()
+        run: |
+          # Published as a release artifact so test suites (and agents in
+          # local dev) can hydrate the real Central OpenAPI specs without
+          # re-scraping ReadMe.io.  See scripts/hydrate_test_fixtures.sh.
+          if [ -d build/spec_cache/central ] && [ -n "$(ls -A build/spec_cache/central 2>/dev/null)" ]; then
+            tar czf build/central-spec-cache.tar.gz -C build/spec_cache central
+            echo "Packed Central spec cache: $(stat -c%s build/central-spec-cache.tar.gz) bytes"
+          else
+            echo "No Central spec cache to pack."
+          fi
+
       - name: Ensure alert label exists
         env:
           GH_TOKEN: ${{ github.token }}
@@ -240,6 +253,7 @@ jobs:
             build/knowledge_db.tar.gz
             build/manifest.json
             build/vsg-cache.tar.gz
+            build/central-spec-cache.tar.gz
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
