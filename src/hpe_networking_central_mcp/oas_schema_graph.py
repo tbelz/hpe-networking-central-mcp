@@ -271,6 +271,8 @@ class _Batch:
         "components",
         "properties",
         "yang_paths",
+        "yang_modules",
+        "cli_commands",
         "has_param",
         "has_request_body",
         "body_refs",
@@ -283,12 +285,16 @@ class _Batch:
         "references",
         "property_at_yang",
         "configures_yang",
+        "has_cli_command",
+        "in_module",
         "_seen_params",
         "_seen_request_bodies",
         "_seen_responses",
         "_seen_components",
         "_seen_properties",
         "_seen_yang_paths",
+        "_seen_yang_modules",
+        "_seen_cli_commands",
         "_seen_has_param",
         "_seen_has_request_body",
         "_seen_body_refs",
@@ -301,6 +307,8 @@ class _Batch:
         "_seen_references",
         "_seen_property_at_yang",
         "_seen_configures_yang",
+        "_seen_has_cli_command",
+        "_seen_in_module",
         "_components_pos",
         "_components_richness",
         "_replaced_persisted_components",
@@ -313,6 +321,8 @@ class _Batch:
         self.components: list[dict] = []
         self.properties: list[dict] = []
         self.yang_paths: list[dict] = []
+        self.yang_modules: list[dict] = []
+        self.cli_commands: list[dict] = []
         self.has_param: list[dict] = []
         self.has_request_body: list[dict] = []
         self.body_refs: list[dict] = []
@@ -325,12 +335,16 @@ class _Batch:
         self.references: list[dict] = []
         self.property_at_yang: list[dict] = []
         self.configures_yang: list[dict] = []
+        self.has_cli_command: list[dict] = []
+        self.in_module: list[dict] = []
         self._seen_params: set[str] = set()
         self._seen_request_bodies: set[str] = set()
         self._seen_responses: set[str] = set()
         self._seen_components: set[str] = set()
         self._seen_properties: set[str] = set()
         self._seen_yang_paths: set[str] = set()
+        self._seen_yang_modules: set[str] = set()
+        self._seen_cli_commands: set[str] = set()
         self._seen_has_param: set[tuple[str, str]] = set()
         self._seen_has_request_body: set[tuple[str, str]] = set()
         self._seen_body_refs: set[tuple[str, str]] = set()
@@ -343,6 +357,8 @@ class _Batch:
         self._seen_references: set[tuple[str, str, str]] = set()
         self._seen_property_at_yang: set[tuple[str, str]] = set()
         self._seen_configures_yang: set[tuple[str, str]] = set()
+        self._seen_has_cli_command: set[tuple[str, str]] = set()
+        self._seen_in_module: set[tuple[str, str]] = set()
         # Richness tracking enables "richest-wins" merge across multiple
         # decompositions of the same component_id (multi-spec collision,
         # stub-then-rich ordering). See add_component.
@@ -654,6 +670,39 @@ class _Batch:
         self.configures_yang.append({"a": eid, "b": yang_path})
         return True
 
+    def add_yang_module(self, module: str) -> bool:
+        if not module or module in self._seen_yang_modules:
+            return False
+        self._seen_yang_modules.add(module)
+        self.yang_modules.append({"module": module})
+        return True
+
+    def add_in_module(self, yang_path: str, module: str) -> bool:
+        if not yang_path or not module:
+            return False
+        key = (yang_path, module)
+        if key in self._seen_in_module:
+            return False
+        self._seen_in_module.add(key)
+        self.in_module.append({"a": yang_path, "b": module})
+        return True
+
+    def add_cli_command(self, row: dict) -> bool:
+        cid = row.get("command_id") or ""
+        if not cid or cid in self._seen_cli_commands:
+            return False
+        self._seen_cli_commands.add(cid)
+        self.cli_commands.append(row)
+        return True
+
+    def add_has_cli_command(self, eid: str, command_id: str) -> bool:
+        key = (eid, command_id)
+        if key in self._seen_has_cli_command:
+            return False
+        self._seen_has_cli_command.add(key)
+        self.has_cli_command.append({"a": eid, "b": command_id})
+        return True
+
     def add_reference(self, parent_cid: str, child_cid: str, via: str) -> bool:
         key = (parent_cid, child_cid, via)
         if key in self._seen_references:
@@ -747,6 +796,18 @@ class _Batch:
             self.yang_paths,
             schema=_YANG_PATH_SCHEMA,
         )
+        _copy_node_table(
+            conn,
+            "YangModule",
+            self.yang_modules,
+            schema=_YANG_MODULE_SCHEMA,
+        )
+        _copy_node_table(
+            conn,
+            "CliCommand",
+            self.cli_commands,
+            schema=_CLI_COMMAND_SCHEMA,
+        )
 
         # ── Rel tables (require both endpoints to be loaded) ──
         _copy_rel_table(conn, "HAS_PARAMETER", self.has_param, _REL_AB_SCHEMA)
@@ -765,6 +826,8 @@ class _Batch:
         )
         _copy_rel_table(conn, "PROPERTY_AT_YANG", self.property_at_yang, _REL_AB_SCHEMA)
         _copy_rel_table(conn, "CONFIGURES_YANG", self.configures_yang, _REL_AB_SCHEMA)
+        _copy_rel_table(conn, "HAS_CLI_COMMAND", self.has_cli_command, _REL_AB_SCHEMA)
+        _copy_rel_table(conn, "IN_MODULE", self.in_module, _REL_AB_SCHEMA)
 
 
 # ── PyArrow schemas (column order MUST match graph/schema.py DDL) ───
@@ -831,6 +894,19 @@ _PROPERTY_SCHEMA = pa.schema([
 _YANG_PATH_SCHEMA = pa.schema([
     ("yangPath", pa.string()),
     ("module", pa.string()),
+])
+
+_YANG_MODULE_SCHEMA = pa.schema([
+    ("module", pa.string()),
+])
+
+_CLI_COMMAND_SCHEMA = pa.schema([
+    ("command_id", pa.string()),
+    ("commandName", pa.string()),
+    ("commandUse", pa.string()),
+    ("parentCommand", pa.string()),
+    ("pathToPrint", pa.string()),
+    ("paramKeys", pa.list_(pa.string())),
 ])
 
 # Rel schemas: first two columns are FROM/TO PKs; extra cols follow.
@@ -971,6 +1047,37 @@ def _collect_spec_into_batch(
         if eid not in existing_eids:
             continue
         stats["endpoints"] += 1
+
+        # ── CLI bridge (vendor extension ``x-cliParam``) ──
+        # Aruba Central OAS specs may annotate an operation with the
+        # CLI command that maps to the same configuration. Surface
+        # this as a graph node so agents can resolve CLI ↔ API in
+        # a single MATCH instead of grepping spec files.
+        cli = op.get("x-cliParam")
+        if isinstance(cli, dict):
+            command_name = str(cli.get("commandName") or "").strip()
+            if command_name:
+                raw_param_keys = cli.get("paramKeys") or []
+                param_keys: list[str] = []
+                if isinstance(raw_param_keys, list):
+                    for entry in raw_param_keys:
+                        if isinstance(entry, str):
+                            param_keys.append(entry)
+                        elif isinstance(entry, dict):
+                            k = entry.get("key")
+                            if isinstance(k, str):
+                                param_keys.append(k)
+                command_id = f"{eid}::{command_name}"
+                if batch.add_cli_command({
+                    "command_id": command_id,
+                    "commandName": command_name,
+                    "commandUse": str(cli.get("commandUse") or ""),
+                    "parentCommand": str(cli.get("parentCommand") or ""),
+                    "pathToPrint": str(cli.get("pathToPrint") or ""),
+                    "paramKeys": param_keys,
+                }):
+                    stats["cli_commands"] = stats.get("cli_commands", 0) + 1
+                batch.add_has_cli_command(eid, command_id)
 
         # ── Parameters ──
         for idx, raw_p in enumerate(op.get("parameters") or []):
@@ -1256,6 +1363,20 @@ def _preseed_batch_from_db(conn, batch: "_Batch") -> None:
         "RETURN e.endpoint_id AS a, y.yangPath AS b"
     ).rows_as_dict():
         batch._seen_configures_yang.add((r["a"], r["b"]))
+    for r in conn.execute("MATCH (m:YangModule) RETURN m.module AS k").rows_as_dict():
+        batch._seen_yang_modules.add(r["k"])
+    for r in conn.execute(
+        "MATCH (y:YangPath)-[:IN_MODULE]->(m:YangModule) "
+        "RETURN y.yangPath AS a, m.module AS b"
+    ).rows_as_dict():
+        batch._seen_in_module.add((r["a"], r["b"]))
+    for r in conn.execute("MATCH (c:CliCommand) RETURN c.command_id AS k").rows_as_dict():
+        batch._seen_cli_commands.add(r["k"])
+    for r in conn.execute(
+        "MATCH (e:ApiEndpoint)-[:HAS_CLI_COMMAND]->(c:CliCommand) "
+        "RETURN e.endpoint_id AS a, c.command_id AS b"
+    ).rows_as_dict():
+        batch._seen_has_cli_command.add((r["a"], r["b"]))
 
 
 def flush_batch(conn, batch: "_Batch") -> None:
@@ -1685,8 +1806,13 @@ def _emit_one_property(
     batch.add_has_property(parent_component_id, property_id)
 
     if yang_path:
-        batch.add_yang_path(yang_path, _yang_module_for(yang_path))
+        module = _yang_module_for(yang_path)
+        batch.add_yang_path(yang_path, module)
         batch.add_property_at_yang(property_id, yang_path)
+        if module:
+            if batch.add_yang_module(module):
+                stats["yang_modules"] = stats.get("yang_modules", 0) + 1
+            batch.add_in_module(yang_path, module)
 
     target_ref: str | None = None
     if isinstance(prop_body.get("$ref"), str):
