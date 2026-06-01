@@ -453,10 +453,9 @@ class _Batch:
         # (e.g. ``{cid}#allOf:0#prop:foo``). Filtering by inline_prefix alone
         # catches both direct properties and inline-descendant properties —
         # without this, HAS_PROPERTY edges from inline children survived
-        # eviction (a != cid), then silently dropped at COPY time when the
-        # inline parent SchemaComponent row was wiped (foreign-key violation
-        # under ``ignore_errors=true``). That regression orphaned ~42% of
-        # Property nodes on a real-spec rebuild.
+        # eviction (a != cid), then dropped at COPY time when the inline
+        # parent SchemaComponent row was wiped (foreign-key violation). That
+        # regression orphaned ~42% of Property nodes on a real-spec rebuild.
         stale_props = {
             p for p in self._seen_properties if p.startswith(inline_prefix)
         }
@@ -672,10 +671,11 @@ class _Batch:
         Avoids both the real_ladybug 0.15.x prepared-statement bugs and
         the documented MERGE-via-UNWIND anti-pattern (LadybugDB issue
         #285, WONTFIX). Primary-key deduplication has already been
-        done in Python by the per-batch ``_seen_*`` sets, so each
-        ``COPY`` runs with ``ignore_errors=true`` only as belt-and-
-        braces against re-running the helper twice on the same DB
-        (idempotent for tests).
+        done in Python by the per-batch ``_seen_*`` sets, so every
+        ``COPY`` runs without ``ignore_errors=true``: that flag is a
+        silent-data-loss footgun in Kuzu 0.15.x (drops valid rel rows
+        with no diagnostic). If a row cannot be COPYed we want the
+        build to fail loudly.
 
         ``COPY`` requires nodes to exist before any rel rows that
         reference them, so node tables are loaded first in dependency
@@ -700,9 +700,10 @@ class _Batch:
                     parameters={"cid": cid, "prefix": cid + "#"},
                 )
             except Exception as exc:
-                # Best-effort: COPY's ignore_errors=true will still
-                # protect us; a leftover orphan is preferable to a
-                # raised exception breaking the flush.
+                # A leftover orphan from a failed DETACH DELETE is
+                # caught by the invariant audit (INV-1/8) which fails
+                # the build, so we log and continue rather than abort
+                # the entire flush on a single replacement glitch.
                 logger.warning(
                     "schemacomponent_detach_delete_failed",
                     component_id=cid,
@@ -888,7 +889,7 @@ def _copy_node_table(
         return
     pa_table = _rows_to_pa(rows, schema)
     conn.execute(
-        f"COPY {table} FROM $df (ignore_errors=true)",
+        f"COPY {table} FROM $df",
         parameters={"df": pa_table},
     )
 
@@ -908,7 +909,7 @@ def _copy_rel_table(
         return
     pa_table = _rows_to_pa(rows, schema)
     conn.execute(
-        f"COPY {table} FROM $df (ignore_errors=true)",
+        f"COPY {table} FROM $df",
         parameters={"df": pa_table},
     )
 
@@ -1185,10 +1186,9 @@ def _preseed_batch_from_db(conn, batch: "_Batch") -> None:
         batch._seen_components.add(cid)
         # Track richness so a subsequent in-batch richer body can still
         # win; position is -1 because the row is in the DB, not in
-        # ``self.components``, so we can't mutate it in-place — the
-        # COPY layer's ignore_errors=true protects us from PK collision
-        # if a stricter richer body is later re-emitted (replacement
-        # via DELETE+INSERT is out of scope for the preseed path).
+        # ``self.components``. If a richer body is later re-emitted the
+        # replace path (``_replaced_persisted_components``) DETACH-DELETEs
+        # the stale node before COPYing the new one — see ``flush()``.
         batch._components_pos[cid] = -1
         batch._components_richness[cid] = len(r.get("body") or "")
     for r in conn.execute("MATCH (p:Property) RETURN p.property_id AS k").rows_as_dict():

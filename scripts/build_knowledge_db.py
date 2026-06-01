@@ -803,9 +803,13 @@ def main() -> None:
                         help="Output directory for the DB and tar (default: ./build)")
     parser.add_argument("--tar", action="store_true",
                         help="Create a tar.gz archive of the database")
-    parser.add_argument("--strict", action="store_true",
-                        help="Fail the build if graph invariants (see graph/invariants.py) are violated. "
-                             "Recommended for CI; opt-in locally.")
+    parser.add_argument("--strict", dest="strict", action="store_true", default=True,
+                        help="Fail the build if graph invariants (see graph/invariants.py) "
+                             "are violated. ON by default; use --no-strict to opt out "
+                             "(local dev only — CI must keep strict on).")
+    parser.add_argument("--no-strict", dest="strict", action="store_false",
+                        help="Disable strict invariant enforcement; report violations but "
+                             "still exit 0. Intended for local debugging only.")
     parser.add_argument("--no-invariants", action="store_true",
                         help="Skip the post-flush invariant audit entirely.")
     parser.add_argument("--sample", type=int, default=0, metavar="N",
