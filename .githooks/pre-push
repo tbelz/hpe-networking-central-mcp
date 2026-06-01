@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Opt-in pre-push hook. Runs the fast local test loop before allowing a push.
+#
+# To enable for your clone:
+#   git config core.hooksPath .githooks
+#
+# To skip on a single push:
+#   git push --no-verify
+
+set -e
+exec scripts/dev_test.sh

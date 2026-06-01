@@ -239,3 +239,50 @@ def seed_infra():
         yield infra
 
         ipc.stop()
+
+
+# ── Real Central spec cache fixture (ADR 011, PR-infra) ─────────────
+#
+# Resolution chain, in priority order:
+#   1. $CENTRAL_SPEC_CACHE  — explicit override path
+#   2. tmp/test_fixtures/central_spec_cache/  — hydrated via
+#      scripts/hydrate_test_fixtures.sh
+#   3. build/spec_cache/central/  — local build output
+#   4. otherwise: pytest.skip with hydration instructions
+#
+# Tests that require this fixture must be marked with
+# ``@pytest.mark.real_spec`` so the fast dev loop skips them.
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _candidate_spec_cache_dirs() -> list[Path]:
+    candidates: list[Path] = []
+    env_override = os.environ.get("CENTRAL_SPEC_CACHE")
+    if env_override:
+        candidates.append(Path(env_override))
+    candidates.append(_REPO_ROOT / "tmp" / "test_fixtures" / "central_spec_cache")
+    candidates.append(_REPO_ROOT / "build" / "spec_cache" / "central")
+    return candidates
+
+
+@pytest.fixture(scope="session")
+def real_central_specs() -> list[Path]:
+    """Return paths to all real Central OpenAPI JSON spec files.
+
+    Resolution priority is documented in the comment block above this fixture.
+    Skips the test (does not fail it) when no cache is available so the
+    fast dev loop without specs still passes.
+    """
+    for candidate in _candidate_spec_cache_dirs():
+        if not candidate.is_dir():
+            continue
+        files = sorted(candidate.rglob("*.json"))
+        if files:
+            return files
+    pytest.skip(
+        "Real Central spec cache not available. Run "
+        "`bash scripts/hydrate_test_fixtures.sh` to download, or set "
+        "$CENTRAL_SPEC_CACHE to point at a directory of spec JSON files."
+    )
+

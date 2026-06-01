@@ -64,6 +64,8 @@ markers = [
     "live_api: tests that hit the live Central / GreenLake API (read-only); subset of integration",
     "slow: tests that take more than a few seconds",
     "oas_ingest: end-to-end OAS→graph ingestion smoke (real spec excerpts); fast subset for pre-build validation",
+    "compiler: tests for the OAS→graph compiler pipeline (ADR 011)",
+    "real_spec: requires the real Central spec cache; auto-skipped when unavailable",
 ]
 
 [tool.coverage.run]
