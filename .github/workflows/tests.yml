@@ -23,14 +23,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install uv
-        run: pip install uv
-
       - name: Install dependencies
-        run: uv sync --frozen
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
 
       - name: Run tests
-        run: uv run pytest -x --timeout=120
+        run: pytest -x --timeout=120
         env:
           # Suppress credential-dependent integration tests
           CENTRAL_BASE_URL: ""
