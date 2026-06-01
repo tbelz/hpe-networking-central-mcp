@@ -88,13 +88,16 @@ while IFS= read -r f; do
             add_tests "tests/test_monitoring_seed.py"
             add_tests "tests/test_seed_integration.py"
             ;;
-        tests/*)
-            TESTS+=("$f")
-            ;;
         pyproject.toml | uv.lock | tests/conftest.py)
-            # Foundational changes — full fast loop
+            # Foundational changes — full fast loop (must precede tests/* glob)
             echo "Foundational change detected ($f); running full fast loop."
             exec scripts/dev_test.sh
+            ;;
+        tests/*)
+            # Only add test files that still exist (guard against renames/deletes)
+            if [ -f "$f" ]; then
+                TESTS+=("$f")
+            fi
             ;;
     esac
 done <<< "$CHANGED"

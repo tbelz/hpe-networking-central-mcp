@@ -270,7 +270,7 @@ def _candidate_spec_cache_dirs() -> list[Path]:
 def real_central_specs() -> list[Path]:
     """Return paths to all real Central OpenAPI JSON spec files.
 
-    Resolution priority is documented in the module docstring above.
+    Resolution priority is documented in the comment block above this fixture.
     Skips the test (does not fail it) when no cache is available so the
     fast dev loop without specs still passes.
     """

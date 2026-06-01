@@ -75,12 +75,14 @@ jobs:
           # Published as a release artifact so test suites (and agents in
           # local dev) can hydrate the real Central OpenAPI specs without
           # re-scraping ReadMe.io.  See scripts/hydrate_test_fixtures.sh.
-          if [ -d build/spec_cache/central ] && [ -n "$(ls -A build/spec_cache/central 2>/dev/null)" ]; then
-            tar czf build/central-spec-cache.tar.gz -C build/spec_cache central
-            echo "Packed Central spec cache: $(stat -c%s build/central-spec-cache.tar.gz) bytes"
-          else
-            echo "No Central spec cache to pack."
-          fi
+          #
+          # The tarball is ALWAYS created so the release-upload step never
+          # references a missing file.  An empty tarball is valid; the
+          # hydration script handles the zero-spec case gracefully.
+          mkdir -p build/spec_cache/central
+          tar czf build/central-spec-cache.tar.gz -C build/spec_cache central
+          COUNT=$(find build/spec_cache/central -name '*.json' | wc -l)
+          echo "Packed Central spec cache: ${COUNT} spec files, $(stat -c%s build/central-spec-cache.tar.gz) bytes"
 
       - name: Ensure alert label exists
         env:
