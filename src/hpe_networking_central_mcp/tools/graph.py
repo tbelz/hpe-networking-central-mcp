@@ -532,61 +532,48 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
     )
     def query_graph(cypher: str = "", parameters: str = "{}", queries: list[dict] | None = None) -> str:
-        """Run a read-only Cypher query against the Central graph (general escape hatch).
+        """Read-only Cypher escape hatch over the full Central graph.
 
-        **Prefer one of the focused aliases first** — each has a smaller,
-        topic-specific docstring with the right canonical query templates:
+        Prefer a focused alias first — each carries its own canonical
+        templates and is smaller for the LLM to load:
 
-        - ``query_api_schema`` — walk OpenAPI endpoints, schemas, properties,
-          YANG paths; the right tool for "what fields does endpoint X take".
-        - ``query_fts`` — keyword search across endpoints / docs / scripts /
-          devices / sites / configs via ``CALL QUERY_FTS_INDEX(...)``.
+        - ``query_api_schema`` — OpenAPI endpoints, schemas, properties, YANG.
+        - ``query_fts`` — keyword search via ``CALL QUERY_FTS_INDEX(...)``.
         - ``query_topology`` — Org / SiteCollection / Site / Device /
-          DeviceGroup / UnmanagedDevice and their HAS_* / LINKED_TO edges.
-        - ``query_yang`` — YangPath nodes, CONFIGURES_YANG /
-          PROPERTY_AT_YANG (forward and reverse lookups).
+          DeviceGroup / UnmanagedDevice and HAS_* / LINKED_TO / CONNECTED_TO.
+        - ``query_yang`` — YangPath, CONFIGURES_YANG, PROPERTY_AT_YANG.
 
-        Reach for ``query_graph`` only when your query spans those topics
-        (e.g. joining a topology MATCH to an FTS YIELD) or uses node tables
-        none of the aliases describe (``DocSection``, ``Script``,
-        ``ApiCategory``, custom-added labels via ``write_graph``).
+        Use ``query_graph`` when your query spans topics (e.g. topology +
+        FTS) or uses node tables the aliases don't describe (``DocSection``,
+        ``Script``, ``ApiCategory``, custom labels from ``write_graph``).
+        For writes use ``write_graph``; for one raw schema JSON use
+        ``get_raw_schema(component_id)``. Full schema: ``graph://schema``.
 
-        For writes, use ``write_graph``. For raw schema JSON of a single
-        component, use ``get_raw_schema(component_id)``.
-
-        Schema reference: read ``graph://schema``. Node tables include
-        ``ApiEndpoint``, ``Parameter``, ``RequestBody``, ``Response``,
-        ``SchemaComponent``, ``Property``, ``YangPath``, ``Org``,
-        ``SiteCollection``, ``Site``, ``Device``, ``DeviceGroup``,
-        ``UnmanagedDevice``, ``DocSection``, ``Script``, ``ApiCategory``.
-
-        Row caps: soft 200, hard 2000 (rejected).
-        Byte caps: per-cell ~4 KB, per-response ~50 KB. Oversize string
-        cells (typically ``bodyJson``) come back as
-        ``{"_truncated": true, "preview": "...", "size_bytes": N,
-        "hint": "use get_raw_schema(...)"}``. All caps overridable via
+        Caps: rows soft 200 / hard 2000; per-cell ~4 KB; per-response ~50 KB.
+        Oversize string cells return
+        ``{"_truncated": true, "preview": ..., "size_bytes": N,
+        "hint": "use get_raw_schema(...)"}``. Override via
         ``MCP_GRAPH_PER_CELL_BYTES`` / ``MCP_GRAPH_PER_RESPONSE_BYTES``.
 
         **Batch mode**: pass ``queries=[{"cypher": ..., "parameters":
-        {...}, "label": "opt"}, ...]`` (up to 25 items via
-        ``MCP_GRAPH_BATCH_MAX_ITEMS``) to run several reads in one tool
-        invocation. Queries run sequentially, continue on error, and each
-        gets its own envelope in ``results``. When ``queries`` is set the
-        top-level ``cypher`` / ``parameters`` are ignored. Per-item caps
-        (row + byte) still apply; a top-level byte cap
-        (``MCP_GRAPH_BATCH_RESPONSE_BYTES``, default 200 KB) drops
-        trailing items if the aggregate is too large.
+        {...}, "label": "opt"}, ...]`` (cap 25 via
+        ``MCP_GRAPH_BATCH_MAX_ITEMS``). Items run sequentially, continue on
+        error, each wrapped in its own envelope. Top-level ``cypher`` /
+        ``parameters`` are ignored when ``queries`` is set. Per-item caps
+        still apply; an aggregate cap
+        (``MCP_GRAPH_BATCH_RESPONSE_BYTES``, default 200 KB) drops trailing
+        items on overflow.
 
         Args:
-            cypher: A read-only Cypher query (or ``CALL QUERY_FTS_INDEX``).
+            cypher: Read-only Cypher (or ``CALL QUERY_FTS_INDEX``).
                 Ignored when ``queries`` is set.
             parameters: JSON-encoded parameter dict (default ``"{}"``).
-            queries: Optional list of ``{cypher, parameters?, label?}``
-                dicts for batch mode (cap 25).
+            queries: Optional ``[{cypher, parameters?, label?}, ...]``
+                batch (cap 25).
 
         Returns:
-            Single mode: JSON array of rows, or truncation envelope.
-            Batch mode: ``{batch: true, total, ok, failed, results: [...]}``.
+            Single: JSON rows or truncation envelope. Batch:
+            ``{batch: true, total, ok, failed, results: [...]}``.
         """
         if queries is not None:
             return _run_batch(queries, "query_graph")
@@ -598,34 +585,28 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
     def query_api_schema(cypher: str = "", parameters: str = "{}", queries: list[dict] | None = None) -> str:
         """Cypher over the OpenAPI subgraph: endpoints, schemas, properties, YANG.
 
-        Node tables: ``ApiEndpoint(method, path, summary, description,
-        operationId, category)``, ``Parameter(name, location, required, type,
-        inferredHint)``, ``RequestBody``, ``Response(status)``,
+        Nodes: ``ApiEndpoint(method, path, summary, operationId, category)``,
+        ``Parameter(name, location, required, type)``,
+        ``RequestBody``, ``Response(status)``,
         ``SchemaComponent(component_id PK, name, section, kind, bodyShape,
         supportedDeviceTypes, bodyJson)``,
-        ``Property(property_id PK, parent_component_id, name, type, required,
-        enumValues, supportedDeviceTypes, yangPath, readOnly)``,
+        ``Property(property_id PK, parent_component_id, name, type,
+        required, enumValues, supportedDeviceTypes, yangPath, readOnly)``,
         ``YangPath(yangPath PK, module)``.
 
         ``bodyShape`` ∈ {object, union-oneOf, union-anyOf, allOf-composite,
-        map, array, primitive, unresolved}. ``section='inline'`` marks a
-        synthetic component promoted from an inline allOf/oneOf/items branch
-        (its ``component_id`` contains ``#``).
+        map, array, primitive, unresolved}.
 
         Edges: ``HAS_PARAMETER``, ``HAS_REQUEST_BODY``, ``HAS_RESPONSE``,
         ``BODY_REFERENCES``, ``RESPONSE_REFERENCES``,
-        ``COMPOSED_OF {kind}`` (allOf/oneOf/anyOf, between SchemaComponents),
-        ``HAS_PROPERTY`` (component → its direct fields only),
-        ``HAS_VALUE_SCHEMA`` (map value shape),
-        ``PROPERTY_OF_TYPE`` (property → referenced nested SchemaComponent),
-        ``PROPERTY_AT_YANG``, ``CONFIGURES_YANG``.
+        ``COMPOSED_OF {kind}``, ``HAS_PROPERTY``, ``HAS_VALUE_SCHEMA``,
+        ``PROPERTY_OF_TYPE``, ``PROPERTY_AT_YANG``, ``CONFIGURES_YANG``.
 
         ## CANONICAL — walk all fields of a request body
 
-        Properties live ONLY on the component that declares them. ALWAYS
-        ``COMPOSED_OF*0..5`` first to pick up allOf parents / promoted inline
-        branches, and ALWAYS use ``DISTINCT`` (multi-path traversals double-
-        count when a property is reachable via two COMPOSED_OF edges):
+        Properties live ONLY on the declaring component. Use
+        ``COMPOSED_OF*0..5`` (picks up allOf parents and promoted inline
+        branches), ``DISTINCT``, and the device-type filter:
 
         ```cypher
         MATCH (e:ApiEndpoint {method: $m, path: $p})
@@ -633,53 +614,26 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
               -[:BODY_REFERENCES]->(root:SchemaComponent)
         MATCH (root)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)
               -[:HAS_PROPERTY]->(p:Property)
+        WHERE $deviceType IS NULL
+           OR size(coalesce(p.supportedDeviceTypes, [])) = 0
+           OR $deviceType IN p.supportedDeviceTypes
         RETURN DISTINCT c.name AS declaredOn, p.name, p.type, p.required,
-               p.enumValues, p.supportedDeviceTypes, p.yangPath
+               p.enumValues, p.yangPath
         ORDER BY declaredOn, p.required DESC, p.name
         ```
 
-        Device-type filter (covers NULL = "applies to all", empty list, and
-        explicit match):
+        Nested object (``type=''``): follow ``PROPERTY_OF_TYPE`` to the
+        child SchemaComponent and recurse.
 
-        ```
-        WHERE p.supportedDeviceTypes IS NULL
-           OR size(p.supportedDeviceTypes) = 0
-           OR $deviceType IN p.supportedDeviceTypes
-        ```
-
-        ## CANONICAL — descend into nested object properties (``type=""``)
-
-        A property with empty ``type`` is usually a ref to another
-        SchemaComponent. Follow ``PROPERTY_OF_TYPE`` and recurse with the
-        canonical walk above on the target component:
+        Required parameters:
 
         ```cypher
-        MATCH (p:Property {parent_component_id: $cid, name: $field})
-              -[:PROPERTY_OF_TYPE]->(child:SchemaComponent)
-        MATCH (child)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)
-              -[:HAS_PROPERTY]->(np:Property)
-        RETURN DISTINCT c.name, np.name, np.type, np.required
-        ```
-
-        ## Other patterns
-
-        ```cypher
-        // Endpoints in a category
-        MATCH (e:ApiEndpoint {category: $cat, method: 'GET'})
-        RETURN e.path, e.summary ORDER BY e.path
-
-        // Required parameters of an endpoint
         MATCH (e:ApiEndpoint {method: $m, path: $p})
               -[:HAS_PARAMETER]->(p:Parameter {required: true})
         RETURN p.name, p.location, p.type
-
-        // Branches of a union component
-        MATCH (c:SchemaComponent {name: $name})-[r:COMPOSED_OF]->(b:SchemaComponent)
-        WHERE c.bodyShape IN ['union-oneOf','union-anyOf']
-        RETURN r.kind, b.name, b.bodyShape
         ```
 
-        Caps and ``get_raw_schema`` escape hatch behave as in ``query_graph``.
+        Caps and ``get_raw_schema`` escape hatch as in ``query_graph``.
 
         Args:
             cypher: Read-only Cypher.
@@ -694,61 +648,40 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
     )
     def query_fts(cypher: str = "", parameters: str = "{}", queries: list[dict] | None = None) -> str:
-        """Full-text search over the graph via ``CALL QUERY_FTS_INDEX(...)``.
+        """Full-text search via ``CALL QUERY_FTS_INDEX(table, index, query)``.
 
-        FTS is REQUIRED for keyword discovery — path-grep misses cases like
-        "vrf config" (which lives only under ``/stacks/``; the path doesn't
-        mention vrf, the description does). Each FTS hit yields ``node`` +
-        ``score``, which you can chain into a structural follow-up MATCH in
-        the same Cypher block.
+        Required for keyword discovery — path-grep misses cases like "vrf"
+        (which lives under ``/stacks/`` — only the description mentions it).
+        Each hit yields ``node`` + ``score``; chain into a structural MATCH
+        in the same Cypher block. Kuzu FTS rejects ``WHERE`` directly after
+        ``YIELD``; use ``WITH node, score WHERE ...``.
 
-        Invocation shape:
-
-        ```cypher
-        CALL QUERY_FTS_INDEX($table, $index, $query)
-        YIELD node, score
-        RETURN ... ORDER BY score DESC LIMIT 25
-        ```
-
-        Available indexes (table → index → fields):
+        Indexes (table → index → fields):
 
         - ``ApiEndpoint`` → ``api_fts`` → summary, description, path, operationId
         - ``DocSection`` → ``doc_fts`` → title, body
         - ``Script`` → ``script_fts`` → name, description
         - ``Property`` → ``property_fts`` → name, description, yangPath
-        - ``Device`` → ``device_fts`` → name, serial, model (runtime, populated
-          by live seed)
-        - ``Site`` → ``site_fts`` → name, address (runtime)
-        - ``SchemaComponent`` / config nodes → ``config_fts`` (runtime)
+        - ``Device`` → ``device_fts`` (runtime, populated by live seed)
+        - ``Site`` → ``site_fts`` (runtime)
+        - ``SchemaComponent`` → ``config_fts`` (runtime)
 
         ## Canonical: keyword → endpoint
 
         ```cypher
-        CALL QUERY_FTS_INDEX('ApiEndpoint', 'api_fts', 'vrf')
+        CALL QUERY_FTS_INDEX('ApiEndpoint','api_fts','vrf')
         YIELD node, score
         RETURN node.method, node.path, node.summary, score
         ORDER BY score DESC LIMIT 25
         ```
 
-        ## Canonical: keyword → endpoint → schema (one query)
-
-        ```cypher
-        CALL QUERY_FTS_INDEX('ApiEndpoint', 'api_fts', 'mvrp')
-        YIELD node AS e, score
-        MATCH (e)-[:HAS_REQUEST_BODY]->(:RequestBody)
-              -[:BODY_REFERENCES]->(c:SchemaComponent)
-        RETURN e.method, e.path, c.name, score
-        ORDER BY score DESC LIMIT 10
-        ```
-
         ## Canonical: keyword → property → owning component → endpoints
 
-        Use this when you know what a field DOES (e.g. "ntp server",
-        "vrf binding") but not which schema or endpoint owns it. Free-
-        text matches on Property descriptions and YANG paths in one hop.
+        Use when you know what a field does but not which schema/endpoint
+        owns it.
 
         ```cypher
-        CALL QUERY_FTS_INDEX('Property', 'property_fts', 'ntp server')
+        CALL QUERY_FTS_INDEX('Property','property_fts','ntp server')
         YIELD node AS p, score
         MATCH (c:SchemaComponent)-[:HAS_PROPERTY]->(p)
         OPTIONAL MATCH (e:ApiEndpoint)
@@ -760,25 +693,11 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         ORDER BY score DESC LIMIT 25
         ```
 
-        ## Canonical: keyword → docs
-
-        ```cypher
-        CALL QUERY_FTS_INDEX('DocSection', 'doc_fts', 'firmware compliance')
-        YIELD node, score
-        RETURN node.title, node.section_id, score
-        ORDER BY score DESC LIMIT 10
-        ```
-
-        Tips: the third arg accepts Lucene-style terms (``"foo bar"``,
-        ``foo*``, ``foo OR bar``). For multi-word phrases prefer quoting.
-        If FTS returns 0 rows, fall back to ``CONTAINS`` on a property:
-        ``MATCH (e:ApiEndpoint) WHERE e.description CONTAINS $kw RETURN ...``.
-
-        Caps as in ``query_graph``.
+        Lucene-style terms work (``"foo bar"``, ``foo*``, ``foo OR bar``).
+        If 0 rows, fall back to ``CONTAINS``. Caps as in ``query_graph``.
 
         Args:
-            cypher: Read-only Cypher beginning with ``CALL QUERY_FTS_INDEX``
-                (chaining a MATCH after the YIELD is encouraged).
+            cypher: Read-only Cypher starting with ``CALL QUERY_FTS_INDEX``.
             parameters: JSON-encoded parameter dict (default ``"{}"``).
             queries: Optional batch (cap 25); see ``query_graph``.
         """
@@ -792,29 +711,28 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
     def query_topology(cypher: str = "", parameters: str = "{}", queries: list[dict] | None = None) -> str:
         """Cypher over the live Aruba Central network topology subgraph.
 
-        Node tables (all carry ``lastSyncedAt TIMESTAMP``; volatile fields
-        flagged in ``freshness_warnings`` when stale):
+        Nodes (all carry ``lastSyncedAt TIMESTAMP``; volatile fields trigger
+        ``freshness_warnings`` when stale):
 
         - ``Org(scopeId PK, name)``
         - ``SiteCollection(scopeId PK, name, parent_scope_id)``
         - ``Site(scopeId PK, name, address, city, country, latitude, longitude)``
         - ``Device(serial PK, name, model, deviceType, status, ipv4, mac,
-          firmware, persona, deviceFunction, siteId, siteName, partNumber,
-          deployment, configStatus, deviceGroupId, deviceGroupName)``
+          firmware, persona, deviceFunction, siteId, siteName,
+          deviceGroupId, deviceGroupName, configStatus)``
         - ``DeviceGroup(scopeId PK, name, deviceCount)``
-        - ``UnmanagedDevice(mac PK, name, model, deviceType, health, status,
-          ipv4, siteId)``
+        - ``UnmanagedDevice(mac PK, name, model, deviceType, status, siteId)``
 
         Edges (parent → child unless noted):
 
         - ``(Org)-[:HAS_COLLECTION]->(SiteCollection)``
-        - ``(Org)-[:HAS_SITE]->(Site)`` (standalone site, no collection)
+        - ``(Org)-[:HAS_SITE]->(Site)`` (standalone site)
         - ``(SiteCollection)-[:CONTAINS_SITE]->(Site)``
         - ``(Site)-[:HAS_DEVICE]->(Device)``
         - ``(Site)-[:HAS_UNMANAGED]->(UnmanagedDevice)``
-        - ``(DeviceGroup)-[:HAS_MEMBER]->(Device)`` (cross-site grouping)
-        - ``(Device)-[:CONNECTED_TO]->(Device)`` — LLDP/CDP neighbour
-        - ``(Device)-[:LINKED_TO]->(UnmanagedDevice)`` — edge-of-managed
+        - ``(DeviceGroup)-[:HAS_MEMBER]->(Device)`` (cross-site)
+        - ``(Device)-[:CONNECTED_TO]->(Device)`` — LLDP/CDP
+        - ``(Device)-[:LINKED_TO]->(UnmanagedDevice)``
 
         ## Canonical: all devices at a site
 
@@ -824,7 +742,7 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         ORDER BY d.deviceType, d.name
         ```
 
-        ## Canonical: blast radius (all devices in a device group across sites)
+        ## Canonical: blast radius (device-group members across sites)
 
         ```cypher
         MATCH (g:DeviceGroup {name: $groupName})-[:HAS_MEMBER]->(d:Device)
@@ -840,13 +758,11 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         RETURN n.serial, n.name, n.deviceType, n.model
         ```
 
-        Freshness: when you SELECT a volatile field (``status``, ``ip``,
-        ``firmware``, ...) and the node's ``lastSyncedAt`` is older than
-        ~15 min, the response wraps as ``{"rows": [...],
-        "freshness_warnings": [...]}``. Override the staleness threshold
-        via ``MCP_GRAPH_STALE_THRESHOLD_SECONDS``.
-
-        Caps as in ``query_graph``.
+        Freshness: selecting a volatile field (``status``, ``ipv4``,
+        ``firmware``, ...) on a stale node (``lastSyncedAt`` > ~15 min)
+        wraps as ``{"rows": [...], "freshness_warnings": [...]}``
+        (env ``MCP_GRAPH_STALE_THRESHOLD_SECONDS``). Caps as in
+        ``query_graph``.
 
         Args:
             cypher: Read-only Cypher.
@@ -863,18 +779,20 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
     def query_yang(cypher: str = "", parameters: str = "{}", queries: list[dict] | None = None) -> str:
         """Cypher over the YANG reverse-index subgraph (Phase 3).
 
-        Lets you map a known YANG path (e.g. from a legacy CLI/YANG config
-        or telemetry stream) back to the API endpoints that configure it,
-        or to the property/schema-component where it surfaces.
+        Lets you map a known YANG path (e.g. from a legacy CLI/YANG config)
+        back to the API endpoints that configure it, or to the
+        property/schema-component where it surfaces.
 
-        Node table: ``YangPath(yangPath PK, module)``.
+        Node tables: ``YangPath(yangPath PK, module)``,
+        ``YangModule(module PK)``, ``CliCommand(command_id PK,
+        commandName, commandUse, parentCommand, pathToPrint, paramKeys)``.
 
         Edges:
 
-        - ``(Property)-[:PROPERTY_AT_YANG]->(YangPath)`` — direct: property
-          carries an ``x-path`` extension annotating its YANG location.
-        - ``(ApiEndpoint)-[:CONFIGURES_YANG]->(YangPath)`` — derived: rolled
-          up from the endpoint's request-body property graph.
+        - ``(Property)-[:PROPERTY_AT_YANG]->(YangPath)`` — direct.
+        - ``(ApiEndpoint)-[:CONFIGURES_YANG]->(YangPath)`` — derived.
+        - ``(YangPath)-[:IN_MODULE]->(YangModule)`` — module index.
+        - ``(ApiEndpoint)-[:HAS_CLI_COMMAND]->(CliCommand)`` — CLI bridge.
 
         ## Canonical: endpoint → YANG paths it touches
 
@@ -888,7 +806,7 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
 
         ```cypher
         MATCH (e:ApiEndpoint)-[:CONFIGURES_YANG]->(:YangPath {yangPath: $yp})
-        RETURN DISTINCT e.method, e.path ORDER BY e.path
+        RETURN DISTINCT e.method, e.path
         ```
 
         ## Canonical: YANG path → properties that surface it
@@ -896,19 +814,27 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         ```cypher
         MATCH (p:Property)-[:PROPERTY_AT_YANG]->(:YangPath {yangPath: $yp})
         MATCH (c:SchemaComponent {component_id: p.parent_component_id})
-        RETURN c.name AS schema, p.name, p.type, p.required
-        ORDER BY c.name, p.name
+        RETURN c.name AS schema, p.name, p.type
         ```
 
-        ## Canonical: all YANG paths under a module
+        ## All YANG paths in a module
+
+        ``MATCH (y:YangPath {module: $mod}) RETURN y.yangPath``
+        (module = path prefix, e.g. ``ac-ntp``).
+
+        ## CANONICAL — CLI bridge: keyword → property → YANG → CLI + API
 
         ```cypher
-        MATCH (y:YangPath {module: $mod}) RETURN y.yangPath ORDER BY y.yangPath
+        CALL QUERY_FTS_INDEX('Property','property_fts', $keyword)
+        YIELD node AS p, score
+        MATCH (p)-[:PROPERTY_AT_YANG]->(yp:YangPath)
+              -[:IN_MODULE]->(m:YangModule)
+        OPTIONAL MATCH (e:ApiEndpoint)-[:CONFIGURES_YANG]->(yp)
+        OPTIONAL MATCH (e)-[:HAS_CLI_COMMAND]->(cli:CliCommand)
+        RETURN p.name, p.parent_component_id, yp.yangPath, m.module,
+               e.method, e.path, cli.commandName, cli.pathToPrint, score
+        ORDER BY score DESC LIMIT 20
         ```
-
-        Module name appears as the prefix in the YANG path (e.g.
-        ``ac-ntp`` for ``/ac-ntp:ntp/...``). Use it to scope queries to a
-        single feature area.
 
         Caps as in ``query_graph``.
 
@@ -924,7 +850,10 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
     )
-    def get_raw_schema(component_id: str) -> str:
+    def get_raw_schema(
+        component_id: str = "",
+        component_ids: list[str] | None = None,
+    ) -> str:
         """Fetch the raw OpenAPI ``bodyJson`` for one ``SchemaComponent`` by id.
 
         Escape hatch for the per-cell truncation envelope returned by
@@ -955,16 +884,30 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
             MATCH (c:SchemaComponent) WHERE c.name = $name
             RETURN c.component_id, c.section LIMIT 5
 
+        ## Batch mode
+
+        Pass ``component_ids=[...]`` (cap 25) to fetch multiple components in
+        one call; the response uses the same envelope as ``query_graph``
+        batch mode: ``{"batch": true, "total", "ok", "failed", "results":
+        [{"ok": bool, "component_id": str, "result"|"error": ...}, ...]}``.
+
         Args:
-            component_id: The ``SchemaComponent.component_id`` primary key.
-                Must be the EXACT id — this tool does not suffix-match.
+            component_id: A single ``SchemaComponent.component_id`` PK
+                (ignored when ``component_ids`` is provided).
+            component_ids: Optional batch of PKs (cap 25). Mutually
+                exclusive with the single-id path.
 
         Returns:
-            JSON object ``{"component_id": "...", "name": "...", "section": "...",
-            "bodyShape": "...", "bodyJson": "..."}``. If the body exceeds
-            ~200 KB, returns ``{"error": "...", "size_bytes": N, "hint":
-            "walk COMPOSED_OF/HAS_PROPERTY instead"}``.
+            JSON object ``{"component_id": ..., "name": ..., "section": ...,
+            "bodyShape": ..., "bodyJson": ...}``. Over-cap bodies return
+            ``{"error": ..., "size_bytes": N, "hint": "walk
+            COMPOSED_OF/HAS_PROPERTY instead"}``.
         """
+        if component_ids is not None:
+            return _fetch_raw_schemas_batch(component_ids)
+        return _fetch_raw_schema_one(component_id)
+
+    def _fetch_raw_schema_one(component_id: str) -> str:
         if not component_id or not component_id.strip():
             raise ToolError("component_id cannot be empty.")
 
@@ -1012,6 +955,81 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
             )
 
         return json.dumps(row, indent=2, default=str)
+
+    def _fetch_raw_schemas_batch(component_ids: list[str]) -> str:
+        max_items = _env_int("MCP_GRAPH_BATCH_MAX_ITEMS", 25)
+        if not isinstance(component_ids, list):
+            raise ToolError("component_ids must be a JSON array of strings.")
+        if not component_ids:
+            raise ToolError("component_ids list is empty.")
+        if len(component_ids) > max_items:
+            raise ToolError(
+                f"component_ids has {len(component_ids)} items but the "
+                f"per-batch cap is {max_items}."
+            )
+
+        results: list[dict] = []
+        ok_count = 0
+        fail_count = 0
+        for i, cid in enumerate(component_ids):
+            if not isinstance(cid, str) or not cid.strip():
+                fail_count += 1
+                results.append({
+                    "ok": False,
+                    "component_id": cid if isinstance(cid, str) else None,
+                    "error": f"item {i}: component_id must be a non-empty string",
+                })
+                continue
+            try:
+                payload = _fetch_raw_schema_one(cid)
+                results.append({
+                    "ok": True,
+                    "component_id": cid,
+                    "result": json.loads(payload),
+                })
+                ok_count += 1
+            except ToolError as exc:
+                fail_count += 1
+                results.append({"ok": False, "component_id": cid, "error": str(exc)})
+            except Exception as exc:  # defensive
+                fail_count += 1
+                results.append({
+                    "ok": False, "component_id": cid,
+                    "error": f"unexpected: {exc}",
+                })
+
+        envelope: dict = {
+            "batch": True,
+            "total": len(component_ids),
+            "ok": ok_count,
+            "failed": fail_count,
+            "results": results,
+        }
+        cap_bytes = _env_int("MCP_GRAPH_BATCH_RESPONSE_BYTES", 200_000)
+        payload = json.dumps(envelope, indent=2, default=str)
+        if len(payload.encode("utf-8")) > cap_bytes:
+            kept: list[dict] = []
+            for r in results:
+                kept.append(r)
+                trial = {
+                    **envelope,
+                    "results": kept,
+                    "truncated": True,
+                    "kept_items": len(kept),
+                }
+                if len(json.dumps(trial, indent=2, default=str).encode("utf-8")) > cap_bytes:
+                    kept.pop()
+                    break
+            envelope["results"] = kept
+            envelope["truncated"] = True
+            envelope["kept_items"] = len(kept)
+            payload = json.dumps(envelope, indent=2, default=str)
+        logger.info(
+            "batch_done", tool="get_raw_schema", total=len(component_ids),
+            ok=ok_count, failed=fail_count,
+            truncated=envelope.get("truncated", False),
+        )
+        return payload
 
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, openWorldHint=False),
