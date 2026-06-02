@@ -34,6 +34,12 @@ from hpe_networking_central_mcp.compiler.frontend import (  # noqa: E402
     ResolvedSpec,
     resolve_specs,
 )
+from hpe_networking_central_mcp.compiler.semantic_builder import (  # noqa: E402
+    build_semantic_overlay,
+)
+from hpe_networking_central_mcp.compiler.semantic_writer import (  # noqa: E402
+    write_semantic_database,
+)
 from hpe_networking_central_mcp.graph.schema import (  # noqa: E402
     KNOWLEDGE_NODE_TABLES,
     KNOWLEDGE_REL_TABLES,
@@ -211,6 +217,7 @@ def _build_ast_artifact(
         shutil.rmtree(ast_db_path)
 
     graphs = []
+    semantic_graphs = []
     stats = {
         "enabled": True,
         "db_path": ast_db_path.name,
@@ -219,17 +226,39 @@ def _build_ast_artifact(
         "child_edge_count": 0,
         "ref_edge_count": 0,
         "task1_failed_count": task1_failed_count,
+        "semantic": {
+            "enabled": True,
+            "rule_packs": [],
+            "node_count": 0,
+            "edge_count": 0,
+            "derived_from_ast_edge_count": 0,
+        },
     }
+    rule_packs: set[str] = set()
 
     for resolved in resolved_specs:
         graph = build_ast_from_resolved(resolved)
+        semantic_graph = build_semantic_overlay(graph)
         graphs.append(graph)
+        semantic_graphs.append(semantic_graph)
         stats["spec_count"] += 1
         stats["node_count"] += len(graph.nodes)
         stats["child_edge_count"] += len(graph.child_edges)
         stats["ref_edge_count"] += len(graph.ref_edges)
+        stats["semantic"]["node_count"] += len(semantic_graph.nodes)
+        stats["semantic"]["edge_count"] += len(semantic_graph.edges)
+        stats["semantic"]["derived_from_ast_edge_count"] += len(
+            semantic_graph.derived_edges
+        )
+        rule_packs.update(semantic_graph.rule_packs)
 
+    stats["semantic"]["rule_packs"] = sorted(rule_packs)
     build_ast_database(ast_db_path, graphs, buffer_pool_size=_DB_BUFFER_POOL_SIZE)
+    write_semantic_database(
+        ast_db_path,
+        semantic_graphs,
+        buffer_pool_size=_DB_BUFFER_POOL_SIZE,
+    )
     return stats
 
 
@@ -953,6 +982,12 @@ def main() -> None:
         f"{ast_stats['node_count']} nodes, "
         f"{ast_stats['child_edge_count']} AST_CHILD edges, "
         f"{ast_stats['ref_edge_count']} AST_REF_TARGET edges"
+    )
+    semantic_stats = ast_stats["semantic"]
+    print(
+        f"  Semantic overlay: {semantic_stats['node_count']} nodes, "
+        f"{semantic_stats['edge_count']} SEMANTIC_EDGE edges, "
+        f"{semantic_stats['derived_from_ast_edge_count']} provenance edges"
     )
 
     # 3. Build index and populate
