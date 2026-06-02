@@ -37,6 +37,9 @@ from hpe_networking_central_mcp.compiler.frontend import (  # noqa: E402
 from hpe_networking_central_mcp.compiler.semantic_builder import (  # noqa: E402
     build_semantic_overlay,
 )
+from hpe_networking_central_mcp.compiler.semantic_metrics import (  # noqa: E402
+    compute_semantic_metrics,
+)
 from hpe_networking_central_mcp.compiler.semantic_writer import (  # noqa: E402
     write_semantic_database,
 )
@@ -232,6 +235,7 @@ def _build_ast_artifact(
             "node_count": 0,
             "edge_count": 0,
             "derived_from_ast_edge_count": 0,
+            "metrics": {},
         },
     }
     rule_packs: set[str] = set()
@@ -253,6 +257,7 @@ def _build_ast_artifact(
         rule_packs.update(semantic_graph.rule_packs)
 
     stats["semantic"]["rule_packs"] = sorted(rule_packs)
+    stats["semantic"]["metrics"] = compute_semantic_metrics(semantic_graphs)
     build_ast_database(ast_db_path, graphs, buffer_pool_size=_DB_BUFFER_POOL_SIZE)
     write_semantic_database(
         ast_db_path,
