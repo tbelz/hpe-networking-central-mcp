@@ -49,7 +49,7 @@ _INFO_KEYS = {
     "version",
 }
 
-_PATH_ITEM_KEYS = {"summary", "description", "servers", "parameters"} | _HTTP_METHODS
+_PATH_ITEM_KEYS = {"$ref", "summary", "description", "servers", "parameters"} | _HTTP_METHODS
 
 _OPERATION_KEYS = {
     "tags",
@@ -228,6 +228,11 @@ _FIXED_ALLOWED_KEYS: dict[str, set[str]] = {
     "Discriminator": _DISCRIMINATOR_KEYS,
     "Encoding": _ENCODING_KEYS,
     "SecurityScheme": _SECURITY_SCHEME_KEYS,
+    "OAuthFlows": _OAUTH_FLOWS_KEYS,
+    "OAuthFlow": _OAUTH_FLOW_KEYS,
+    "Link": _LINK_KEYS,
+    "Server": _SERVER_KEYS,
+    "ServerVariable": _SERVER_VARIABLE_KEYS,
     "Schema": _SCHEMA_KEYS,
     "Property": _SCHEMA_KEYS,
     "Items": _SCHEMA_KEYS,
@@ -240,9 +245,9 @@ class AstNode:
     spec_id: str
     kind: str
     json_pointer: str
-    name: str
-    key: str
-    index: int
+    name: str | None
+    key: str | None
+    index: int | None
     value_type: str
     raw_json: str
     scalar_json: str
@@ -254,8 +259,8 @@ class AstChildEdge:
     parent_id: str
     child_id: str
     role: str
-    key: str
-    index: int
+    key: str | None
+    index: int | None
 
 
 @dataclass(frozen=True)
@@ -327,7 +332,7 @@ def build_ast_graph(spec: dict[str, Any], *, source: str, title: str | None = No
         pointer="",
         kind="Document",
         key="",
-        array_index=-1,
+        array_index=None,
         source=source,
     )
     _link_internal_refs(graph, index)
@@ -345,12 +350,11 @@ def reconstruct_spec(graph: AstGraph) -> Any:
         node = nodes[node_id]
         if node.value_type == "object":
             result: dict[str, Any] = {}
-            ordered = sorted(children.get(node_id, []), key=lambda e: e.index)
-            for edge in ordered:
+            for edge in children.get(node_id, []):
                 result[edge.key] = _rebuild(edge.child_id)
             return result
         if node.value_type == "array":
-            ordered = sorted(children.get(node_id, []), key=lambda e: e.index)
+            ordered = sorted(children.get(node_id, []), key=lambda e: e.index or 0)
             return [_rebuild(edge.child_id) for edge in ordered]
         return json.loads(node.scalar_json)
 
@@ -364,8 +368,8 @@ def _walk(
     obj: Any,
     pointer: str,
     kind: str,
-    key: str,
-    array_index: int,
+    key: str | None,
+    array_index: int | None,
     source: str,
 ) -> str:
     value_type = _value_type(obj)
@@ -406,7 +410,7 @@ def _walk(
                 pointer=child_pointer,
                 kind=child_kind,
                 key=str(child_key),
-                array_index=-1,
+                array_index=None,
                 source=source,
             )
             graph.child_edges.append(
@@ -415,7 +419,7 @@ def _walk(
                     child_id=child_id,
                     role=str(child_key),
                     key=str(child_key),
-                    index=child_index,
+                    index=None,
                 )
             )
     elif isinstance(obj, list):
@@ -433,7 +437,7 @@ def _walk(
                 obj=child_value,
                 pointer=child_pointer,
                 kind=child_kind,
-                key="",
+                key=None,
                 array_index=child_index,
                 source=source,
             )
@@ -442,7 +446,7 @@ def _walk(
                     parent_id=node_id,
                     child_id=child_id,
                     role="item",
-                    key="",
+                    key=None,
                     index=child_index,
                 )
             )
@@ -450,7 +454,7 @@ def _walk(
 
 
 def _validate_keys(obj: dict[str, Any], *, source: str, pointer: str, kind: str) -> None:
-    if "$ref" in obj and kind not in {"Schema", "Property", "Items"}:
+    if "$ref" in obj and kind not in {"Schema", "Property", "Items", "PathItem"}:
         allowed_ref_keys = {"$ref", "summary", "description"}
         for child_key in obj:
             if isinstance(child_key, str) and child_key.startswith("x-"):
@@ -504,6 +508,7 @@ def _child_kind(*, parent_kind: str, parent_pointer: str, key: str, value: Any) 
         return {
             "info": "Info",
             "externalDocs": "ExternalDocs",
+            "servers": "Scalar",
         }.get(key, "Scalar")
     if parent_kind == "PathItem" and key in _HTTP_METHODS:
         return "Operation"
@@ -512,6 +517,8 @@ def _child_kind(*, parent_kind: str, parent_pointer: str, key: str, value: Any) 
             "requestBody": "RequestBody",
             "responses": "Scalar",
             "externalDocs": "ExternalDocs",
+            "servers": "Scalar",
+            "callbacks": "Scalar",
         }.get(key, "Scalar")
     if parent_kind == "Parameter" and key == "schema":
         return "Schema"
@@ -524,6 +531,10 @@ def _child_kind(*, parent_kind: str, parent_pointer: str, key: str, value: Any) 
     if parent_kind == "Header" and key == "schema":
         return "Schema"
     if parent_kind == "SecurityScheme" and key == "flows":
+        return "OAuthFlows"
+    if parent_kind == "OAuthFlows":
+        return "OAuthFlow"
+    if parent_kind == "Server" and key == "variables":
         return "Scalar"
     if parent_kind == "Tag" and key == "externalDocs":
         return "ExternalDocs"
@@ -534,6 +545,14 @@ def _child_kind(*, parent_kind: str, parent_pointer: str, key: str, value: Any) 
         return "Operation"
     if _is_component_entry(parts):
         return _component_kind(parts[1])
+    if _is_server_variable_entry(parts):
+        return "ServerVariable"
+    if _is_link_entry(parts):
+        return "Link"
+    if _is_callback_expression_entry(parts):
+        return "PathItem"
+    if _is_callback_name_entry(parts):
+        return "Callback"
     if _is_content_entry(parts):
         return "MediaType"
     if _is_named_map_entry(parts, "responses"):
@@ -544,8 +563,6 @@ def _child_kind(*, parent_kind: str, parent_pointer: str, key: str, value: Any) 
         return "Example"
     if _is_named_map_entry(parts, "encoding"):
         return "Encoding"
-    if _is_named_map_entry(parts, "callbacks"):
-        return "PathItem"
     if _is_named_map_entry(parts, "parameters") and parent_kind == "Scalar":
         return "Scalar"
     if key == "discriminator":
@@ -591,13 +608,13 @@ def _schema_child_kind(*, parent_pointer: str, key: str, value: Any) -> str:
 
 
 def _array_item_kind(
-    *, parent_kind: str, parent_pointer: str, parent_key: str, value: Any
+    *, parent_kind: str, parent_pointer: str, parent_key: str | None, value: Any
 ) -> str:
     if parent_kind in {"Constraint", "Extension"}:
         return parent_kind
     parts = _pointer_parts(parent_pointer)
     if parent_key == "servers":
-        return "Scalar"
+        return "Server"
     if parent_key == "parameters":
         return "Parameter"
     if parent_key == "tags" and len(parts) == 1:
@@ -621,6 +638,8 @@ def _component_kind(section: str) -> str:
         "headers": "Header",
         "securitySchemes": "SecurityScheme",
         "pathItems": "PathItem",
+        "links": "Link",
+        "callbacks": "Callback",
     }.get(section, "Scalar")
 
 
@@ -650,7 +669,7 @@ def _value_type(obj: Any) -> str:
     return "scalar"
 
 
-def _node_name(*, obj: Any, key: str, array_index: int) -> str:
+def _node_name(*, obj: Any, key: str | None, array_index: int | None) -> str | None:
     if isinstance(obj, dict):
         for name_key in ("name", "operationId", "title"):
             value = obj.get(name_key)
@@ -658,7 +677,7 @@ def _node_name(*, obj: Any, key: str, array_index: int) -> str:
                 return value
     if key:
         return key
-    return str(array_index) if array_index >= 0 else ""
+    return str(array_index) if array_index is not None else None
 
 
 def _json(obj: Any, *, sort_keys: bool = False) -> str:
@@ -694,3 +713,19 @@ def _is_schema_property_map(parts: list[str]) -> bool:
 
 def _is_schema_def_map(parts: list[str]) -> bool:
     return bool(parts) and parts[-1] in {"$defs", "definitions", "dependentSchemas"}
+
+
+def _is_server_variable_entry(parts: list[str]) -> bool:
+    return len(parts) >= 1 and parts[-1] == "variables"
+
+
+def _is_link_entry(parts: list[str]) -> bool:
+    return bool(parts) and parts[-1] == "links"
+
+
+def _is_callback_name_entry(parts: list[str]) -> bool:
+    return bool(parts) and parts[-1] == "callbacks"
+
+
+def _is_callback_expression_entry(parts: list[str]) -> bool:
+    return len(parts) >= 2 and parts[-2] == "callbacks"

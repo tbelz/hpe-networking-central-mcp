@@ -121,6 +121,93 @@ def _oas31_spec() -> dict:
     }
 
 
+def _review_edge_spec() -> dict:
+    return {
+        "openapi": "3.0.3",
+        "info": {"title": "Review edges", "version": "1.0"},
+        "servers": [
+            {
+                "url": "https://{tenant}.example.test",
+                "variables": {
+                    "tenant": {
+                        "default": "central",
+                        "description": "Tenant slug",
+                    }
+                },
+            }
+        ],
+        "paths": {
+            "/pets": {
+                "$ref": "#/components/pathItems/PetsPath",
+                "get": {
+                    "operationId": "listPets",
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "links": {
+                                "nextPage": {
+                                    "operationId": "listPets",
+                                    "parameters": {"cursor": "$response.body#/next"},
+                                }
+                            },
+                        }
+                    },
+                    "callbacks": {
+                        "onEvent": {
+                            "{$request.body#/callbackUrl}": {
+                                "post": {
+                                    "operationId": "petEvent",
+                                    "responses": {"204": {"description": "ok"}},
+                                }
+                            }
+                        }
+                    },
+                },
+            }
+        },
+        "components": {
+            "pathItems": {
+                "PetsPath": {
+                    "parameters": [
+                        {
+                            "name": "tenant",
+                            "in": "query",
+                            "schema": {"type": "string"},
+                        }
+                    ]
+                }
+            },
+            "securitySchemes": {
+                "oauth": {
+                    "type": "oauth2",
+                    "flows": {
+                        "clientCredentials": {
+                            "tokenUrl": "https://auth.example.test/token",
+                            "scopes": {"read:pets": "Read pets"},
+                        }
+                    },
+                }
+            },
+            "links": {
+                "PetLink": {
+                    "operationId": "getPet",
+                    "parameters": {"id": "$response.body#/id"},
+                }
+            },
+            "callbacks": {
+                "PetEvent": {
+                    "{$request.body#/callbackUrl}": {
+                        "post": {
+                            "operationId": "petEventComponent",
+                            "responses": {"204": {"description": "ok"}},
+                        }
+                    }
+                }
+            },
+        },
+    }
+
+
 def test_reconstructs_cleaned_oas30_spec_losslessly() -> None:
     spec = _oas30_spec()
     graph = build_ast_graph(spec, source="unit/pets")
@@ -179,6 +266,80 @@ def test_vendor_extension_is_preserved_as_extension_node() -> None:
     assert json.loads(nodes[0].raw_json) == {"source": "fixture"}
 
 
+def test_boolean_default_coercion_preserves_invalid_strings() -> None:
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "Defaults", "version": "1"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Flags": {
+                    "type": "object",
+                    "properties": {
+                        "yes": {"type": "boolean", "default": "true"},
+                        "no": {"type": "boolean", "default": "false"},
+                        "bad": {"type": "boolean", "default": "maybe"},
+                    },
+                }
+            }
+        },
+    }
+    cleaned = clean_spec(spec)
+    props = cleaned["components"]["schemas"]["Flags"]["properties"]
+    assert props["yes"]["default"] is True
+    assert props["no"]["default"] is False
+    assert props["bad"]["default"] == "maybe"
+
+
+def test_fixed_object_kinds_are_reached_and_validated() -> None:
+    graph = build_ast_graph(_review_edge_spec(), source="unit/review-edges")
+    by_pointer = {n.json_pointer: n.kind for n in graph.nodes}
+    assert by_pointer["/servers/0"] == "Server"
+    assert by_pointer["/servers/0/variables/tenant"] == "ServerVariable"
+    assert by_pointer["/components/securitySchemes/oauth/flows"] == "OAuthFlows"
+    assert by_pointer["/components/securitySchemes/oauth/flows/clientCredentials"] == "OAuthFlow"
+    assert by_pointer["/paths/~1pets/get/responses/200/links/nextPage"] == "Link"
+    assert by_pointer["/components/links/PetLink"] == "Link"
+    assert by_pointer["/components/callbacks/PetEvent"] == "Callback"
+    assert (
+        by_pointer[
+            "/components/callbacks/PetEvent/{$request.body#~1callbackUrl}"
+        ]
+        == "PathItem"
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "parent_kind", "key"),
+    [
+        (
+            lambda s: s["servers"][0].update({"bogusServerKey": True}),
+            "Server",
+            "bogusServerKey",
+        ),
+        (
+            lambda s: s["components"]["links"]["PetLink"].update({"bogusLinkKey": True}),
+            "Link",
+            "bogusLinkKey",
+        ),
+        (
+            lambda s: s["components"]["securitySchemes"]["oauth"]["flows"][
+                "clientCredentials"
+            ].update({"bogusFlowKey": True}),
+            "OAuthFlow",
+            "bogusFlowKey",
+        ),
+    ],
+)
+def test_unknown_keys_fail_in_reached_fixed_object_kinds(mutate, parent_kind, key) -> None:
+    spec = _review_edge_spec()
+    mutate(spec)
+    with pytest.raises(UnknownKeywordError) as exc:
+        build_ast_graph(spec, source="unit/review-broken")
+    assert exc.value.parent_kind == parent_kind
+    assert exc.value.key == key
+
+
 def test_task1_result_keeps_cleaned_raw_spec_for_ast_input() -> None:
     raw = _oas30_spec()
     raw["_id"] = "readme-internal"
@@ -209,6 +370,24 @@ def test_writer_persists_ast_graph_to_ladybug() -> None:
                 ).rows_as_dict()
             )
             assert counts == [{"source": "unit/pets", "root_kind": "Document"}]
+            child_rows = list(
+                conn.execute(
+                    """
+                    MATCH (root:OasAstNode)-[edge:AST_CHILD]->(child:OasAstNode)
+                    WHERE root.kind = 'Document' AND child.key = 'info'
+                    RETURN edge.key AS edge_key, edge.index AS edge_index,
+                           child.key AS child_key, child.index AS child_index
+                    """
+                ).rows_as_dict()
+            )
+            assert child_rows == [
+                {
+                    "edge_key": "info",
+                    "edge_index": None,
+                    "child_key": "info",
+                    "child_index": None,
+                }
+            ]
             ref_rows = list(
                 conn.execute(
                     """
@@ -244,6 +423,7 @@ def test_real_spec_excerpt_builds_lossless_ast(fixture: Path) -> None:
 def test_real_central_stride_sample_builds_ast(real_central_specs: list[Path]) -> None:
     sample = real_central_specs[::64]
     assert sample, "expected at least one real Central spec"
+    built = 0
     for path in sample[:25]:
         spec = json.loads(path.read_text(encoding="utf-8"))
         # Remove ReadMe internal metadata in the same way Task 1 does.
@@ -252,3 +432,5 @@ def test_real_central_stride_sample_builds_ast(real_central_specs: list[Path]) -
             continue
         graph = build_ast_from_resolved(outcome)
         assert reconstruct_spec(graph) == outcome.raw_spec
+        built += 1
+    assert built > 0, "expected at least one sampled real spec to resolve and build an AST"

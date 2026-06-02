@@ -102,7 +102,11 @@ def _coerce_defaults(obj: Any) -> Any:
         d = result.get("default")
         if isinstance(t, str) and isinstance(d, str):
             if t == "boolean":
-                result["default"] = d.strip().lower() not in ("false", "0", "")
+                lowered = d.strip().lower()
+                if lowered in ("true", "1"):
+                    result["default"] = True
+                elif lowered in ("false", "0", ""):
+                    result["default"] = False
             elif t == "integer":
                 try:
                     result["default"] = int(d)

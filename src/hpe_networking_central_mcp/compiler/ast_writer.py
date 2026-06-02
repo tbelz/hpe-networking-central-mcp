@@ -127,13 +127,5 @@ def _copy(conn, table: str, rows: list[dict], schema: pa.Schema) -> None:
     columns: dict[str, list] = {field.name: [] for field in schema}
     for row in rows:
         for field in schema:
-            value = row.get(field.name)
-            if value is None:
-                if pa.types.is_string(field.type):
-                    value = ""
-                elif pa.types.is_integer(field.type):
-                    value = -1
-                elif pa.types.is_boolean(field.type):
-                    value = False
-            columns[field.name].append(value)
+            columns[field.name].append(row.get(field.name))
     conn.execute(f"COPY {table} FROM $df", parameters={"df": pa.table(columns, schema=schema)})
