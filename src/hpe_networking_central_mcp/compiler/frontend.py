@@ -39,6 +39,7 @@ class ResolvedSpec:
     """A spec that successfully resolved all ``$ref``s."""
 
     spec: dict[str, Any]
+    raw_spec: dict[str, Any]
     source: str
     title: str
 
@@ -101,7 +102,11 @@ def _coerce_defaults(obj: Any) -> Any:
         d = result.get("default")
         if isinstance(t, str) and isinstance(d, str):
             if t == "boolean":
-                result["default"] = d.strip().lower() not in ("false", "0", "")
+                lowered = d.strip().lower()
+                if lowered in ("true", "1"):
+                    result["default"] = True
+                elif lowered in ("false", "0", ""):
+                    result["default"] = False
             elif t == "integer":
                 try:
                     result["default"] = int(d)
@@ -123,6 +128,17 @@ def _spec_title(spec: dict[str, Any], source: str) -> str:
     return info.get("title") or source
 
 
+def clean_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    """Return the cleaned raw spec used as Task 1's compiler input.
+
+    This removes ReadMe.io underscore metadata and coerces obvious
+    stringly-typed primitive defaults, but does not resolve ``$ref``s or
+    otherwise change OpenAPI structure. Task 2 consumes this cleaned raw
+    form so reference topology remains visible in the L1 AST.
+    """
+    return _coerce_defaults(_strip_underscore_keys(spec))
+
+
 def resolve_spec(spec: dict[str, Any], *, source: str) -> ResolvedSpec | ResolutionFailure:
     """Resolve all ``$ref``s in a single spec under strict validation.
 
@@ -139,7 +155,7 @@ def resolve_spec(spec: dict[str, Any], *, source: str) -> ResolvedSpec | Resolut
         errors so callers can aggregate failures across a batch.
     """
     title = _spec_title(spec, source)
-    cleaned = _coerce_defaults(_strip_underscore_keys(spec))
+    cleaned = clean_spec(spec)
     try:
         parser = prance.ResolvingParser(
             spec_string=json.dumps(cleaned),
@@ -163,7 +179,12 @@ def resolve_spec(spec: dict[str, Any], *, source: str) -> ResolvedSpec | Resolut
             error=f"{type(e).__name__}: {e}",
             error_type="unexpected",
         )
-    return ResolvedSpec(spec=parser.specification, source=source, title=title)
+    return ResolvedSpec(
+        spec=parser.specification,
+        raw_spec=cleaned,
+        source=source,
+        title=title,
+    )
 
 
 def resolve_specs(specs: list[dict[str, Any]]) -> ResolutionResult:
