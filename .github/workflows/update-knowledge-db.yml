@@ -253,6 +253,7 @@ jobs:
             Contains the API endpoints, VSG documentation sections, and seed scripts the MCP server uses for offline lookups.
           files: |
             build/knowledge_db.tar.gz
+            build/knowledge_db_ast.tar.gz
             build/manifest.json
             build/vsg-cache.tar.gz
             build/central-spec-cache.tar.gz
