@@ -73,8 +73,12 @@ while IFS= read -r f; do
             add_tests "tests/test_api_tree.py"
             add_tests "tests/test_endpoint_catalog_resource.py"
             ;;
-        src/hpe_networking_central_mcp/knowledge_db.py | scripts/build_knowledge_db.py)
+        src/hpe_networking_central_mcp/knowledge_db.py)
             add_tests "tests/test_knowledge_db.py"
+            ;;
+        scripts/build_knowledge_db.py)
+            add_tests "tests/test_knowledge_db.py"
+            add_tests "tests/test_build_knowledge_db_ast.py"
             ;;
         src/hpe_networking_central_mcp/central_client.py)
             add_tests "tests/test_central_client.py"

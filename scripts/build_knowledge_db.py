@@ -24,6 +24,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import real_ladybug as lb  # noqa: E402
 
+from hpe_networking_central_mcp.compiler.ast_builder import (  # noqa: E402
+    build_ast_from_resolved,
+)
+from hpe_networking_central_mcp.compiler.ast_writer import (  # noqa: E402
+    build_ast_database,
+)
+from hpe_networking_central_mcp.compiler.frontend import (  # noqa: E402
+    ResolvedSpec,
+    resolve_specs,
+)
 from hpe_networking_central_mcp.graph.schema import (  # noqa: E402
     KNOWLEDGE_NODE_TABLES,
     KNOWLEDGE_REL_TABLES,
@@ -56,6 +66,9 @@ try:
     _HAS_GLP = True
 except ImportError:
     _HAS_GLP = False
+
+
+_DB_BUFFER_POOL_SIZE = 2 * 1024 * 1024 * 1024
 
 
 def _apply_schema(db: lb.Database) -> None:
@@ -185,6 +198,59 @@ def _load_cached_specs_sample(cache_dir: Path, n: int) -> tuple[list[dict], dict
                                   "note": f"--sample {n} (loaded {loaded} files)"}
         print(f"    → {loaded} cached {provider} specs (sample mode)")
     return specs, sync_health
+
+
+def _build_ast_artifact(
+    ast_db_path: Path,
+    resolved_specs: list[ResolvedSpec],
+    *,
+    task1_failed_count: int,
+) -> dict:
+    """Build the L1 OpenAPI AST artifact from Task 1 resolved specs."""
+    if ast_db_path.exists():
+        shutil.rmtree(ast_db_path)
+
+    graphs = []
+    stats = {
+        "enabled": True,
+        "db_path": ast_db_path.name,
+        "spec_count": 0,
+        "node_count": 0,
+        "child_edge_count": 0,
+        "ref_edge_count": 0,
+        "task1_failed_count": task1_failed_count,
+    }
+
+    for resolved in resolved_specs:
+        graph = build_ast_from_resolved(resolved)
+        graphs.append(graph)
+        stats["spec_count"] += 1
+        stats["node_count"] += len(graph.nodes)
+        stats["child_edge_count"] += len(graph.child_edges)
+        stats["ref_edge_count"] += len(graph.ref_edges)
+
+    build_ast_database(ast_db_path, graphs, buffer_pool_size=_DB_BUFFER_POOL_SIZE)
+    return stats
+
+
+def _create_release_archives(
+    output_dir: Path,
+    *,
+    db_path: Path,
+    ast_db_path: Path,
+    manifest_path: Path,
+) -> dict[str, Path]:
+    """Create release tarballs for the runtime DB and separate L1 AST DB."""
+    tar_path = output_dir / "knowledge_db.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as tf:
+        tf.add(db_path, arcname="knowledge_db")
+        tf.add(manifest_path, arcname="manifest.json")
+
+    ast_tar_path = output_dir / "knowledge_db_ast.tar.gz"
+    with tarfile.open(ast_tar_path, "w:gz") as tf:
+        tf.add(ast_db_path, arcname="knowledge_db_ast")
+
+    return {"knowledge_db": tar_path, "knowledge_db_ast": ast_tar_path}
 
 
 def _print_build_report(db: lb.Database, schema_stats: dict, violations: list) -> None:
@@ -822,6 +888,7 @@ def main() -> None:
 
     output_dir: Path = args.output_dir.resolve()
     db_path = output_dir / "knowledge_db"
+    ast_db_path = output_dir / "knowledge_db_ast"
     cache_dir = output_dir / "spec_cache"
 
     # Clean previous build
@@ -837,7 +904,7 @@ def main() -> None:
     # Cap buffer pool at 2 GB so the build doesn't claim ~80% of system
     # memory by default (real_ladybug's autosize on a workstation can
     # easily reserve 12+ GB and starve the parser/scrapers).
-    db = lb.Database(str(db_path), buffer_pool_size=2 * 1024 * 1024 * 1024)
+    db = lb.Database(str(db_path), buffer_pool_size=_DB_BUFFER_POOL_SIZE)
     _apply_schema(db)
 
     # 2. Sync API specs
@@ -857,11 +924,9 @@ def main() -> None:
     if not specs:
         print("⚠ No specs available — database will have no API endpoints.", file=sys.stderr)
 
-    # Task 1 (ADR-011): resolved ingestion proof-of-life.  Runs in parallel to
-    # the legacy populator; ``specs`` continues unchanged.  Failures are
-    # reported but non-fatal — they document upstream Aruba spec bugs.
-    from hpe_networking_central_mcp.compiler.frontend import resolve_specs
-
+    # Task 1 (ADR-011): strict validation/resolution.  The legacy populator
+    # still consumes ``specs`` unchanged, while Task 2 consumes the cleaned raw
+    # inputs carried by successful Task 1 results.
     task1 = resolve_specs(specs)
     print(
         f"  Task 1 ingestion: {len(task1.resolved)} resolved, "
@@ -872,6 +937,23 @@ def main() -> None:
             f"    ⚠ {f.source}: {f.error_type}: {f.error[:200]}",
             file=sys.stderr,
         )
+
+    print("\n[2b/6] Building L1 OpenAPI AST artifact...")
+    try:
+        ast_stats = _build_ast_artifact(
+            ast_db_path,
+            task1.resolved,
+            task1_failed_count=len(task1.failed),
+        )
+    except Exception:
+        db.close()
+        raise
+    print(
+        f"  AST graph: {ast_stats['spec_count']} specs, "
+        f"{ast_stats['node_count']} nodes, "
+        f"{ast_stats['child_edge_count']} AST_CHILD edges, "
+        f"{ast_stats['ref_edge_count']} AST_REF_TARGET edges"
+    )
 
     # 3. Build index and populate
     print("\n[3/6] Populating API endpoints...")
@@ -957,6 +1039,7 @@ def main() -> None:
         "categories": sorted(index.categories.keys()),
         "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "sync_health": sync_health,
+        "ast": ast_stats,
     }
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -965,16 +1048,27 @@ def main() -> None:
     print(f"  Endpoints: {endpoint_count}")
     print(f"  Categories: {len(index.categories)}")
     print(f"  Doc sections: {doc_count}")
+    print(f"  AST DB: {ast_db_path}")
     print(f"  Manifest: {manifest_path}")
 
     # Optionally tar (include both DB and manifest)
     if args.tar:
-        tar_path = output_dir / "knowledge_db.tar.gz"
-        print(f"\nCreating archive: {tar_path}")
-        with tarfile.open(tar_path, "w:gz") as tf:
-            tf.add(db_path, arcname="knowledge_db")
-            tf.add(manifest_path, arcname="manifest.json")
+        archives = _create_release_archives(
+            output_dir,
+            db_path=db_path,
+            ast_db_path=ast_db_path,
+            manifest_path=manifest_path,
+        )
+        tar_path = archives["knowledge_db"]
+        print(f"\nArchive: {tar_path}")
         print(f"✓ Archive created ({tar_path.stat().st_size / 1024 / 1024:.1f} MB)")
+
+        ast_tar_path = archives["knowledge_db_ast"]
+        print(f"\nAST archive: {ast_tar_path}")
+        print(
+            f"✓ AST archive created "
+            f"({ast_tar_path.stat().st_size / 1024 / 1024:.1f} MB)"
+        )
 
 
 if __name__ == "__main__":
