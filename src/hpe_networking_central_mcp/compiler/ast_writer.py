@@ -108,10 +108,18 @@ def write_ast_graph(conn, graph: AstGraph) -> None:
     )
 
 
-def build_ast_database(db_path: Path, graphs: list[AstGraph]) -> None:
+def build_ast_database(
+    db_path: Path,
+    graphs: list[AstGraph],
+    *,
+    buffer_pool_size: int | None = None,
+) -> None:
     """Create an AST-only LadybugDB at ``db_path`` and write ``graphs``."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    db = lb.Database(str(db_path))
+    db_kwargs = {}
+    if buffer_pool_size is not None:
+        db_kwargs["buffer_pool_size"] = buffer_pool_size
+    db = lb.Database(str(db_path), **db_kwargs)
     try:
         conn = lb.Connection(db)
         apply_ast_schema(conn)

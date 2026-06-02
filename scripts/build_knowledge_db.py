@@ -68,6 +68,9 @@ except ImportError:
     _HAS_GLP = False
 
 
+_DB_BUFFER_POOL_SIZE = 2 * 1024 * 1024 * 1024
+
+
 def _apply_schema(db: lb.Database) -> None:
     """Apply full schema DDL (live + knowledge tables)."""
     conn = lb.Connection(db)
@@ -226,7 +229,7 @@ def _build_ast_artifact(
         stats["child_edge_count"] += len(graph.child_edges)
         stats["ref_edge_count"] += len(graph.ref_edges)
 
-    build_ast_database(ast_db_path, graphs)
+    build_ast_database(ast_db_path, graphs, buffer_pool_size=_DB_BUFFER_POOL_SIZE)
     return stats
 
 
@@ -901,7 +904,7 @@ def main() -> None:
     # Cap buffer pool at 2 GB so the build doesn't claim ~80% of system
     # memory by default (real_ladybug's autosize on a workstation can
     # easily reserve 12+ GB and starve the parser/scrapers).
-    db = lb.Database(str(db_path), buffer_pool_size=2 * 1024 * 1024 * 1024)
+    db = lb.Database(str(db_path), buffer_pool_size=_DB_BUFFER_POOL_SIZE)
     _apply_schema(db)
 
     # 2. Sync API specs
@@ -936,11 +939,15 @@ def main() -> None:
         )
 
     print("\n[2b/6] Building L1 OpenAPI AST artifact...")
-    ast_stats = _build_ast_artifact(
-        ast_db_path,
-        task1.resolved,
-        task1_failed_count=len(task1.failed),
-    )
+    try:
+        ast_stats = _build_ast_artifact(
+            ast_db_path,
+            task1.resolved,
+            task1_failed_count=len(task1.failed),
+        )
+    except Exception:
+        db.close()
+        raise
     print(
         f"  AST graph: {ast_stats['spec_count']} specs, "
         f"{ast_stats['node_count']} nodes, "

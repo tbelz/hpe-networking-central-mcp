@@ -225,11 +225,15 @@ jobs:
           NEW_DOC=$(jq -r '.doc_count // 0' build/manifest.json)
           OLD_CATS=$(jq -r '.categories | sort | join(",")' /tmp/prev/manifest.json)
           NEW_CATS=$(jq -r '.categories | sort | join(",")' build/manifest.json)
+          OLD_AST=$(jq -c '.ast // null' /tmp/prev/manifest.json)
+          NEW_AST=$(jq -c '.ast // null' build/manifest.json)
 
           echo "Previous: ${OLD_EP} endpoints, ${OLD_CAT} categories, ${OLD_DOC} docs"
           echo "Current:  ${NEW_EP} endpoints, ${NEW_CAT} categories, ${NEW_DOC} docs"
+          echo "Previous AST: ${OLD_AST}"
+          echo "Current AST:  ${NEW_AST}"
 
-          if [ "$OLD_EP" = "$NEW_EP" ] && [ "$OLD_CAT" = "$NEW_CAT" ] && [ "$OLD_CATS" = "$NEW_CATS" ] && [ "$OLD_DOC" = "$NEW_DOC" ]; then
+          if [ "$OLD_EP" = "$NEW_EP" ] && [ "$OLD_CAT" = "$NEW_CAT" ] && [ "$OLD_CATS" = "$NEW_CATS" ] && [ "$OLD_DOC" = "$NEW_DOC" ] && [ "$OLD_AST" = "$NEW_AST" ]; then
             echo "No changes detected — skipping release."
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else

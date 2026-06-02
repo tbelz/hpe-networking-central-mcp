@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 import importlib.util
 import json
+import shutil
 import tarfile
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -14,6 +17,17 @@ from hpe_networking_central_mcp.compiler.ast_builder import UnknownKeywordError
 from hpe_networking_central_mcp.compiler.frontend import ResolvedSpec, resolve_spec
 
 pytestmark = [pytest.mark.compiler, pytest.mark.unit]
+
+
+@pytest.fixture
+def repo_tmp_path() -> Iterator[Path]:
+    repo_tmp = Path(__file__).resolve().parent.parent / "tmp"
+    repo_tmp.mkdir(exist_ok=True)
+    path = Path(tempfile.mkdtemp(prefix="test_build_ast_", dir=repo_tmp))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _load_build_module():
@@ -67,9 +81,9 @@ def _resolved() -> ResolvedSpec:
     return outcome
 
 
-def test_build_ast_artifact_writes_queryable_ladybug_db(tmp_path: Path) -> None:
+def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> None:
     mod = _load_build_module()
-    ast_db_path = tmp_path / "knowledge_db_ast"
+    ast_db_path = repo_tmp_path / "knowledge_db_ast"
     ast_db_path.mkdir()
     (ast_db_path / "stale.txt").write_text("old", encoding="utf-8")
 
@@ -127,7 +141,7 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(tmp_path: Path) -> None:
 
 
 def test_build_ast_artifact_fails_when_resolved_spec_cannot_build(
-    tmp_path: Path,
+    repo_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mod = _load_build_module()
@@ -144,25 +158,25 @@ def test_build_ast_artifact_fails_when_resolved_spec_cannot_build(
 
     with pytest.raises(UnknownKeywordError):
         mod._build_ast_artifact(
-            tmp_path / "knowledge_db_ast",
+            repo_tmp_path / "knowledge_db_ast",
             [_resolved()],
             task1_failed_count=0,
         )
 
 
-def test_release_archives_keep_ast_tar_separate(tmp_path: Path) -> None:
+def test_release_archives_keep_ast_tar_separate(repo_tmp_path: Path) -> None:
     mod = _load_build_module()
-    db_path = tmp_path / "knowledge_db"
-    ast_db_path = tmp_path / "knowledge_db_ast"
+    db_path = repo_tmp_path / "knowledge_db"
+    ast_db_path = repo_tmp_path / "knowledge_db_ast"
     db_path.mkdir()
     ast_db_path.mkdir()
     (db_path / "db.lbd").write_text("runtime", encoding="utf-8")
     (ast_db_path / "db.lbd").write_text("ast", encoding="utf-8")
-    manifest_path = tmp_path / "manifest.json"
+    manifest_path = repo_tmp_path / "manifest.json"
     manifest_path.write_text('{"version": "unit"}', encoding="utf-8")
 
     archives = mod._create_release_archives(
-        tmp_path,
+        repo_tmp_path,
         db_path=db_path,
         ast_db_path=ast_db_path,
         manifest_path=manifest_path,
@@ -185,7 +199,7 @@ def test_release_archives_keep_ast_tar_separate(tmp_path: Path) -> None:
 
 @pytest.mark.real_spec
 def test_real_central_stride_builds_ast_artifact(
-    tmp_path: Path,
+    repo_tmp_path: Path,
     real_central_specs: list[Path],
 ) -> None:
     mod = _load_build_module()
@@ -202,7 +216,7 @@ def test_real_central_stride_builds_ast_artifact(
 
     assert resolved, "expected at least one sampled real spec to resolve"
     stats = mod._build_ast_artifact(
-        tmp_path / "knowledge_db_ast",
+        repo_tmp_path / "knowledge_db_ast",
         resolved,
         task1_failed_count=0,
     )
