@@ -1,0 +1,254 @@
+"""Tests for Task 2: lossless OpenAPI AST graph generation."""
+
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+import pytest
+import real_ladybug as lb
+
+from hpe_networking_central_mcp.compiler.ast_builder import (
+    UnknownKeywordError,
+    build_ast_from_resolved,
+    build_ast_graph,
+    reconstruct_spec,
+)
+from hpe_networking_central_mcp.compiler.ast_schema import apply_ast_schema
+from hpe_networking_central_mcp.compiler.ast_writer import write_ast_graph
+from hpe_networking_central_mcp.compiler.frontend import ResolvedSpec, clean_spec, resolve_spec
+
+pytestmark = pytest.mark.compiler
+
+_FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "oas" / "real_excerpts"
+
+
+def _oas30_spec() -> dict:
+    return {
+        "openapi": "3.0.3",
+        "info": {"title": "Pets", "version": "1.0"},
+        "paths": {
+            "/pets": {
+                "get": {
+                    "operationId": "listPets",
+                    "parameters": [
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "schema": {"type": "integer", "default": 10},
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {"$ref": "#/components/schemas/Pet"},
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "Pet": {
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": {
+                        "id": {"type": "string"},
+                        "x-device-field": {
+                            "type": "string",
+                            "description": "A real property whose name starts with x-.",
+                        },
+                    },
+                    "x-central-note": {"source": "fixture"},
+                }
+            }
+        },
+    }
+
+
+def _oas31_spec() -> dict:
+    return {
+        "openapi": "3.1.0",
+        "info": {"title": "Audit", "version": "1.0"},
+        "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+        "paths": {
+            "/audits/{id}": {
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string"},
+                    }
+                ],
+                "get": {
+                    "operationId": "getAudit",
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/Audit"}
+                                }
+                            },
+                        }
+                    },
+                },
+            }
+        },
+        "components": {
+            "schemas": {
+                "Audit": {
+                    "type": "object",
+                    "$defs": {
+                        "AuditId": {"type": "string", "format": "uuid"},
+                    },
+                    "properties": {
+                        "id": {"$ref": "#/components/schemas/Audit/$defs/AuditId"}
+                    },
+                }
+            }
+        },
+    }
+
+
+def test_reconstructs_cleaned_oas30_spec_losslessly() -> None:
+    spec = _oas30_spec()
+    graph = build_ast_graph(spec, source="unit/pets")
+    assert reconstruct_spec(graph) == spec
+
+
+def test_reconstructs_cleaned_oas31_spec_losslessly() -> None:
+    spec = _oas31_spec()
+    graph = build_ast_graph(spec, source="unit/audit")
+    assert reconstruct_spec(graph) == spec
+
+
+def test_ref_node_is_preserved_and_linked_to_target() -> None:
+    graph = build_ast_graph(_oas30_spec(), source="unit/pets")
+    ref_nodes = [
+        n for n in graph.nodes
+        if n.key == "$ref" and json.loads(n.scalar_json) == "#/components/schemas/Pet"
+    ]
+    assert len(ref_nodes) == 1
+    assert ref_nodes[0].kind == "Constraint"
+
+    targets = {e.ref_node_id: e.target_node_id for e in graph.ref_edges}
+    assert ref_nodes[0].node_id in targets
+    target = next(n for n in graph.nodes if n.node_id == targets[ref_nodes[0].node_id])
+    assert target.kind == "Schema"
+    assert target.json_pointer == "/components/schemas/Pet"
+
+
+def test_dynamic_property_names_do_not_count_as_unknown_or_extension() -> None:
+    graph = build_ast_graph(_oas30_spec(), source="unit/pets")
+    props = [
+        n for n in graph.nodes
+        if n.kind == "Property" and n.json_pointer.endswith("/properties/x-device-field")
+    ]
+    assert len(props) == 1
+    assert props[0].key == "x-device-field"
+    assert props[0].is_extension is False
+
+
+def test_unknown_fixed_keyword_fails_loudly() -> None:
+    spec = _oas30_spec()
+    spec["paths"]["/pets"]["get"]["madeUpKeyword"] = True
+    with pytest.raises(UnknownKeywordError) as exc:
+        build_ast_graph(spec, source="unit/broken")
+    assert exc.value.parent_kind == "Operation"
+    assert exc.value.key == "madeUpKeyword"
+    assert exc.value.pointer == "/paths/~1pets/get"
+
+
+def test_vendor_extension_is_preserved_as_extension_node() -> None:
+    graph = build_ast_graph(_oas30_spec(), source="unit/pets")
+    nodes = [n for n in graph.nodes if n.key == "x-central-note"]
+    assert len(nodes) == 1
+    assert nodes[0].kind == "Extension"
+    assert nodes[0].is_extension is True
+    assert json.loads(nodes[0].raw_json) == {"source": "fixture"}
+
+
+def test_task1_result_keeps_cleaned_raw_spec_for_ast_input() -> None:
+    raw = _oas30_spec()
+    raw["_id"] = "readme-internal"
+    outcome = resolve_spec(raw, source="unit/resolved")
+    assert isinstance(outcome, ResolvedSpec), getattr(outcome, "error", None)
+    assert "_id" not in outcome.raw_spec
+    assert any("$ref" in json.dumps(v) for v in outcome.raw_spec["paths"].values())
+    assert "$ref" not in json.dumps(outcome.spec)
+
+    graph = build_ast_from_resolved(outcome)
+    assert reconstruct_spec(graph) == outcome.raw_spec
+
+
+def test_writer_persists_ast_graph_to_ladybug() -> None:
+    graph = build_ast_graph(_oas30_spec(), source="unit/pets")
+    with TemporaryDirectory(prefix="ast_writer_") as tmp:
+        db = lb.Database(str(Path(tmp) / "ast_db"), max_db_size=256 * 1024 * 1024)
+        conn = lb.Connection(db)
+        try:
+            apply_ast_schema(conn)
+            write_ast_graph(conn, graph)
+            counts = list(
+                conn.execute(
+                    """
+                    MATCH (s:OasSpec)-[:HAS_AST_ROOT]->(root:OasAstNode)
+                    RETURN s.source AS source, root.kind AS root_kind
+                    """
+                ).rows_as_dict()
+            )
+            assert counts == [{"source": "unit/pets", "root_kind": "Document"}]
+            ref_rows = list(
+                conn.execute(
+                    """
+                    MATCH (r:OasAstNode)-[edge:AST_REF_TARGET]->(target:OasAstNode)
+                    RETURN r.key AS ref_key, edge.ref AS ref, target.jsonPointer AS target
+                    """
+                ).rows_as_dict()
+            )
+            assert ref_rows == [
+                {
+                    "ref_key": "$ref",
+                    "ref": "#/components/schemas/Pet",
+                    "target": "/components/schemas/Pet",
+                }
+            ]
+        finally:
+            db.close()
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    sorted(_FIXTURE_DIR.glob("*.json")),
+    ids=lambda p: p.stem,
+)
+def test_real_spec_excerpt_builds_lossless_ast(fixture: Path) -> None:
+    spec = clean_spec(json.loads(fixture.read_text(encoding="utf-8")))
+    graph = build_ast_graph(spec, source=f"fixture/{fixture.name}")
+    assert reconstruct_spec(graph) == spec
+    assert graph.nodes
+
+
+@pytest.mark.real_spec
+def test_real_central_stride_sample_builds_ast(real_central_specs: list[Path]) -> None:
+    sample = real_central_specs[::64]
+    assert sample, "expected at least one real Central spec"
+    for path in sample[:25]:
+        spec = json.loads(path.read_text(encoding="utf-8"))
+        # Remove ReadMe internal metadata in the same way Task 1 does.
+        outcome = resolve_spec(copy.deepcopy(spec), source=f"central/{path.name}")
+        if not isinstance(outcome, ResolvedSpec):
+            continue
+        graph = build_ast_from_resolved(outcome)
+        assert reconstruct_spec(graph) == outcome.raw_spec
