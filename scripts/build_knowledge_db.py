@@ -857,6 +857,22 @@ def main() -> None:
     if not specs:
         print("⚠ No specs available — database will have no API endpoints.", file=sys.stderr)
 
+    # Task 1 (ADR-011): resolved ingestion proof-of-life.  Runs in parallel to
+    # the legacy populator; ``specs`` continues unchanged.  Failures are
+    # reported but non-fatal — they document upstream Aruba spec bugs.
+    from hpe_networking_central_mcp.compiler.frontend import resolve_specs
+
+    task1 = resolve_specs(specs)
+    print(
+        f"  Task 1 ingestion: {len(task1.resolved)} resolved, "
+        f"{len(task1.failed)} failed strict validation/resolution"
+    )
+    for f in task1.failed:
+        print(
+            f"    ⚠ {f.source}: {f.error_type}: {f.error[:200]}",
+            file=sys.stderr,
+        )
+
     # 3. Build index and populate
     print("\n[3/6] Populating API endpoints...")
     if specs:
