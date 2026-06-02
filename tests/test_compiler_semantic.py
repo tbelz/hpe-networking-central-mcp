@@ -14,6 +14,7 @@ from hpe_networking_central_mcp.compiler.semantic_builder import (
     build_semantic_overlay,
     _internal_ref_pointer,
 )
+from hpe_networking_central_mcp.compiler.semantic_metrics import compute_semantic_metrics
 
 pytestmark = [pytest.mark.compiler, pytest.mark.unit]
 
@@ -92,6 +93,17 @@ def _semantic_spec() -> dict:
     }
 
 
+def _semantic_spec_with_untyped_endpoint() -> dict:
+    spec = _semantic_spec()
+    spec["paths"]["/health"] = {
+        "get": {
+            "operationId": "health",
+            "responses": {"204": {"description": "No content"}},
+        }
+    }
+    return spec
+
+
 def test_semantic_overlay_builds_agent_highways() -> None:
     ast_graph = build_ast_graph(_semantic_spec(), source="unit/semantic")
     semantic = build_semantic_overlay(ast_graph)
@@ -134,6 +146,32 @@ def test_semantic_overlay_builds_agent_highways() -> None:
 def test_internal_ref_pointer_preserves_escaped_json_pointer_tokens() -> None:
     assert _internal_ref_pointer("#/paths/~1pets/get") == "/paths/~1pets/get"
     assert _internal_ref_pointer("#") == ""
+
+
+def test_semantic_metrics_report_catalog_coverage_ratios() -> None:
+    ast_graph = build_ast_graph(_semantic_spec_with_untyped_endpoint(), source="unit/semantic")
+    semantic = build_semantic_overlay(ast_graph)
+    metrics = compute_semantic_metrics([semantic])
+
+    assert metrics["node_kind_counts"]["ApiEndpoint"] == 2
+    assert metrics["edge_kind_counts"]["ACCEPTS_SCHEMA"] == 1
+    assert metrics["edge_kind_counts"]["RETURNS_SCHEMA"] == 1
+    assert metrics["coverage"]["endpoints_accepting_schema"] == {
+        "count": 1,
+        "total": 2,
+        "ratio": 0.5,
+    }
+    assert metrics["coverage"]["endpoints_returning_schema"] == {
+        "count": 1,
+        "total": 2,
+        "ratio": 0.5,
+    }
+    assert metrics["coverage"]["endpoints_with_any_schema_edge"] == {
+        "count": 1,
+        "total": 2,
+        "ratio": 0.5,
+    }
+    assert metrics["coverage"]["semantic_nodes_with_ast_provenance"]["ratio"] == 1.0
 
 
 @pytest.mark.parametrize(

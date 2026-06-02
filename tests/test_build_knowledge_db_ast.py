@@ -104,6 +104,16 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
     assert stats["semantic"]["edge_count"] > 0
     assert stats["semantic"]["derived_from_ast_edge_count"] > 0
     assert stats["semantic"]["rule_packs"] == ["semantic.structural.v1"]
+    assert stats["semantic"]["metrics"]["node_kind_counts"]["ApiEndpoint"] == 1
+    assert stats["semantic"]["metrics"]["edge_kind_counts"]["RETURNS_SCHEMA"] == 1
+    assert stats["semantic"]["metrics"]["coverage"]["endpoints_returning_schema"] == {
+        "count": 1,
+        "total": 1,
+        "ratio": 1.0,
+    }
+    assert stats["semantic"]["metrics"]["coverage"]["semantic_nodes_with_ast_provenance"][
+        "ratio"
+    ] == 1.0
     assert not (ast_db_path / "stale.txt").exists()
     json.dumps({"ast": stats})
 
