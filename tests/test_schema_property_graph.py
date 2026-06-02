@@ -148,7 +148,7 @@ def _make_ntp_like_spec() -> dict:
 def fresh_db():
     with TemporaryDirectory(prefix="phase2c_") as tmp:
         db_path = Path(tmp) / "graph_db"
-        db = lb.Database(str(db_path))
+        db = lb.Database(str(db_path), max_db_size=256 * 1024 * 1024)
         conn = lb.Connection(db)
         for ddl in NODE_TABLES + KNOWLEDGE_NODE_TABLES + REL_TABLES + KNOWLEDGE_REL_TABLES:
             conn.execute(ddl.strip())

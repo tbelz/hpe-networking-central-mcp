@@ -82,7 +82,7 @@ def _seed_endpoint(conn, method: str, path: str) -> None:
 @pytest.fixture
 def fresh_db():
     with TemporaryDirectory(prefix="ingest_smoke_") as tmp:
-        db = lb.Database(str(Path(tmp) / "graph_db"))
+        db = lb.Database(str(Path(tmp) / "graph_db"), max_db_size=256 * 1024 * 1024)
         conn = lb.Connection(db)
         for ddl in NODE_TABLES + KNOWLEDGE_NODE_TABLES + REL_TABLES + KNOWLEDGE_REL_TABLES:
             conn.execute(ddl.strip())

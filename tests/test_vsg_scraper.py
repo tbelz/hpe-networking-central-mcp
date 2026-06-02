@@ -284,7 +284,7 @@ class TestPopulateDocs:
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "test_db"
-            db = lb.Database(str(db_path))
+            db = lb.Database(str(db_path), max_db_size=256 * 1024 * 1024)
             conn = lb.Connection(db)
 
             # Apply schema
