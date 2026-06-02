@@ -156,6 +156,16 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
                 "schema": "Pet",
             }
         ]
+        semantic_node_count = list(
+            conn.execute("MATCH (n:SemanticNode) RETURN COUNT(n) AS n").rows_as_dict()
+        )[0]["n"]
+        assert semantic_node_count == stats["semantic"]["node_count"]
+
+        semantic_edge_count = list(
+            conn.execute("MATCH ()-[r:SEMANTIC_EDGE]->() RETURN COUNT(r) AS n").rows_as_dict()
+        )[0]["n"]
+        assert semantic_edge_count == stats["semantic"]["edge_count"]
+
         provenance_rows = list(
             conn.execute(
                 """

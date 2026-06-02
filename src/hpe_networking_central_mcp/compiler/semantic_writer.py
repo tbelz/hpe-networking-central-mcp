@@ -35,6 +35,8 @@ _SEMANTIC_EDGE_SCHEMA = pa.schema([
     ("evidenceJson", pa.string()),
 ])
 
+_COPY_TABLES = {"SemanticNode", "SEMANTIC_DERIVED_FROM", "SEMANTIC_EDGE"}
+
 
 def write_semantic_graph(conn, graph: SemanticGraph) -> None:
     """Bulk-load one L2 semantic overlay graph into an open LadybugDB connection."""
@@ -105,6 +107,8 @@ def write_semantic_database(
 def _copy(conn, table: str, rows: list[dict], schema: pa.Schema) -> None:
     if not rows:
         return
+    if table not in _COPY_TABLES:
+        raise ValueError(f"Unexpected semantic COPY table: {table}")
     columns: dict[str, list] = {field.name: [] for field in schema}
     for row in rows:
         for field in schema:

@@ -12,6 +12,7 @@ from hpe_networking_central_mcp.compiler.frontend import clean_spec
 from hpe_networking_central_mcp.compiler.semantic_builder import (
     STRUCTURAL_RULE_PACK_ID,
     build_semantic_overlay,
+    _internal_ref_pointer,
 )
 
 pytestmark = [pytest.mark.compiler, pytest.mark.unit]
@@ -118,6 +119,7 @@ def test_semantic_overlay_builds_agent_highways() -> None:
     assert ("POST /ntp", "RETURNS_SCHEMA", "NtpResponse") in edge_tuples
     assert ("POST /ntp", "HAS_CLI_COMMAND", "ntp server") in edge_tuples
     assert ("POST /ntp", "CONFIGURES_YANG", "/ac-ntp:ntp/ac-ntp:server") in edge_tuples
+    # "0" is the index-based name of the first allOf branch, the BaseConfig ref.
     assert ("NtpProfile", "COMPOSED_OF", "0") in edge_tuples
     assert ("server", "PROPERTY_AT_YANG", "/ac-ntp:ntp/ac-ntp:server") in edge_tuples
 
@@ -127,6 +129,11 @@ def test_semantic_overlay_builds_agent_highways() -> None:
     assert summary["x-supportedDeviceType"] == ["Switch CX"]
     assert server.ast_node_id
     assert any(edge.semantic_id == server.semantic_id for edge in semantic.derived_edges)
+
+
+def test_internal_ref_pointer_preserves_escaped_json_pointer_tokens() -> None:
+    assert _internal_ref_pointer("#/paths/~1pets/get") == "/paths/~1pets/get"
+    assert _internal_ref_pointer("#") == ""
 
 
 @pytest.mark.parametrize(

@@ -540,10 +540,13 @@ def _pick_media_schema(
     if not isinstance(content, dict) or not content:
         return "", None, None
     preferred = None
-    for media in ("application/json", "application/*+json"):
-        if media in content:
-            preferred = media
-            break
+    if "application/json" in content:
+        preferred = "application/json"
+    else:
+        for media in content:
+            if isinstance(media, str) and media.startswith("application/") and media.endswith("+json"):
+                preferred = media
+                break
     if preferred is None:
         preferred = next(iter(content))
     media_type = content.get(preferred)
@@ -607,9 +610,11 @@ def _collect_yang_paths(
 
 
 def _internal_ref_pointer(ref: Any) -> str:
+    if ref in {"#", "#/"}:
+        return ""
     if not isinstance(ref, str) or not ref.startswith("#/"):
         return ""
-    return "/" + "/".join(_unescape_pointer(part) for part in ref[2:].split("/"))
+    return ref[1:]
 
 
 def _get_pointer(obj: Any, pointer: str) -> Any:
@@ -732,5 +737,5 @@ def _as_str(value: Any) -> str:
 
 
 def _semantic_id(spec_id: str, kind: str, stable_key: str) -> str:
-    digest = hashlib.sha1(f"{spec_id}\0{kind}\0{stable_key}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(f"{spec_id}\0{kind}\0{stable_key}".encode("utf-8")).hexdigest()
     return f"sem:{digest[:24]}"
