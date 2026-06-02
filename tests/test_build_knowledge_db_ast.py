@@ -100,6 +100,10 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
     assert stats["node_count"] > 0
     assert stats["child_edge_count"] > 0
     assert stats["ref_edge_count"] == 1
+    assert stats["semantic"]["node_count"] > 0
+    assert stats["semantic"]["edge_count"] > 0
+    assert stats["semantic"]["derived_from_ast_edge_count"] > 0
+    assert stats["semantic"]["rule_packs"] == ["semantic.structural.v1"]
     assert not (ast_db_path / "stale.txt").exists()
     json.dumps({"ast": stats})
 
@@ -136,6 +140,41 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
                 "target_kind": "Schema",
             }
         ]
+        semantic_rows = list(
+            conn.execute(
+                """
+                MATCH (e:SemanticNode {kind: 'ApiEndpoint'})
+                      -[edge:SEMANTIC_EDGE]->(schema:SemanticNode {kind: 'SchemaComponent'})
+                RETURN e.name AS endpoint, edge.kind AS edge_kind, schema.name AS schema
+                """
+            ).rows_as_dict()
+        )
+        assert semantic_rows == [
+            {
+                "endpoint": "GET /pets",
+                "edge_kind": "RETURNS_SCHEMA",
+                "schema": "Pet",
+            }
+        ]
+        semantic_node_count = list(
+            conn.execute("MATCH (n:SemanticNode) RETURN COUNT(n) AS n").rows_as_dict()
+        )[0]["n"]
+        assert semantic_node_count == stats["semantic"]["node_count"]
+
+        semantic_edge_count = list(
+            conn.execute("MATCH ()-[r:SEMANTIC_EDGE]->() RETURN COUNT(r) AS n").rows_as_dict()
+        )[0]["n"]
+        assert semantic_edge_count == stats["semantic"]["edge_count"]
+
+        provenance_rows = list(
+            conn.execute(
+                """
+                MATCH (:SemanticNode)-[edge:SEMANTIC_DERIVED_FROM]->(:OasAstNode)
+                RETURN COUNT(edge) AS n
+                """
+            ).rows_as_dict()
+        )
+        assert provenance_rows[0]["n"] == stats["semantic"]["derived_from_ast_edge_count"]
     finally:
         db.close()
 
@@ -223,3 +262,5 @@ def test_real_central_stride_builds_ast_artifact(
     assert stats["spec_count"] == len(resolved)
     assert stats["node_count"] > 0
     assert stats["child_edge_count"] > 0
+    assert stats["semantic"]["node_count"] > 0
+    assert stats["semantic"]["edge_count"] > 0
