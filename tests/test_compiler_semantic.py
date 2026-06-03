@@ -12,6 +12,9 @@ from hpe_networking_central_mcp.compiler.frontend import clean_spec
 from hpe_networking_central_mcp.compiler.semantic_builder import (
     IDENTITY_RULE_PACK_ID,
     STRUCTURAL_RULE_PACK_ID,
+    SemanticEdge,
+    SemanticGraph,
+    SemanticNode,
     build_semantic_overlay,
     _internal_ref_pointer,
 )
@@ -160,10 +163,11 @@ def test_semantic_overlay_builds_agent_highways() -> None:
 
     node_by_id = {node.semantic_id: node for node in semantic.nodes}
     identity_by_id = {
-        node.semantic_id: json.loads(node.summary_json).get("identityKey", "")
+        node.semantic_id: json.loads(node.summary_json)["identityKey"]
         for node in semantic.nodes
         if node.kind == "ModelEntity"
     }
+    assert all(identity_by_id.values())
     model_keys = set(identity_by_id.values())
     edge_tuples = {
         (
@@ -353,6 +357,56 @@ def test_semantic_metrics_report_catalog_coverage_ratios() -> None:
         "ratio": 0.5,
     }
     assert metrics["coverage"]["semantic_nodes_with_ast_provenance"]["ratio"] == 1.0
+
+
+def test_semantic_metrics_count_configures_model_as_any_model_edge() -> None:
+    graph = SemanticGraph(
+        spec_id="unit/config-only",
+        nodes=[
+            SemanticNode(
+                semantic_id="endpoint",
+                spec_id="unit/config-only",
+                kind="ApiEndpoint",
+                name="POST /config",
+                ast_node_id="",
+                json_pointer="/paths/~1config/post",
+                stable_key="endpoint:POST:/config",
+                summary_json="{}",
+            ),
+            SemanticNode(
+                semantic_id="model",
+                spec_id="unit/config-only",
+                kind="ModelEntity",
+                name="leaf",
+                ast_node_id="",
+                json_pointer="/components/schemas/Config/properties/leaf",
+                stable_key="model:yang:/ac-test:test/ac-test:leaf",
+                summary_json='{"identityKey":"yang:/ac-test:test/ac-test:leaf"}',
+            ),
+        ],
+        edges=[
+            SemanticEdge(
+                source_id="endpoint",
+                target_id="model",
+                kind="CONFIGURES_MODEL",
+                rule_id=f"{IDENTITY_RULE_PACK_ID}.operation.yangModel",
+                evidence_json="{}",
+            )
+        ],
+    )
+
+    metrics = compute_semantic_metrics([graph])
+
+    assert metrics["coverage"]["endpoints_with_any_model_edge"] == {
+        "count": 1,
+        "total": 1,
+        "ratio": 1.0,
+    }
+    assert metrics["coverage"]["endpoints_configuring_model"] == {
+        "count": 1,
+        "total": 1,
+        "ratio": 1.0,
+    }
 
 
 @pytest.mark.parametrize(

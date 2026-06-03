@@ -100,6 +100,9 @@ def compute_semantic_metrics(graphs: list[SemanticGraph]) -> dict[str, Any]:
     endpoint_count = len(endpoint_ids)
     schema_count = len(schema_ids)
     property_count = len(property_ids)
+    endpoints_with_any_model_edge = (
+        endpoint_accepts_model | endpoint_returns_model | endpoint_configures_model
+    )
 
     return {
         "node_kind_counts": dict(sorted(node_kind_counts.items())),
@@ -153,9 +156,9 @@ def compute_semantic_metrics(graphs: list[SemanticGraph]) -> dict[str, Any]:
                 "ratio": _ratio(len(endpoint_returns_model), endpoint_count),
             },
             "endpoints_with_any_model_edge": {
-                "count": len(endpoint_accepts_model | endpoint_returns_model),
+                "count": len(endpoints_with_any_model_edge),
                 "total": endpoint_count,
-                "ratio": _ratio(len(endpoint_accepts_model | endpoint_returns_model), endpoint_count),
+                "ratio": _ratio(len(endpoints_with_any_model_edge), endpoint_count),
             },
             "endpoints_configuring_yang": {
                 "count": len(endpoint_configures_yang),

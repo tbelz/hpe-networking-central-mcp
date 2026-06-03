@@ -153,10 +153,10 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
     assert stats["semantic"]["node_count"] > 0
     assert stats["semantic"]["edge_count"] > 0
     assert stats["semantic"]["derived_from_ast_edge_count"] > 0
-    assert stats["semantic"]["rule_packs"] == [
+    assert set(stats["semantic"]["rule_packs"]) == {
         "semantic.identity.v1",
         "semantic.structural.v1",
-    ]
+    }
     assert stats["semantic"]["metrics"]["node_kind_counts"]["ApiEndpoint"] == 1
     assert stats["semantic"]["metrics"]["node_kind_counts"]["ModelEntity"] == 6
     assert stats["semantic"]["metrics"]["node_kind_counts"]["Parameter"] == 1
