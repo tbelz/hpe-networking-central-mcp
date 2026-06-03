@@ -118,24 +118,33 @@ def fetch_endpoint_context(
         include_raw=include_raw,
     )
 
-    parameters = [
-        _detail(
+    parameters = []
+    for row in _rows(
+        compiler_conn,
+        """
+        MATCH (:ApiEndpoint {endpoint_id: $endpoint_id})-[:HAS_PARAMETER]->(param:Parameter)
+        OPTIONAL MATCH (param)-[:PARAMETER_REFERENCES]->(target:SchemaComponent)
+        RETURN param.parameter_id AS parameter_id,
+               target.component_id AS target_component_id
+        ORDER BY param.location, param.name
+        """,
+        {"endpoint_id": endpoint_id},
+    ):
+        parameter = _detail(
             compiler_conn,
             ast_conn,
             "Parameter",
             row["parameter_id"],
             include_raw=include_raw,
         )
-        for row in _rows(
+        parameter["schema"] = _optional_detail(
             compiler_conn,
-            """
-            MATCH (:ApiEndpoint {endpoint_id: $endpoint_id})-[:HAS_PARAMETER]->(param:Parameter)
-            RETURN param.parameter_id AS parameter_id
-            ORDER BY param.location, param.name
-            """,
-            {"endpoint_id": endpoint_id},
+            ast_conn,
+            "SchemaComponent",
+            row.get("target_component_id") or "",
+            include_raw=include_raw,
         )
-    ]
+        parameters.append(parameter)
 
     request_bodies = []
     for row in _rows(
