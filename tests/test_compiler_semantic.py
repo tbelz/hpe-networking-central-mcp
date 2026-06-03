@@ -250,6 +250,78 @@ def test_semantic_overlay_builds_agent_highways() -> None:
     assert any(edge.semantic_id == server.semantic_id for edge in semantic.derived_edges)
 
 
+def test_semantic_overlay_classifies_additional_properties_schema_as_map() -> None:
+    ast_graph = build_ast_graph(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "Map schema", "version": "1.0"},
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Metadata": {
+                        "additionalProperties": {"type": "string"},
+                    }
+                }
+            },
+        },
+        source="unit/map-schema",
+    )
+
+    semantic = build_semantic_overlay(ast_graph)
+    metadata = next(node for node in semantic.nodes if node.name == "Metadata")
+    summary = json.loads(metadata.summary_json)
+
+    assert summary["bodyShape"] == "map"
+    assert summary["kind"] == "map"
+
+
+def test_semantic_overlay_merges_reused_model_entity_summary() -> None:
+    ast_graph = build_ast_graph(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "Shared YANG model", "version": "1.0"},
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "SharedLeaf": {
+                        "type": "string",
+                        "x-path": "/ac-test:test/ac-test:leaf",
+                    },
+                    "Container": {
+                        "type": "object",
+                        "required": ["leaf"],
+                        "properties": {
+                            "leaf": {
+                                "type": "string",
+                                "x-key": ["name"],
+                                "x-path": "/ac-test:test/ac-test:leaf",
+                            }
+                        },
+                    },
+                }
+            },
+        },
+        source="unit/shared-yang-model",
+    )
+
+    semantic = build_semantic_overlay(ast_graph)
+    model_summaries = [
+        json.loads(node.summary_json)
+        for node in semantic.nodes
+        if node.kind == "ModelEntity"
+        and json.loads(node.summary_json)["identityKey"]
+        == "yang:/ac-test:test/ac-test:leaf"
+    ]
+
+    assert len(model_summaries) == 1
+    summary = model_summaries[0]
+    assert set(summary["identityTypes"]) == {"schema", "property"}
+    assert set(summary["sourceKinds"]) == {"SchemaComponent", "Property"}
+    assert summary["required"] is True
+    assert summary["keyFields"] == ["name"]
+    assert summary["parentIdentityKey"] == "schema:container"
+
+
 def test_operation_parameter_overrides_path_item_parameter() -> None:
     spec = _semantic_spec()
     operation = spec["paths"]["/ntp"]["post"]

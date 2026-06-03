@@ -956,7 +956,26 @@ def _ensure_model_entity(
 ) -> SemanticNode:
     existing = state.model_by_key.get(identity_key)
     if existing is not None:
-        return existing
+        merged_summary = _merge_model_summary(_load_summary(existing), summary)
+        if merged_summary == _load_summary(existing):
+            return existing
+        replacement = SemanticNode(
+            semantic_id=existing.semantic_id,
+            spec_id=existing.spec_id,
+            kind=existing.kind,
+            name=existing.name,
+            ast_node_id=existing.ast_node_id,
+            json_pointer=existing.json_pointer,
+            stable_key=existing.stable_key,
+            summary_json=_json(merged_summary),
+        )
+        state.model_by_key[identity_key] = replacement
+        state.semantic_by_key[(existing.kind, existing.stable_key)] = replacement
+        for index, node in enumerate(state.semantic_graph.nodes):
+            if node.semantic_id == existing.semantic_id:
+                state.semantic_graph.nodes[index] = replacement
+                break
+        return replacement
     node = state.add_node(
         kind="ModelEntity",
         stable_key=f"model:{identity_key}",
@@ -966,6 +985,52 @@ def _ensure_model_entity(
     )
     state.model_by_key[identity_key] = node
     return node
+
+
+def _merge_model_summary(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(existing)
+    for key, value in incoming.items():
+        if _is_empty_summary_value(value):
+            continue
+        current = merged.get(key)
+        if _is_empty_summary_value(current):
+            merged[key] = value
+            continue
+        if current == value:
+            continue
+        if isinstance(current, list) or isinstance(value, list):
+            merged[key] = _merge_summary_lists(current, value)
+        elif key in {"identityType", "sourceKind"}:
+            merged[f"{key}s"] = _merge_summary_lists(
+                merged.get(f"{key}s", current),
+                value,
+            )
+        elif key == "sourcePointer":
+            merged["sourcePointers"] = _merge_summary_lists(
+                merged.get("sourcePointers", current),
+                value,
+            )
+        elif key == "required":
+            merged[key] = bool(current) or bool(value)
+    return merged
+
+
+def _merge_summary_lists(left: Any, right: Any) -> list[Any]:
+    values: list[Any] = []
+    for raw in (left, right):
+        items = raw if isinstance(raw, list) else [raw]
+        for item in items:
+            if _is_empty_summary_value(item) or item in values:
+                continue
+            values.append(item)
+    return values
+
+
+def _is_empty_summary_value(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
 
 
 def _ensure_yang_node(
@@ -1253,6 +1318,9 @@ def _component_kind(body: dict[str, Any]) -> str:
     for key in ("oneOf", "anyOf", "allOf"):
         if isinstance(body.get(key), list) and body[key]:
             return "union"
+    additional_properties = body.get("additionalProperties")
+    if additional_properties is True or isinstance(additional_properties, dict):
+        return "map"
     if body.get("type") == "object" or "properties" in body:
         return "object"
     if body.get("type") == "array":
