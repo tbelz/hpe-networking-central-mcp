@@ -229,6 +229,8 @@ jobs:
           NEW_AST=$(jq -c '.ast // null' build/manifest.json)
           OLD_COMPILER=$(jq -c '.compiler_projection // null' /tmp/prev/manifest.json)
           NEW_COMPILER=$(jq -c '.compiler_projection // null' build/manifest.json)
+          OLD_PARITY=$(jq -c '.projection_parity // null' /tmp/prev/manifest.json)
+          NEW_PARITY=$(jq -c '.projection_parity // null' build/manifest.json)
 
           echo "Previous: ${OLD_EP} endpoints, ${OLD_CAT} categories, ${OLD_DOC} docs"
           echo "Current:  ${NEW_EP} endpoints, ${NEW_CAT} categories, ${NEW_DOC} docs"
@@ -236,8 +238,10 @@ jobs:
           echo "Current AST:  ${NEW_AST}"
           echo "Previous compiler projection: ${OLD_COMPILER}"
           echo "Current compiler projection:  ${NEW_COMPILER}"
+          echo "Previous projection parity: ${OLD_PARITY}"
+          echo "Current projection parity:  ${NEW_PARITY}"
 
-          if [ "$OLD_EP" = "$NEW_EP" ] && [ "$OLD_CAT" = "$NEW_CAT" ] && [ "$OLD_CATS" = "$NEW_CATS" ] && [ "$OLD_DOC" = "$NEW_DOC" ] && [ "$OLD_AST" = "$NEW_AST" ] && [ "$OLD_COMPILER" = "$NEW_COMPILER" ]; then
+          if [ "$OLD_EP" = "$NEW_EP" ] && [ "$OLD_CAT" = "$NEW_CAT" ] && [ "$OLD_CATS" = "$NEW_CATS" ] && [ "$OLD_DOC" = "$NEW_DOC" ] && [ "$OLD_AST" = "$NEW_AST" ] && [ "$OLD_COMPILER" = "$NEW_COMPILER" ] && [ "$OLD_PARITY" = "$NEW_PARITY" ]; then
             echo "No changes detected — skipping release."
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else

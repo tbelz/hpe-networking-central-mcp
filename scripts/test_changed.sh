@@ -55,6 +55,7 @@ while IFS= read -r f; do
     case "$f" in
         src/hpe_networking_central_mcp/compiler/*)
             add_tests "tests/test_compiler_*.py"
+            add_tests "tests/test_projection_parity.py"
             ;;
         src/hpe_networking_central_mcp/graph/*)
             add_tests "tests/test_query_graph.py"

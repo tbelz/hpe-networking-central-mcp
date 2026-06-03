@@ -38,6 +38,10 @@ from hpe_networking_central_mcp.compiler.frontend import (  # noqa: E402
 from hpe_networking_central_mcp.compiler.projection_writer import (  # noqa: E402
     build_compiler_projection_database,
 )
+from hpe_networking_central_mcp.compiler.projection_parity import (  # noqa: E402
+    compute_projection_parity,
+    format_projection_parity_report,
+)
 from hpe_networking_central_mcp.compiler.semantic_builder import (  # noqa: E402
     build_semantic_overlay,
 )
@@ -1112,6 +1116,20 @@ def main() -> None:
     print("\n[3e/6] Build-health snapshot...")
     _print_build_report(db, schema_stats, violations)
 
+    print("\n[3f/6] Comparing legacy and compiler projections...")
+    legacy_conn = lb.Connection(db)
+    compiler_db = lb.Database(
+        str(compiler_projection_db_path),
+        buffer_pool_size=_DB_BUFFER_POOL_SIZE,
+    )
+    compiler_conn = lb.Connection(compiler_db)
+    try:
+        projection_parity = compute_projection_parity(legacy_conn, compiler_conn)
+    finally:
+        compiler_db.close()
+        del legacy_conn
+    print("  " + format_projection_parity_report(projection_parity).replace("\n", "\n  "))
+
     # 4. Sync and populate VSG documentation
     print("\n[4/6] Refreshing and populating VSG documentation...")
     doc_entries, vsg_health = _sync_docs(cache_dir)
@@ -1147,6 +1165,7 @@ def main() -> None:
         "sync_health": sync_health,
         "ast": ast_stats,
         "compiler_projection": compiler_projection_stats,
+        "projection_parity": projection_parity,
     }
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
