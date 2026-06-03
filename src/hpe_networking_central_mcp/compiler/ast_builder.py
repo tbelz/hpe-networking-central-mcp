@@ -613,6 +613,8 @@ def _array_item_kind(
     if parent_kind in {"Constraint", "Extension"}:
         return parent_kind
     parts = _pointer_parts(parent_pointer)
+    if _is_example_value_descendant(parts):
+        return "Scalar"
     if parent_key == "servers":
         return "Server"
     if parent_key == "parameters":
@@ -626,6 +628,15 @@ def _array_item_kind(
     if parent_key in {"enum", "required", "dependentRequired"}:
         return "Scalar"
     return "Schema" if isinstance(value, dict) and parent_key in _SCHEMA_KEYS else "Scalar"
+
+
+def _is_example_value_descendant(parts: list[str]) -> bool:
+    for index, part in enumerate(parts):
+        if part not in {"example", "default", "value"}:
+            continue
+        if "examples" in parts[:index] or "content" in parts[:index]:
+            return True
+    return False
 
 
 def _component_kind(section: str) -> str:

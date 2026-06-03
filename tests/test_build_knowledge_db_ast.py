@@ -14,7 +14,11 @@ import pytest
 import real_ladybug as lb
 
 from hpe_networking_central_mcp.compiler.ast_builder import UnknownKeywordError
-from hpe_networking_central_mcp.compiler.frontend import ResolvedSpec, resolve_spec
+from hpe_networking_central_mcp.compiler.frontend import (
+    ResolutionFailure,
+    ResolvedSpec,
+    resolve_spec,
+)
 
 pytestmark = [pytest.mark.compiler, pytest.mark.unit]
 
@@ -49,6 +53,22 @@ def _oas_spec() -> dict:
             "/pets": {
                 "get": {
                     "operationId": "listPets",
+                    "parameters": [
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "schema": {"type": "integer"},
+                        }
+                    ],
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Pet",
+                                }
+                            }
+                        }
+                    },
                     "responses": {
                         "200": {
                             "description": "ok",
@@ -90,22 +110,84 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
     stats = mod._build_ast_artifact(
         ast_db_path,
         [_resolved()],
-        task1_failed_count=2,
+        task1_failures=[
+            ResolutionFailure(
+                source="unit/bad",
+                title="Bad",
+                error="strict validation failed",
+                error_type="validation",
+            ),
+            ResolutionFailure(
+                source="unit/broken",
+                title="Broken",
+                error="ref resolution failed",
+                error_type="resolution",
+            ),
+        ],
     )
 
     assert stats["enabled"] is True
     assert stats["db_path"] == "knowledge_db_ast"
+    assert stats["raw_spec_count"] == 3
+    assert stats["task1_resolved_count"] == 1
     assert stats["spec_count"] == 1
     assert stats["task1_failed_count"] == 2
+    assert stats["task1_failures"] == [
+        {
+            "source": "unit/bad",
+            "title": "Bad",
+            "error_type": "validation",
+            "error": "strict validation failed",
+        },
+        {
+            "source": "unit/broken",
+            "title": "Broken",
+            "error_type": "resolution",
+            "error": "ref resolution failed",
+        },
+    ]
     assert stats["node_count"] > 0
     assert stats["child_edge_count"] > 0
-    assert stats["ref_edge_count"] == 1
+    assert stats["ref_edge_count"] == 2
+    assert stats["semantic"]["graph_count"] == 1
     assert stats["semantic"]["node_count"] > 0
     assert stats["semantic"]["edge_count"] > 0
     assert stats["semantic"]["derived_from_ast_edge_count"] > 0
     assert stats["semantic"]["rule_packs"] == ["semantic.structural.v1"]
     assert stats["semantic"]["metrics"]["node_kind_counts"]["ApiEndpoint"] == 1
+    assert stats["semantic"]["metrics"]["node_kind_counts"]["Parameter"] == 1
+    assert stats["semantic"]["metrics"]["node_kind_counts"]["RequestBody"] == 1
+    assert stats["semantic"]["metrics"]["node_kind_counts"]["Response"] == 1
+    assert stats["semantic"]["metrics"]["edge_kind_counts"]["BODY_REFERENCES"] == 1
+    assert stats["semantic"]["metrics"]["edge_kind_counts"]["HAS_PARAMETER"] == 1
+    assert stats["semantic"]["metrics"]["edge_kind_counts"]["HAS_REQUEST_BODY"] == 1
+    assert stats["semantic"]["metrics"]["edge_kind_counts"]["HAS_RESPONSE"] == 1
+    assert stats["semantic"]["metrics"]["edge_kind_counts"]["RESPONSE_REFERENCES"] == 1
     assert stats["semantic"]["metrics"]["edge_kind_counts"]["RETURNS_SCHEMA"] == 1
+    assert stats["semantic"]["metrics"]["carry_through"] == {
+        "raw_spec_count": 3,
+        "task1_resolved_count": 1,
+        "task1_failed_count": 2,
+        "ast_graph_count": 1,
+        "semantic_graph_count": 1,
+        "resolved_to_ast_ratio": 1.0,
+        "raw_to_semantic_ratio": 0.3333,
+    }
+    assert stats["semantic"]["metrics"]["coverage"]["endpoints_with_parameters"] == {
+        "count": 1,
+        "total": 1,
+        "ratio": 1.0,
+    }
+    assert stats["semantic"]["metrics"]["coverage"]["endpoints_with_request_bodies"] == {
+        "count": 1,
+        "total": 1,
+        "ratio": 1.0,
+    }
+    assert stats["semantic"]["metrics"]["coverage"]["endpoints_with_responses"] == {
+        "count": 1,
+        "total": 1,
+        "ratio": 1.0,
+    }
     assert stats["semantic"]["metrics"]["coverage"]["endpoints_returning_schema"] == {
         "count": 1,
         "total": 1,
@@ -148,7 +230,12 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
                 "key": "$ref",
                 "ref": "#/components/schemas/Pet",
                 "target_kind": "Schema",
-            }
+            },
+            {
+                "key": "$ref",
+                "ref": "#/components/schemas/Pet",
+                "target_kind": "Schema",
+            },
         ]
         semantic_rows = list(
             conn.execute(
@@ -159,10 +246,57 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
                 """
             ).rows_as_dict()
         )
-        assert semantic_rows == [
+        assert {
+            (row["endpoint"], row["edge_kind"], row["schema"])
+            for row in semantic_rows
+        } == {
+            ("GET /pets", "ACCEPTS_SCHEMA", "Pet"),
+            ("GET /pets", "RETURNS_SCHEMA", "Pet"),
+        }
+        traversal_rows = list(
+            conn.execute(
+                """
+                MATCH (e:SemanticNode {kind: 'ApiEndpoint'})
+                      -[:SEMANTIC_EDGE]->(body:SemanticNode {kind: 'RequestBody'})
+                      -[edge:SEMANTIC_EDGE]->(schema:SemanticNode {kind: 'SchemaComponent'})
+                WHERE edge.kind = 'BODY_REFERENCES'
+                RETURN e.name AS endpoint, body.kind AS body_kind, schema.name AS schema
+                """
+            ).rows_as_dict()
+        )
+        assert traversal_rows == [
             {
                 "endpoint": "GET /pets",
-                "edge_kind": "RETURNS_SCHEMA",
+                "body_kind": "RequestBody",
+                "schema": "Pet",
+            }
+        ]
+        parameter_rows = list(
+            conn.execute(
+                """
+                MATCH (e:SemanticNode {kind: 'ApiEndpoint'})
+                      -[edge:SEMANTIC_EDGE]->(p:SemanticNode {kind: 'Parameter'})
+                WHERE edge.kind = 'HAS_PARAMETER'
+                RETURN e.name AS endpoint, p.name AS parameter
+                """
+            ).rows_as_dict()
+        )
+        assert parameter_rows == [{"endpoint": "GET /pets", "parameter": "limit"}]
+        response_rows = list(
+            conn.execute(
+                """
+                MATCH (e:SemanticNode {kind: 'ApiEndpoint'})
+                      -[:SEMANTIC_EDGE]->(response:SemanticNode {kind: 'Response'})
+                      -[edge:SEMANTIC_EDGE]->(schema:SemanticNode {kind: 'SchemaComponent'})
+                WHERE edge.kind = 'RESPONSE_REFERENCES'
+                RETURN e.name AS endpoint, response.kind AS response_kind, schema.name AS schema
+                """
+            ).rows_as_dict()
+        )
+        assert response_rows == [
+            {
+                "endpoint": "GET /pets",
+                "response_kind": "Response",
                 "schema": "Pet",
             }
         ]
@@ -209,7 +343,7 @@ def test_build_ast_artifact_fails_when_resolved_spec_cannot_build(
         mod._build_ast_artifact(
             repo_tmp_path / "knowledge_db_ast",
             [_resolved()],
-            task1_failed_count=0,
+            task1_failures=[],
         )
 
 
@@ -267,7 +401,7 @@ def test_real_central_stride_builds_ast_artifact(
     stats = mod._build_ast_artifact(
         repo_tmp_path / "knowledge_db_ast",
         resolved,
-        task1_failed_count=0,
+        task1_failures=[],
     )
     assert stats["spec_count"] == len(resolved)
     assert stats["node_count"] > 0

@@ -27,37 +27,64 @@ def _semantic_spec() -> dict:
         "info": {"title": "Semantic", "version": "1.0"},
         "paths": {
             "/ntp": {
+                "parameters": [
+                    {
+                        "name": "device_id",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string"},
+                    }
+                ],
                 "post": {
                     "operationId": "setNtp",
                     "summary": "Configure NTP",
+                    "parameters": [
+                        {"$ref": "#/components/parameters/SiteParam"},
+                    ],
                     "x-cliParam": {
                         "commandName": "ntp server",
                         "commandUse": "configuration",
                         "paramKeys": [{"key": "server"}],
                     },
-                    "requestBody": {
-                        "required": True,
-                        "content": {
-                            "application/json": {
-                                "schema": {"$ref": "#/components/schemas/NtpProfile"}
-                            }
-                        },
-                    },
+                    "requestBody": {"$ref": "#/components/requestBodies/NtpBody"},
                     "responses": {
                         "200": {
                             "description": "ok",
                             "content": {
                                 "application/json": {
                                     "schema": {"$ref": "#/components/schemas/NtpResponse"}
+                                },
+                                "application/problem+json": {
+                                    "schema": {"$ref": "#/components/schemas/NtpError"}
                                 }
                             },
-                        }
+                        },
+                        "204": {"description": "No content"},
                     },
                 }
             }
         },
         "components": {
+            "parameters": {
+                "SiteParam": {
+                    "name": "site_id",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"$ref": "#/components/schemas/SiteId"},
+                }
+            },
+            "requestBodies": {
+                "NtpBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/NtpProfile"}
+                        }
+                    },
+                }
+            },
             "schemas": {
+                "SiteId": {"type": "string", "format": "uuid"},
                 "BaseConfig": {
                     "type": "object",
                     "properties": {
@@ -88,6 +115,10 @@ def _semantic_spec() -> dict:
                     "type": "object",
                     "properties": {"id": {"type": "string"}},
                 },
+                "NtpError": {
+                    "type": "object",
+                    "properties": {"message": {"type": "string"}},
+                },
             }
         },
     }
@@ -114,6 +145,12 @@ def test_semantic_overlay_builds_agent_highways() -> None:
         nodes_by_kind.setdefault(node.kind, []).append(node)
     assert {node.name for node in nodes_by_kind["ApiEndpoint"]} == {"POST /ntp"}
     assert {node.name for node in nodes_by_kind["CliCommand"]} == {"ntp server"}
+    assert {node.name for node in nodes_by_kind["Parameter"]} == {
+        "device_id",
+        "site_id",
+    }
+    assert len(nodes_by_kind["RequestBody"]) == 1
+    assert len(nodes_by_kind["Response"]) == 3
     assert {node.name for node in nodes_by_kind["YangPath"]} == {
         "/ac-ntp:ntp/ac-ntp:enabled",
         "/ac-ntp:ntp/ac-ntp:server",
@@ -127,8 +164,18 @@ def test_semantic_overlay_builds_agent_highways() -> None:
         )
         for edge in semantic.edges
     }
+    assert ("POST /ntp", "HAS_PARAMETER", "device_id") in edge_tuples
+    assert ("POST /ntp", "HAS_PARAMETER", "site_id") in edge_tuples
+    assert ("site_id", "PARAMETER_REFERENCES", "SiteId") in edge_tuples
+    assert ("POST /ntp", "HAS_REQUEST_BODY", "POST /ntp requestBody") in edge_tuples
+    assert ("POST /ntp requestBody", "BODY_REFERENCES", "NtpProfile") in edge_tuples
+    assert ("POST /ntp", "HAS_RESPONSE", "POST /ntp 200") in edge_tuples
+    assert ("POST /ntp", "HAS_RESPONSE", "POST /ntp 204") in edge_tuples
+    assert ("POST /ntp 200", "RESPONSE_REFERENCES", "NtpResponse") in edge_tuples
+    assert ("POST /ntp 200", "RESPONSE_REFERENCES", "NtpError") in edge_tuples
     assert ("POST /ntp", "ACCEPTS_SCHEMA", "NtpProfile") in edge_tuples
     assert ("POST /ntp", "RETURNS_SCHEMA", "NtpResponse") in edge_tuples
+    assert ("POST /ntp", "RETURNS_SCHEMA", "NtpError") in edge_tuples
     assert ("POST /ntp", "HAS_CLI_COMMAND", "ntp server") in edge_tuples
     assert ("POST /ntp", "CONFIGURES_YANG", "/ac-ntp:ntp/ac-ntp:server") in edge_tuples
     # "0" is the index-based name of the first allOf branch, the BaseConfig ref.
@@ -154,8 +201,31 @@ def test_semantic_metrics_report_catalog_coverage_ratios() -> None:
     metrics = compute_semantic_metrics([semantic])
 
     assert metrics["node_kind_counts"]["ApiEndpoint"] == 2
+    assert metrics["node_kind_counts"]["Parameter"] == 2
+    assert metrics["node_kind_counts"]["RequestBody"] == 1
+    assert metrics["node_kind_counts"]["Response"] == 4
     assert metrics["edge_kind_counts"]["ACCEPTS_SCHEMA"] == 1
-    assert metrics["edge_kind_counts"]["RETURNS_SCHEMA"] == 1
+    assert metrics["edge_kind_counts"]["BODY_REFERENCES"] == 1
+    assert metrics["edge_kind_counts"]["HAS_PARAMETER"] == 2
+    assert metrics["edge_kind_counts"]["HAS_REQUEST_BODY"] == 1
+    assert metrics["edge_kind_counts"]["HAS_RESPONSE"] == 4
+    assert metrics["edge_kind_counts"]["RESPONSE_REFERENCES"] == 2
+    assert metrics["edge_kind_counts"]["RETURNS_SCHEMA"] == 2
+    assert metrics["coverage"]["endpoints_with_parameters"] == {
+        "count": 1,
+        "total": 2,
+        "ratio": 0.5,
+    }
+    assert metrics["coverage"]["endpoints_with_request_bodies"] == {
+        "count": 1,
+        "total": 2,
+        "ratio": 0.5,
+    }
+    assert metrics["coverage"]["endpoints_with_responses"] == {
+        "count": 2,
+        "total": 2,
+        "ratio": 1.0,
+    }
     assert metrics["coverage"]["endpoints_accepting_schema"] == {
         "count": 1,
         "total": 2,

@@ -31,6 +31,7 @@ from hpe_networking_central_mcp.compiler.ast_writer import (  # noqa: E402
     build_ast_database,
 )
 from hpe_networking_central_mcp.compiler.frontend import (  # noqa: E402
+    ResolutionFailure,
     ResolvedSpec,
     resolve_specs,
 )
@@ -213,24 +214,40 @@ def _build_ast_artifact(
     ast_db_path: Path,
     resolved_specs: list[ResolvedSpec],
     *,
-    task1_failed_count: int,
+    task1_failures: list[ResolutionFailure] | None = None,
 ) -> dict:
     """Build the L1 OpenAPI AST artifact from Task 1 resolved specs."""
     if ast_db_path.exists():
         shutil.rmtree(ast_db_path)
 
+    task1_failures = task1_failures or []
+    task1_failed_count = len(task1_failures)
+    task1_resolved_count = len(resolved_specs)
+    raw_spec_count = task1_resolved_count + task1_failed_count
     graphs = []
     semantic_graphs = []
     stats = {
         "enabled": True,
         "db_path": ast_db_path.name,
+        "raw_spec_count": raw_spec_count,
+        "task1_resolved_count": task1_resolved_count,
+        "task1_failed_count": task1_failed_count,
+        "task1_failures": [
+            {
+                "source": f.source,
+                "title": f.title,
+                "error_type": f.error_type,
+                "error": f.error[:500],
+            }
+            for f in task1_failures[:50]
+        ],
         "spec_count": 0,
         "node_count": 0,
         "child_edge_count": 0,
         "ref_edge_count": 0,
-        "task1_failed_count": task1_failed_count,
         "semantic": {
             "enabled": True,
+            "graph_count": 0,
             "rule_packs": [],
             "node_count": 0,
             "edge_count": 0,
@@ -249,6 +266,7 @@ def _build_ast_artifact(
         stats["node_count"] += len(graph.nodes)
         stats["child_edge_count"] += len(graph.child_edges)
         stats["ref_edge_count"] += len(graph.ref_edges)
+        stats["semantic"]["graph_count"] += 1
         stats["semantic"]["node_count"] += len(semantic_graph.nodes)
         stats["semantic"]["edge_count"] += len(semantic_graph.edges)
         stats["semantic"]["derived_from_ast_edge_count"] += len(
@@ -258,6 +276,15 @@ def _build_ast_artifact(
 
     stats["semantic"]["rule_packs"] = sorted(rule_packs)
     stats["semantic"]["metrics"] = compute_semantic_metrics(semantic_graphs)
+    stats["semantic"]["metrics"]["carry_through"] = {
+        "raw_spec_count": raw_spec_count,
+        "task1_resolved_count": task1_resolved_count,
+        "task1_failed_count": task1_failed_count,
+        "ast_graph_count": stats["spec_count"],
+        "semantic_graph_count": stats["semantic"]["graph_count"],
+        "resolved_to_ast_ratio": _ratio(stats["spec_count"], task1_resolved_count),
+        "raw_to_semantic_ratio": _ratio(stats["semantic"]["graph_count"], raw_spec_count),
+    }
     build_ast_database(ast_db_path, graphs, buffer_pool_size=_DB_BUFFER_POOL_SIZE)
     write_semantic_database(
         ast_db_path,
@@ -265,6 +292,12 @@ def _build_ast_artifact(
         buffer_pool_size=_DB_BUFFER_POOL_SIZE,
     )
     return stats
+
+
+def _ratio(count: int, total: int) -> float:
+    if total <= 0:
+        return 0.0
+    return round(count / total, 4)
 
 
 def _create_release_archives(
@@ -977,7 +1010,7 @@ def main() -> None:
         ast_stats = _build_ast_artifact(
             ast_db_path,
             task1.resolved,
-            task1_failed_count=len(task1.failed),
+            task1_failures=task1.failed,
         )
     except Exception:
         db.close()
