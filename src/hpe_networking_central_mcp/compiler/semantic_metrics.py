@@ -86,11 +86,6 @@ def compute_semantic_metrics(graphs: list[SemanticGraph]) -> dict[str, Any]:
         "total_nodes": total_nodes,
         "total_edges": total_edges,
         "coverage": {
-            "specs_with_semantic_graph": {
-                "count": len(graphs),
-                "total": len(graphs),
-                "ratio": _ratio(len(graphs), len(graphs)),
-            },
             "semantic_nodes_with_ast_provenance": {
                 "count": len(node_ids_with_provenance),
                 "total": total_nodes,

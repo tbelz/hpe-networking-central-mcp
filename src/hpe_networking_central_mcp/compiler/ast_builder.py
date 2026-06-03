@@ -631,11 +631,29 @@ def _array_item_kind(
 
 
 def _is_example_value_descendant(parts: list[str]) -> bool:
+    dynamic_map_parents = {
+        "$defs",
+        "callbacks",
+        "components",
+        "definitions",
+        "examples",
+        "headers",
+        "links",
+        "parameters",
+        "pathItems",
+        "properties",
+        "requestBodies",
+        "responses",
+        "schemas",
+    }
     for index, part in enumerate(parts):
-        if part not in {"example", "default", "value"}:
-            continue
-        if "examples" in parts[:index] or "content" in parts[:index]:
+        if part == "value" and index >= 2 and parts[index - 2] == "examples":
             return True
+        if part not in {"example", "default"}:
+            continue
+        if index > 0 and parts[index - 1] in dynamic_map_parents:
+            continue
+        return True
     return False
 
 

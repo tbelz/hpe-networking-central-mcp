@@ -30,8 +30,8 @@ def _semantic_spec() -> dict:
                 "parameters": [
                     {
                         "name": "device_id",
-                        "in": "path",
-                        "required": True,
+                        "in": "query",
+                        "required": False,
                         "schema": {"type": "string"},
                     }
                 ],
@@ -156,23 +156,39 @@ def test_semantic_overlay_builds_agent_highways() -> None:
         "/ac-ntp:ntp/ac-ntp:server",
     }
 
+    node_by_id = {node.semantic_id: node for node in semantic.nodes}
     edge_tuples = {
         (
-            next(n.name for n in semantic.nodes if n.semantic_id == edge.source_id),
+            node_by_id[edge.source_id].name,
             edge.kind,
-            next(n.name for n in semantic.nodes if n.semantic_id == edge.target_id),
+            node_by_id[edge.target_id].name,
         )
         for edge in semantic.edges
+    }
+    response_by_media = {
+        json.loads(node.summary_json)["contentType"]: node
+        for node in nodes_by_kind["Response"]
+        if json.loads(node.summary_json)["status"] == "200"
+    }
+    response_reference_edges = {
+        (
+            json.loads(node_by_id[edge.source_id].summary_json)["contentType"],
+            node_by_id[edge.target_id].name,
+        )
+        for edge in semantic.edges
+        if edge.kind == "RESPONSE_REFERENCES"
+        and node_by_id[edge.source_id].kind == "Response"
     }
     assert ("POST /ntp", "HAS_PARAMETER", "device_id") in edge_tuples
     assert ("POST /ntp", "HAS_PARAMETER", "site_id") in edge_tuples
     assert ("site_id", "PARAMETER_REFERENCES", "SiteId") in edge_tuples
     assert ("POST /ntp", "HAS_REQUEST_BODY", "POST /ntp requestBody") in edge_tuples
     assert ("POST /ntp requestBody", "BODY_REFERENCES", "NtpProfile") in edge_tuples
+    assert set(response_by_media) == {"application/json", "application/problem+json"}
     assert ("POST /ntp", "HAS_RESPONSE", "POST /ntp 200") in edge_tuples
     assert ("POST /ntp", "HAS_RESPONSE", "POST /ntp 204") in edge_tuples
-    assert ("POST /ntp 200", "RESPONSE_REFERENCES", "NtpResponse") in edge_tuples
-    assert ("POST /ntp 200", "RESPONSE_REFERENCES", "NtpError") in edge_tuples
+    assert ("application/json", "NtpResponse") in response_reference_edges
+    assert ("application/problem+json", "NtpError") in response_reference_edges
     assert ("POST /ntp", "ACCEPTS_SCHEMA", "NtpProfile") in edge_tuples
     assert ("POST /ntp", "RETURNS_SCHEMA", "NtpResponse") in edge_tuples
     assert ("POST /ntp", "RETURNS_SCHEMA", "NtpError") in edge_tuples
@@ -188,6 +204,36 @@ def test_semantic_overlay_builds_agent_highways() -> None:
     assert summary["x-supportedDeviceType"] == ["Switch CX"]
     assert server.ast_node_id
     assert any(edge.semantic_id == server.semantic_id for edge in semantic.derived_edges)
+
+
+def test_operation_parameter_overrides_path_item_parameter() -> None:
+    spec = _semantic_spec()
+    operation = spec["paths"]["/ntp"]["post"]
+    spec["paths"]["/ntp"]["parameters"] = [
+        {
+            "name": "site_id",
+            "in": "query",
+            "schema": {"type": "string"},
+        }
+    ]
+    operation["parameters"] = [
+        {
+            "name": "site_id",
+            "in": "query",
+            "schema": {"$ref": "#/components/schemas/SiteId"},
+        }
+    ]
+
+    semantic = build_semantic_overlay(build_ast_graph(spec, source="unit/override"))
+    site_param = next(
+        node
+        for node in semantic.nodes
+        if node.kind == "Parameter" and node.name == "site_id"
+    )
+    summary = json.loads(site_param.summary_json)
+
+    assert summary["targetPointer"] == "/components/schemas/SiteId"
+    assert summary["schemaPointer"] == "/paths/~1ntp/post/parameters/0/schema"
 
 
 def test_internal_ref_pointer_preserves_escaped_json_pointer_tokens() -> None:

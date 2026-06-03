@@ -365,7 +365,7 @@ def _add_parameter_edges(
     operation: dict[str, Any],
     op_pointer: str,
 ) -> None:
-    seen: set[tuple[str, str]] = set()
+    merged: dict[tuple[str, str], tuple[dict[str, Any], str, str]] = {}
     for owner, params in (
         (_parent_pointer(op_pointer), path_item.get("parameters")),
         (op_pointer, operation.get("parameters")),
@@ -387,60 +387,61 @@ def _add_parameter_edges(
             location = _as_str(body.get("in"))
             if not name or not location:
                 continue
-            dedupe_key = (location, name)
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
-            schema = body.get("schema")
-            schema_pointer = (
-                _join_pointer(body_pointer, "schema")
-                if isinstance(schema, dict)
-                else ""
-            )
-            target_pointer = (
-                _schema_type_pointer(schema, schema_pointer)
-                if isinstance(schema, dict)
-                else ""
-            )
-            node = state.add_node(
-                kind="Parameter",
-                stable_key=f"parameter:{endpoint.stable_key}:{location}:{name}",
-                name=name,
-                ast_pointer=body_pointer,
-                summary={
-                    "description": _as_str(body.get("description")),
-                    "format": _as_str(schema.get("format")) if isinstance(schema, dict) else "",
-                    "in": location,
-                    "name": name,
-                    "required": bool(body.get("required")),
+            merged[(location, name)] = (body, body_pointer, param_pointer)
+
+    for body, body_pointer, param_pointer in merged.values():
+        name = _as_str(body.get("name"))
+        location = _as_str(body.get("in"))
+        schema = body.get("schema")
+        schema_pointer = (
+            _join_pointer(body_pointer, "schema")
+            if isinstance(schema, dict)
+            else ""
+        )
+        target_pointer = (
+            _schema_type_pointer(schema, schema_pointer)
+            if isinstance(schema, dict)
+            else ""
+        )
+        node = state.add_node(
+            kind="Parameter",
+            stable_key=f"parameter:{endpoint.stable_key}:{location}:{name}",
+            name=name,
+            ast_pointer=body_pointer,
+            summary={
+                "description": _as_str(body.get("description")),
+                "format": _as_str(schema.get("format")) if isinstance(schema, dict) else "",
+                "in": location,
+                "name": name,
+                "required": bool(body.get("required")),
+                "schemaPointer": schema_pointer,
+                "targetPointer": target_pointer,
+                "type": _schema_type(schema) if isinstance(schema, dict) else "",
+            },
+        )
+        state.add_edge(
+            endpoint,
+            node,
+            kind="HAS_PARAMETER",
+            rule_id=f"{STRUCTURAL_RULE_PACK_ID}.operation.parameter",
+            evidence={
+                "operationPointer": op_pointer,
+                "parameterPointer": body_pointer,
+                "sourcePointer": param_pointer,
+            },
+        )
+        if target_pointer:
+            state.add_edge(
+                node,
+                state.schema_by_pointer.get(target_pointer),
+                kind="PARAMETER_REFERENCES",
+                rule_id=f"{STRUCTURAL_RULE_PACK_ID}.parameter.schema",
+                evidence={
+                    "parameterPointer": body_pointer,
                     "schemaPointer": schema_pointer,
                     "targetPointer": target_pointer,
-                    "type": _schema_type(schema) if isinstance(schema, dict) else "",
                 },
             )
-            state.add_edge(
-                endpoint,
-                node,
-                kind="HAS_PARAMETER",
-                rule_id=f"{STRUCTURAL_RULE_PACK_ID}.operation.parameter",
-                evidence={
-                    "operationPointer": op_pointer,
-                    "parameterPointer": body_pointer,
-                    "sourcePointer": param_pointer,
-                },
-            )
-            if target_pointer:
-                state.add_edge(
-                    node,
-                    state.schema_by_pointer.get(target_pointer),
-                    kind="PARAMETER_REFERENCES",
-                    rule_id=f"{STRUCTURAL_RULE_PACK_ID}.parameter.schema",
-                    evidence={
-                        "parameterPointer": body_pointer,
-                        "schemaPointer": schema_pointer,
-                        "targetPointer": target_pointer,
-                    },
-                )
 
 
 def _add_request_body_edges(
