@@ -227,13 +227,17 @@ jobs:
           NEW_CATS=$(jq -r '.categories | sort | join(",")' build/manifest.json)
           OLD_AST=$(jq -c '.ast // null' /tmp/prev/manifest.json)
           NEW_AST=$(jq -c '.ast // null' build/manifest.json)
+          OLD_COMPILER=$(jq -c '.compiler_projection // null' /tmp/prev/manifest.json)
+          NEW_COMPILER=$(jq -c '.compiler_projection // null' build/manifest.json)
 
           echo "Previous: ${OLD_EP} endpoints, ${OLD_CAT} categories, ${OLD_DOC} docs"
           echo "Current:  ${NEW_EP} endpoints, ${NEW_CAT} categories, ${NEW_DOC} docs"
           echo "Previous AST: ${OLD_AST}"
           echo "Current AST:  ${NEW_AST}"
+          echo "Previous compiler projection: ${OLD_COMPILER}"
+          echo "Current compiler projection:  ${NEW_COMPILER}"
 
-          if [ "$OLD_EP" = "$NEW_EP" ] && [ "$OLD_CAT" = "$NEW_CAT" ] && [ "$OLD_CATS" = "$NEW_CATS" ] && [ "$OLD_DOC" = "$NEW_DOC" ] && [ "$OLD_AST" = "$NEW_AST" ]; then
+          if [ "$OLD_EP" = "$NEW_EP" ] && [ "$OLD_CAT" = "$NEW_CAT" ] && [ "$OLD_CATS" = "$NEW_CATS" ] && [ "$OLD_DOC" = "$NEW_DOC" ] && [ "$OLD_AST" = "$NEW_AST" ] && [ "$OLD_COMPILER" = "$NEW_COMPILER" ]; then
             echo "No changes detected — skipping release."
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
@@ -257,6 +261,7 @@ jobs:
             Contains the API endpoints, VSG documentation sections, and seed scripts the MCP server uses for offline lookups.
           files: |
             build/knowledge_db.tar.gz
+            build/knowledge_db_compiler.tar.gz
             build/knowledge_db_ast.tar.gz
             build/manifest.json
             build/vsg-cache.tar.gz

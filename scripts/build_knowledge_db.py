@@ -35,6 +35,9 @@ from hpe_networking_central_mcp.compiler.frontend import (  # noqa: E402
     ResolvedSpec,
     resolve_specs,
 )
+from hpe_networking_central_mcp.compiler.projection_writer import (  # noqa: E402
+    build_compiler_projection_database,
+)
 from hpe_networking_central_mcp.compiler.semantic_builder import (  # noqa: E402
     build_semantic_overlay,
 )
@@ -215,10 +218,13 @@ def _build_ast_artifact(
     resolved_specs: list[ResolvedSpec],
     *,
     task1_failures: list[ResolutionFailure] | None = None,
+    compiler_projection_db_path: Path | None = None,
 ) -> dict:
     """Build the L1 OpenAPI AST artifact from Task 1 resolved specs."""
     if ast_db_path.exists():
         shutil.rmtree(ast_db_path)
+    if compiler_projection_db_path is not None and compiler_projection_db_path.exists():
+        shutil.rmtree(compiler_projection_db_path)
 
     task1_failures = task1_failures or []
     task1_failed_count = len(task1_failures)
@@ -253,6 +259,10 @@ def _build_ast_artifact(
             "edge_count": 0,
             "derived_from_ast_edge_count": 0,
             "metrics": {},
+        },
+        "compiler_projection": {
+            "enabled": compiler_projection_db_path is not None,
+            "db_path": compiler_projection_db_path.name if compiler_projection_db_path else "",
         },
     }
     rule_packs: set[str] = set()
@@ -291,6 +301,13 @@ def _build_ast_artifact(
         semantic_graphs,
         buffer_pool_size=_DB_BUFFER_POOL_SIZE,
     )
+    if compiler_projection_db_path is not None:
+        stats["compiler_projection"] = build_compiler_projection_database(
+            compiler_projection_db_path,
+            graphs,
+            semantic_graphs,
+            buffer_pool_size=_DB_BUFFER_POOL_SIZE,
+        )
     return stats
 
 
@@ -305,19 +322,28 @@ def _create_release_archives(
     *,
     db_path: Path,
     ast_db_path: Path,
+    compiler_projection_db_path: Path,
     manifest_path: Path,
 ) -> dict[str, Path]:
-    """Create release tarballs for the runtime DB and separate L1 AST DB."""
+    """Create release tarballs for runtime, compiler projection, and L1 AST DBs."""
     tar_path = output_dir / "knowledge_db.tar.gz"
     with tarfile.open(tar_path, "w:gz") as tf:
         tf.add(db_path, arcname="knowledge_db")
         tf.add(manifest_path, arcname="manifest.json")
 
+    compiler_tar_path = output_dir / "knowledge_db_compiler.tar.gz"
+    with tarfile.open(compiler_tar_path, "w:gz") as tf:
+        tf.add(compiler_projection_db_path, arcname="knowledge_db_compiler")
+
     ast_tar_path = output_dir / "knowledge_db_ast.tar.gz"
     with tarfile.open(ast_tar_path, "w:gz") as tf:
         tf.add(ast_db_path, arcname="knowledge_db_ast")
 
-    return {"knowledge_db": tar_path, "knowledge_db_ast": ast_tar_path}
+    return {
+        "knowledge_db": tar_path,
+        "knowledge_db_compiler": compiler_tar_path,
+        "knowledge_db_ast": ast_tar_path,
+    }
 
 
 def _print_build_report(db: lb.Database, schema_stats: dict, violations: list) -> None:
@@ -956,6 +982,7 @@ def main() -> None:
     output_dir: Path = args.output_dir.resolve()
     db_path = output_dir / "knowledge_db"
     ast_db_path = output_dir / "knowledge_db_ast"
+    compiler_projection_db_path = output_dir / "knowledge_db_compiler"
     cache_dir = output_dir / "spec_cache"
 
     # Clean previous build
@@ -1011,6 +1038,7 @@ def main() -> None:
             ast_db_path,
             task1.resolved,
             task1_failures=task1.failed,
+            compiler_projection_db_path=compiler_projection_db_path,
         )
     except Exception:
         db.close()
@@ -1026,6 +1054,11 @@ def main() -> None:
         f"  Semantic overlay: {semantic_stats['node_count']} nodes, "
         f"{semantic_stats['edge_count']} SEMANTIC_EDGE edges, "
         f"{semantic_stats['derived_from_ast_edge_count']} provenance edges"
+    )
+    compiler_projection_stats = ast_stats["compiler_projection"]
+    print(
+        f"  Compiler projection: {compiler_projection_stats['node_count']} typed nodes, "
+        f"{compiler_projection_stats['edge_count']} typed edges"
     )
 
     # 3. Build index and populate
@@ -1113,6 +1146,7 @@ def main() -> None:
         "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "sync_health": sync_health,
         "ast": ast_stats,
+        "compiler_projection": compiler_projection_stats,
     }
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -1122,6 +1156,7 @@ def main() -> None:
     print(f"  Categories: {len(index.categories)}")
     print(f"  Doc sections: {doc_count}")
     print(f"  AST DB: {ast_db_path}")
+    print(f"  Compiler projection DB: {compiler_projection_db_path}")
     print(f"  Manifest: {manifest_path}")
 
     # Optionally tar (include both DB and manifest)
@@ -1130,6 +1165,7 @@ def main() -> None:
             output_dir,
             db_path=db_path,
             ast_db_path=ast_db_path,
+            compiler_projection_db_path=compiler_projection_db_path,
             manifest_path=manifest_path,
         )
         tar_path = archives["knowledge_db"]
@@ -1141,6 +1177,12 @@ def main() -> None:
         print(
             f"✓ AST archive created "
             f"({ast_tar_path.stat().st_size / 1024 / 1024:.1f} MB)"
+        )
+        compiler_tar_path = archives["knowledge_db_compiler"]
+        print(f"\nCompiler projection archive: {compiler_tar_path}")
+        print(
+            f"✓ Compiler projection archive created "
+            f"({compiler_tar_path.stat().st_size / 1024 / 1024:.1f} MB)"
         )
 
 
