@@ -14,11 +14,16 @@ from typing import Any
 import real_ladybug as lb
 
 from .detail_reader import (
+    ProjectionDetailError,
     ProjectionRowNotFoundError,
     fetch_projection_detail,
 )
 
 _DEFAULT_BUFFER_POOL_SIZE = 256 * 1024 * 1024
+
+
+class AmbiguousEndpointError(ProjectionDetailError):
+    """Raised when method/path lookup finds more than one projected endpoint."""
 
 
 def load_endpoint_context(
@@ -86,20 +91,25 @@ def fetch_endpoint_context(
     include_raw: bool = True,
 ) -> dict[str, Any]:
     """Return a deterministic endpoint-centered compiler graph view."""
-    endpoint = _one(
+    endpoints = _rows(
         compiler_conn,
         """
         MATCH (endpoint:ApiEndpoint {method: $method, path: $path})
         RETURN endpoint.endpoint_id AS endpoint_id
-        LIMIT 1
+        ORDER BY endpoint.endpoint_id
         """,
         {"method": method.upper(), "path": path},
     )
-    if endpoint is None:
+    if not endpoints:
         raise ProjectionRowNotFoundError(
             f"No compiler endpoint found for {method.upper()}:{path}"
         )
-    endpoint_id = endpoint["endpoint_id"]
+    if len(endpoints) > 1:
+        endpoint_ids = ", ".join(str(row["endpoint_id"]) for row in endpoints)
+        raise AmbiguousEndpointError(
+            f"Multiple compiler endpoints found for {method.upper()}:{path}: {endpoint_ids}"
+        )
+    endpoint_id = endpoints[0]["endpoint_id"]
     endpoint_detail = _detail(
         compiler_conn,
         ast_conn,
@@ -397,8 +407,3 @@ def _optional_detail(
 
 def _rows(conn, cypher: str, params: dict[str, Any]) -> list[dict[str, Any]]:
     return list(conn.execute(cypher, parameters=params).rows_as_dict())
-
-
-def _one(conn, cypher: str, params: dict[str, Any]) -> dict[str, Any] | None:
-    rows = _rows(conn, cypher, params)
-    return rows[0] if rows else None

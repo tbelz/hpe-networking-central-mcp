@@ -106,9 +106,23 @@ def _build_reader_artifacts(repo_tmp_path: Path) -> tuple[Path, Path]:
                     "type": "object",
                     "properties": {"id": {"type": "string"}},
                 },
+                "DeviceEnvelope": {
+                    "allOf": [
+                        {"$ref": "#/components/schemas/DeviceCreate"},
+                        {
+                            "type": "object",
+                            "properties": {"createdAt": {"type": "string"}},
+                        },
+                    ]
+                },
                 "Tag": {
                     "type": "object",
                     "properties": {"name": {"type": "string"}},
+                },
+                "TagAlias": {"$ref": "#/components/schemas/Tag"},
+                "TagMap": {
+                    "type": "object",
+                    "additionalProperties": {"$ref": "#/components/schemas/Tag"},
                 },
             }
         },
@@ -184,6 +198,38 @@ def test_schema_context_walks_properties_targets_and_raw_detail(
         "/aruba/device/create/serial"
     )
     assert props["tags"]["schema"]["projection_row"]["component_id"] == (
+        "central:schemas:Tag"
+    )
+
+    envelope = load_schema_context(
+        compiler_db_path=compiler_db_path,
+        ast_db_path=ast_db_path,
+        component_id="central:schemas:DeviceEnvelope",
+        buffer_pool_size=64 * 1024 * 1024,
+    )
+    assert [entry["kind"] for entry in envelope["composition"]] == ["allOf", "allOf"]
+    assert any(
+        entry["schema"]["raw_openapi"] == {"$ref": "#/components/schemas/DeviceCreate"}
+        for entry in envelope["composition"]
+    )
+
+    tag_map = load_schema_context(
+        compiler_db_path=compiler_db_path,
+        ast_db_path=ast_db_path,
+        component_id="central:schemas:TagMap",
+        buffer_pool_size=64 * 1024 * 1024,
+    )
+    assert tag_map["value_schemas"][0]["raw_openapi"] == {
+        "$ref": "#/components/schemas/Tag"
+    }
+
+    tag_alias = load_schema_context(
+        compiler_db_path=compiler_db_path,
+        ast_db_path=ast_db_path,
+        component_id="central:schemas:TagAlias",
+        buffer_pool_size=64 * 1024 * 1024,
+    )
+    assert tag_alias["references"][0]["schema"]["projection_row"]["component_id"] == (
         "central:schemas:Tag"
     )
 
