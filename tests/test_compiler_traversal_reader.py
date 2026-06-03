@@ -163,6 +163,11 @@ def test_endpoint_context_walks_compiler_projection_and_raw_detail(
     assert context["parameters"][0]["raw_openapi"]["schema"]["x-parameter-source"] == (
         "path-template"
     )
+    assert context["parameters"][0]["schema"]["raw_openapi"] == {
+        "pattern": "^[A-Z0-9]+$",
+        "type": "string",
+        "x-parameter-source": "path-template",
+    }
     assert context["request_bodies"][0]["schema"]["projection_row"]["component_id"] == (
         "central:schemas:DeviceCreate"
     )
@@ -249,3 +254,4 @@ def test_endpoint_context_can_omit_raw_payloads(repo_tmp_path: Path) -> None:
     assert "raw_openapi" not in context["endpoint"]
     assert "rawJson" not in context["endpoint"]["ast_node"]
     assert "raw_openapi" not in context["parameters"][0]
+    assert "raw_openapi" not in context["parameters"][0]["schema"]

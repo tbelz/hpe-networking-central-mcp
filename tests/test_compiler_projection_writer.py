@@ -40,6 +40,9 @@ def test_projection_materializes_reusable_response_header_and_array_item_ref(
             "/move": {
                 "post": {
                     "operationId": "moveDevices",
+                    "parameters": [
+                        {"$ref": "#/components/parameters/DeviceId"}
+                    ],
                     "requestBody": {
                         "content": {
                             "application/json": {
@@ -58,6 +61,13 @@ def test_projection_materializes_reusable_response_header_and_array_item_ref(
                 "XRateLimitLimitHeader": {
                     "description": "limit",
                     "schema": {"type": "integer"},
+                }
+            },
+            "parameters": {
+                "DeviceId": {
+                    "name": "device_id",
+                    "in": "query",
+                    "schema": {"$ref": "#/components/schemas/ScopeIds"},
                 }
             },
             "responses": {
@@ -141,6 +151,20 @@ def test_projection_materializes_reusable_response_header_and_array_item_ref(
             ).rows_as_dict()
         )
         assert item_type_rows == [
+            {"target_component_id": "central:schemas:ScopeIds"}
+        ]
+
+        parameter_type_rows = list(
+            conn.execute(
+                """
+                MATCH (:ApiEndpoint {endpoint_id: 'POST:/move'})
+                      -[:HAS_PARAMETER]->(param:Parameter {name: 'device_id'})
+                      -[:PARAMETER_REFERENCES]->(target:SchemaComponent)
+                RETURN target.component_id AS target_component_id
+                """
+            ).rows_as_dict()
+        )
+        assert parameter_type_rows == [
             {"target_component_id": "central:schemas:ScopeIds"}
         ]
 

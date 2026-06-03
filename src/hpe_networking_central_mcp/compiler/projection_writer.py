@@ -152,6 +152,12 @@ CREATE NODE TABLE IF NOT EXISTS CompilerProjectionMap (
 )
 """
 
+_PARAMETER_REFERENCES_DDL = """
+CREATE REL TABLE IF NOT EXISTS PARAMETER_REFERENCES (
+    FROM Parameter TO SchemaComponent
+)
+"""
+
 
 def build_compiler_projection_database(
     db_path: Path,
@@ -197,6 +203,7 @@ def write_compiler_projection(
     }
     rels: dict[str, dict[tuple[Any, ...], dict[str, Any]]] = {
         "HAS_PARAMETER": {},
+        "PARAMETER_REFERENCES": {},
         "HAS_REQUEST_BODY": {},
         "HAS_RESPONSE": {},
         "BODY_REFERENCES": {},
@@ -230,6 +237,12 @@ def write_compiler_projection(
     _copy(conn, "CliCommand", list(rows["CliCommand"].values()), _CLI_COMMAND_SCHEMA)
 
     _copy(conn, "HAS_PARAMETER", list(rels["HAS_PARAMETER"].values()), _REL_AB_SCHEMA)
+    _copy(
+        conn,
+        "PARAMETER_REFERENCES",
+        list(rels["PARAMETER_REFERENCES"].values()),
+        _REL_AB_SCHEMA,
+    )
     _copy(conn, "HAS_REQUEST_BODY", list(rels["HAS_REQUEST_BODY"].values()), _REL_AB_SCHEMA)
     _copy(conn, "HAS_RESPONSE", list(rels["HAS_RESPONSE"].values()), _REL_AB_SCHEMA)
     _copy(conn, "BODY_REFERENCES", list(rels["BODY_REFERENCES"].values()), _REL_AB_SCHEMA)
@@ -561,6 +574,7 @@ def _edge_row(
         return None
     if edge.kind in {
         "HAS_PARAMETER",
+        "PARAMETER_REFERENCES",
         "HAS_REQUEST_BODY",
         "HAS_RESPONSE",
         "BODY_REFERENCES",
@@ -591,6 +605,7 @@ def _put_richest(rows: dict[str, dict[str, Any]], key: str, row: dict[str, Any])
 def _apply_projection_schema(conn) -> None:
     for ddl in KNOWLEDGE_NODE_TABLES + KNOWLEDGE_REL_TABLES:
         conn.execute(ddl.strip())
+    conn.execute(_PARAMETER_REFERENCES_DDL.strip())
     conn.execute(_PROJECTION_MAP_DDL.strip())
 
 
