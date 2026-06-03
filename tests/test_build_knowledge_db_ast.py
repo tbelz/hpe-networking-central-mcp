@@ -224,6 +224,7 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
     assert stats["compiler_projection"]["node_kind_counts"]["Property"] == 1
     assert stats["compiler_projection"]["edge_kind_counts"]["HAS_REQUEST_BODY"] == 1
     assert stats["compiler_projection"]["edge_kind_counts"]["BODY_REFERENCES"] == 1
+    assert stats["compiler_projection"]["provenance_count"] > 0
     assert not (ast_db_path / "stale.txt").exists()
     assert not (compiler_db_path / "stale.txt").exists()
     json.dumps({"ast": stats})

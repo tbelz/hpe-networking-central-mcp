@@ -143,5 +143,41 @@ def test_projection_materializes_reusable_response_header_and_array_item_ref(
         assert item_type_rows == [
             {"target_component_id": "central:schemas:ScopeIds"}
         ]
+
+        provenance_rows = list(
+            conn.execute(
+                """
+                MATCH (provenance:CompilerProjectionMap)
+                WHERE provenance.row_id = 'central:headers:XRateLimitLimitHeader'
+                   OR provenance.row_id = 'central:schemas:DeviceMove#prop:items'
+                RETURN provenance.table_name AS table_name,
+                       provenance.row_id AS row_id,
+                       provenance.semantic_id AS semantic_id,
+                       provenance.ast_node_id AS ast_node_id,
+                       provenance.json_pointer AS json_pointer
+                ORDER BY provenance.row_id
+                """
+            ).rows_as_dict()
+        )
+        assert provenance_rows == [
+            {
+                "table_name": "SchemaComponent",
+                "row_id": "central:headers:XRateLimitLimitHeader",
+                "semantic_id": "",
+                "ast_node_id": ast.spec_id + "#/components/headers/XRateLimitLimitHeader",
+                "json_pointer": "/components/headers/XRateLimitLimitHeader",
+            },
+            {
+                "table_name": "Property",
+                "row_id": "central:schemas:DeviceMove#prop:items",
+                "semantic_id": next(
+                    node.semantic_id
+                    for node in semantic.nodes
+                    if node.kind == "Property" and node.name == "items"
+                ),
+                "ast_node_id": ast.spec_id + "#/components/schemas/DeviceMove/properties/items",
+                "json_pointer": "/components/schemas/DeviceMove/properties/items",
+            },
+        ]
     finally:
         db.close()

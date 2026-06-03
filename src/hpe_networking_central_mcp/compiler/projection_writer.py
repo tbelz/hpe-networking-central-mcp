@@ -127,6 +127,31 @@ _REL_REFERENCES_SCHEMA = pa.schema([
     ("via", pa.string()),
 ])
 
+_PROJECTION_MAP_SCHEMA = pa.schema([
+    ("projection_id", pa.string()),
+    ("table_name", pa.string()),
+    ("row_id", pa.string()),
+    ("semantic_id", pa.string()),
+    ("ast_node_id", pa.string()),
+    ("json_pointer", pa.string()),
+    ("spec_id", pa.string()),
+    ("source", pa.string()),
+])
+
+_PROJECTION_MAP_DDL = """
+CREATE NODE TABLE IF NOT EXISTS CompilerProjectionMap (
+    projection_id STRING,
+    table_name    STRING,
+    row_id        STRING,
+    semantic_id   STRING,
+    ast_node_id   STRING,
+    json_pointer  STRING,
+    spec_id       STRING,
+    source        STRING,
+    PRIMARY KEY (projection_id)
+)
+"""
+
 
 def build_compiler_projection_database(
     db_path: Path,
@@ -186,12 +211,13 @@ def write_compiler_projection(
         "HAS_CLI_COMMAND": {},
         "IN_MODULE": {},
     }
+    provenance_rows: dict[str, dict[str, Any]] = {}
     ast_by_spec = {graph.spec_id: graph for graph in ast_graphs}
     for semantic in semantic_graphs:
         ast = ast_by_spec.get(semantic.spec_id)
         if ast is None:
             continue
-        _collect_graph_rows(ast, semantic, rows, rels)
+        _collect_graph_rows(ast, semantic, rows, rels, provenance_rows)
 
     _copy(conn, "ApiEndpoint", list(rows["ApiEndpoint"].values()), _ENDPOINT_SCHEMA)
     _copy(conn, "Parameter", list(rows["Parameter"].values()), _PARAM_SCHEMA)
@@ -217,11 +243,13 @@ def write_compiler_projection(
     _copy(conn, "CONFIGURES_YANG", list(rels["CONFIGURES_YANG"].values()), _REL_AB_SCHEMA)
     _copy(conn, "HAS_CLI_COMMAND", list(rels["HAS_CLI_COMMAND"].values()), _REL_AB_SCHEMA)
     _copy(conn, "IN_MODULE", list(rels["IN_MODULE"].values()), _REL_AB_SCHEMA)
+    _copy(conn, "CompilerProjectionMap", list(provenance_rows.values()), _PROJECTION_MAP_SCHEMA)
 
     return {
         "enabled": True,
         "node_count": sum(len(v) for v in rows.values()),
         "edge_count": sum(len(v) for v in rels.values()),
+        "provenance_count": len(provenance_rows),
         "node_kind_counts": {
             table: len(table_rows)
             for table, table_rows in sorted(rows.items())
@@ -240,16 +268,18 @@ def _collect_graph_rows(
     semantic: SemanticGraph,
     rows: dict[str, dict[str, dict[str, Any]]],
     rels: dict[str, dict[tuple[Any, ...], dict[str, Any]]],
+    provenance_rows: dict[str, dict[str, Any]],
 ) -> None:
     nodes = {node.semantic_id: node for node in semantic.nodes}
     summaries = {node.semantic_id: _load_summary(node) for node in semantic.nodes}
+    ast_by_pointer = {node.json_pointer: node for node in ast.nodes}
     raw_by_pointer = {node.json_pointer: node.raw_json for node in ast.nodes}
     typed_ids: dict[str, str] = {}
     endpoint_parent: dict[str, str] = {}
     schema_parent: dict[str, str] = {}
     schema_refs: dict[str, str] = {}
 
-    _collect_reusable_component_rows(ast, rows)
+    _collect_reusable_component_rows(ast, rows, provenance_rows, ast_by_pointer)
 
     for edge in semantic.edges:
         if edge.kind in {"HAS_PARAMETER", "HAS_REQUEST_BODY", "HAS_RESPONSE", "HAS_CLI_COMMAND"}:
@@ -284,6 +314,7 @@ def _collect_graph_rows(
                 "requestBody": "",
                 "responses": "",
             }
+            _add_projection_provenance(provenance_rows, "ApiEndpoint", typed_id, node, ast)
         elif node.kind == "Parameter":
             endpoint_id = typed_ids.get(endpoint_parent.get(node.semantic_id, ""))
             if endpoint_id:
@@ -300,6 +331,7 @@ def _collect_graph_rows(
                     "inferredHint": _str(summary.get("inferredHint")),
                     "description": _str(summary.get("description")),
                 }
+                _add_projection_provenance(provenance_rows, "Parameter", typed_id, node, ast)
         elif node.kind == "RequestBody":
             endpoint_id = typed_ids.get(endpoint_parent.get(node.semantic_id, ""))
             if endpoint_id:
@@ -311,6 +343,7 @@ def _collect_graph_rows(
                     "required": bool(summary.get("required")),
                     "root_component_ref": target_id or "",
                 }
+                _add_projection_provenance(provenance_rows, "RequestBody", typed_id, node, ast)
         elif node.kind == "Response":
             endpoint_id = typed_ids.get(endpoint_parent.get(node.semantic_id, ""))
             if endpoint_id:
@@ -322,9 +355,17 @@ def _collect_graph_rows(
                     "content_type": _str(summary.get("contentType")),
                     "root_component_ref": target_id or "",
                 }
+                _add_projection_provenance(provenance_rows, "Response", typed_id, node, ast)
         elif node.kind == "SchemaComponent":
             row = _schema_row(ast, node, summary, typed_id, raw_by_pointer)
             _put_richest(rows["SchemaComponent"], typed_id, row)
+            _add_projection_provenance(
+                provenance_rows,
+                "SchemaComponent",
+                typed_id,
+                node,
+                ast,
+            )
         elif node.kind == "Property":
             parent_id = typed_ids.get(schema_parent.get(node.semantic_id, ""))
             if parent_id:
@@ -342,9 +383,11 @@ def _collect_graph_rows(
                     "extensionsJson": _json(summary.get("xExtensions", {})),
                     "readOnly": bool(summary.get("readOnly")),
                 }
+                _add_projection_provenance(provenance_rows, "Property", typed_id, node, ast)
         elif node.kind == "YangPath":
             module = _str(summary.get("module"))
             rows["YangPath"][typed_id] = {"yangPath": typed_id, "module": module}
+            _add_projection_provenance(provenance_rows, "YangPath", typed_id, node, ast)
             if module:
                 rows["YangModule"][module] = {"module": module}
                 rels["IN_MODULE"][(typed_id, module)] = {"a": typed_id, "b": module}
@@ -359,6 +402,7 @@ def _collect_graph_rows(
                     "pathToPrint": _str(summary.get("pathToPrint")),
                     "paramKeys": _string_list(summary.get("paramKeys")),
                 }
+                _add_projection_provenance(provenance_rows, "CliCommand", typed_id, node, ast)
 
     for edge in semantic.edges:
         row = _edge_row(edge, nodes, typed_ids)
@@ -463,6 +507,8 @@ def _schema_row(
 def _collect_reusable_component_rows(
     ast: AstGraph,
     rows: dict[str, dict[str, dict[str, Any]]],
+    provenance_rows: dict[str, dict[str, Any]],
+    ast_by_pointer: dict[str, Any],
 ) -> None:
     components = ast.spec.get("components")
     if not isinstance(components, dict):
@@ -490,6 +536,16 @@ def _collect_reusable_component_rows(
                 "bodyJson": _raw_json_for(ast, pointer, body),
             }
             _put_richest(rows["SchemaComponent"], component_id, row)
+            ast_node = ast_by_pointer.get(pointer)
+            _add_projection_provenance(
+                provenance_rows,
+                "SchemaComponent",
+                component_id,
+                None,
+                ast,
+                ast_node_id=ast_node.node_id if ast_node is not None else "",
+                json_pointer=pointer,
+            )
 
 
 def _edge_row(
@@ -535,6 +591,30 @@ def _put_richest(rows: dict[str, dict[str, Any]], key: str, row: dict[str, Any])
 def _apply_projection_schema(conn) -> None:
     for ddl in KNOWLEDGE_NODE_TABLES + KNOWLEDGE_REL_TABLES:
         conn.execute(ddl.strip())
+    conn.execute(_PROJECTION_MAP_DDL.strip())
+
+
+def _add_projection_provenance(
+    rows: dict[str, dict[str, Any]],
+    table_name: str,
+    row_id: str,
+    node: SemanticNode | None,
+    ast: AstGraph,
+    *,
+    ast_node_id: str = "",
+    json_pointer: str = "",
+) -> None:
+    projection_id = f"{table_name}:{row_id}"
+    rows[projection_id] = {
+        "projection_id": projection_id,
+        "table_name": table_name,
+        "row_id": row_id,
+        "semantic_id": node.semantic_id if node is not None else "",
+        "ast_node_id": node.ast_node_id if node is not None else ast_node_id,
+        "json_pointer": node.json_pointer if node is not None else json_pointer,
+        "spec_id": ast.spec_id,
+        "source": ast.spec_row.get("source", ""),
+    }
 
 
 def _copy(conn, table: str, rows: list[dict[str, Any]], schema: pa.Schema) -> None:
