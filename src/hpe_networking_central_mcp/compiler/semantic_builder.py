@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from .ast_builder import AstGraph, AstNode
 
 STRUCTURAL_RULE_PACK_ID = "semantic.structural.v1"
+IDENTITY_RULE_PACK_ID = "semantic.identity.v1"
 
 _HTTP_METHODS = {
     "get",
@@ -59,7 +61,7 @@ class SemanticDerivedFromEdge:
 @dataclass
 class SemanticGraph:
     spec_id: str
-    rule_packs: tuple[str, ...] = (STRUCTURAL_RULE_PACK_ID,)
+    rule_packs: tuple[str, ...] = (STRUCTURAL_RULE_PACK_ID, IDENTITY_RULE_PACK_ID)
     nodes: list[SemanticNode] = field(default_factory=list)
     edges: list[SemanticEdge] = field(default_factory=list)
     derived_edges: list[SemanticDerivedFromEdge] = field(default_factory=list)
@@ -74,6 +76,7 @@ class _SemanticState:
         self.schema_by_pointer: dict[str, SemanticNode] = {}
         self.property_by_pointer: dict[str, SemanticNode] = {}
         self.yang_by_path: dict[str, SemanticNode] = {}
+        self.model_by_key: dict[str, SemanticNode] = {}
         self._seen_edges: set[tuple[str, str, str, str, str]] = set()
 
     def add_node(
@@ -147,6 +150,7 @@ def build_semantic_overlay(ast_graph: AstGraph) -> SemanticGraph:
     _build_property_nodes(state)
     _build_schema_edges(state)
     _build_endpoint_nodes_and_edges(state)
+    _build_model_identity_overlay(state)
     return state.semantic_graph
 
 
@@ -166,9 +170,14 @@ def _build_schema_nodes(state: _SemanticState) -> None:
             summary={
                 "bodyShape": _schema_shape(body),
                 "description": _as_str(body.get("description")),
+                "enumValues": _enum_values(body),
                 "format": _as_str(body.get("format")),
                 "isNamed": _is_named_component_schema(pointer),
+                "kind": _component_kind(body),
+                "required": _string_list(body.get("required")),
                 "type": _schema_type(body),
+                "x-path": body.get("x-path") if isinstance(body.get("x-path"), str) else "",
+                "xExtensions": _x_extensions(body),
                 "x-supportedDeviceType": _supported_device_types(body),
             },
         )
@@ -192,9 +201,13 @@ def _build_property_nodes(state: _SemanticState) -> None:
             ast_pointer=ast_node.json_pointer,
             summary={
                 "description": _as_str(body.get("description")),
+                "enumValues": _enum_values(body),
                 "format": _as_str(body.get("format")),
+                "readOnly": bool(body.get("readOnly")) if body.get("readOnly") is not None else False,
                 "required": _is_required_property(parent_schema, property_name),
                 "type": _schema_type(body),
+                "x-key": _string_list(body.get("x-key")),
+                "xExtensions": _x_extensions(body),
                 "x-supportedDeviceType": _supported_device_types(body),
                 "x-path": body.get("x-path") if isinstance(body.get("x-path"), str) else "",
             },
@@ -410,9 +423,12 @@ def _add_parameter_edges(
             ast_pointer=body_pointer,
             summary={
                 "description": _as_str(body.get("description")),
+                "enumValues": _enum_values(schema) if isinstance(schema, dict) else [],
                 "format": _as_str(schema.get("format")) if isinstance(schema, dict) else "",
                 "in": location,
+                "inferredHint": _infer_param_hint(body),
                 "name": name,
+                "pattern": _as_str(schema.get("pattern")) if isinstance(schema, dict) else "",
                 "required": bool(body.get("required")),
                 "schemaPointer": schema_pointer,
                 "targetPointer": target_pointer,
@@ -678,7 +694,343 @@ def _add_response_media_edges(
             "status": str(status),
             "targetPointer": target_pointer,
         },
+        )
+
+
+def _build_model_identity_overlay(state: _SemanticState) -> None:
+    node_by_id = {node.semantic_id: node for node in state.semantic_graph.nodes}
+    schema_model_by_id: dict[str, SemanticNode] = {}
+    property_model_by_id: dict[str, SemanticNode] = {}
+    property_parent_schema_by_id: dict[str, SemanticNode] = {}
+
+    for node in list(state.semantic_graph.nodes):
+        if node.kind != "SchemaComponent":
+            continue
+        summary = _load_summary(node)
+        identity_key = _schema_identity_key(node, summary)
+        model = _ensure_model_entity(
+            state,
+            identity_key=identity_key,
+            name=node.name,
+            ast_pointer=node.json_pointer,
+            summary={
+                "bodyShape": summary.get("bodyShape", ""),
+                "identityKey": identity_key,
+                "identityType": "schema",
+                "sourceKind": node.kind,
+                "sourcePointer": node.json_pointer,
+                "supportedDeviceTypes": summary.get("x-supportedDeviceType"),
+                "type": summary.get("type", ""),
+                "yangPath": summary.get("x-path", ""),
+            },
+        )
+        schema_model_by_id[node.semantic_id] = model
+        state.add_edge(
+            node,
+            model,
+            kind="REPRESENTS_MODEL",
+            rule_id=f"{IDENTITY_RULE_PACK_ID}.schema.identity",
+            evidence={"identityKey": identity_key, "schemaPointer": node.json_pointer},
+        )
+        yang_path = summary.get("x-path")
+        if isinstance(yang_path, str) and yang_path:
+            state.add_edge(
+                model,
+                _ensure_yang_node(state, yang_path, node.json_pointer),
+                kind="MODEL_AT_YANG",
+                rule_id=f"{IDENTITY_RULE_PACK_ID}.schema.x-path",
+                evidence={"identityKey": identity_key, "x-path": yang_path},
+            )
+
+    for edge in list(state.semantic_graph.edges):
+        if edge.kind != "HAS_PROPERTY":
+            continue
+        parent = node_by_id.get(edge.source_id)
+        prop = node_by_id.get(edge.target_id)
+        if parent is None or prop is None:
+            continue
+        property_parent_schema_by_id[prop.semantic_id] = parent
+
+    for node in list(state.semantic_graph.nodes):
+        if node.kind != "Property":
+            continue
+        summary = _load_summary(node)
+        parent_schema = property_parent_schema_by_id.get(node.semantic_id)
+        parent_model = (
+            schema_model_by_id.get(parent_schema.semantic_id)
+            if parent_schema is not None
+            else None
+        )
+        identity_key = _property_identity_key(node, summary, parent_model)
+        model = _ensure_model_entity(
+            state,
+            identity_key=identity_key,
+            name=node.name,
+            ast_pointer=node.json_pointer,
+            summary={
+                "identityKey": identity_key,
+                "identityType": "property",
+                "keyFields": summary.get("x-key", []),
+                "parentIdentityKey": _summary_value(parent_model, "identityKey"),
+                "required": summary.get("required", False),
+                "sourceKind": node.kind,
+                "sourcePointer": node.json_pointer,
+                "supportedDeviceTypes": summary.get("x-supportedDeviceType"),
+                "type": summary.get("type", ""),
+                "yangPath": summary.get("x-path", ""),
+            },
+        )
+        property_model_by_id[node.semantic_id] = model
+        state.add_edge(
+            node,
+            model,
+            kind="REPRESENTS_MODEL",
+            rule_id=f"{IDENTITY_RULE_PACK_ID}.property.identity",
+            evidence={"identityKey": identity_key, "propertyPointer": node.json_pointer},
+        )
+        state.add_edge(
+            parent_model,
+            model,
+            kind="MODEL_HAS_PROPERTY",
+            rule_id=f"{IDENTITY_RULE_PACK_ID}.schema.property",
+            evidence={
+                "identityKey": identity_key,
+                "parentIdentityKey": _summary_value(parent_model, "identityKey"),
+                "propertyPointer": node.json_pointer,
+            },
+        )
+        yang_path = summary.get("x-path")
+        if isinstance(yang_path, str) and yang_path:
+            state.add_edge(
+                model,
+                _ensure_yang_node(state, yang_path, node.json_pointer),
+                kind="MODEL_AT_YANG",
+                rule_id=f"{IDENTITY_RULE_PACK_ID}.property.x-path",
+                evidence={"identityKey": identity_key, "x-path": yang_path},
+            )
+
+    _add_endpoint_model_shortcuts(
+        state,
+        {node.semantic_id: node for node in state.semantic_graph.nodes},
+        schema_model_by_id,
+        property_model_by_id,
     )
+
+
+def _add_endpoint_model_shortcuts(
+    state: _SemanticState,
+    node_by_id: dict[str, SemanticNode],
+    schema_model_by_id: dict[str, SemanticNode],
+    property_model_by_id: dict[str, SemanticNode],
+) -> None:
+    yang_to_models: dict[str, list[SemanticNode]] = {}
+    for edge in state.semantic_graph.edges:
+        if edge.kind != "MODEL_AT_YANG":
+            continue
+        model = node_by_id.get(edge.source_id)
+        yang = node_by_id.get(edge.target_id)
+        if model is not None and yang is not None:
+            yang_to_models.setdefault(yang.semantic_id, []).append(model)
+
+    for edge in list(state.semantic_graph.edges):
+        source = node_by_id.get(edge.source_id)
+        target = node_by_id.get(edge.target_id)
+        if source is None or target is None:
+            continue
+        if source.kind == "ApiEndpoint" and edge.kind == "ACCEPTS_SCHEMA":
+            state.add_edge(
+                source,
+                schema_model_by_id.get(target.semantic_id),
+                kind="ACCEPTS_MODEL",
+                rule_id=f"{IDENTITY_RULE_PACK_ID}.operation.requestModel",
+                evidence={
+                    "schemaSemanticId": target.semantic_id,
+                    "structuralEvidence": _load_edge_evidence(edge),
+                },
+            )
+        elif source.kind == "ApiEndpoint" and edge.kind == "RETURNS_SCHEMA":
+            state.add_edge(
+                source,
+                schema_model_by_id.get(target.semantic_id),
+                kind="RETURNS_MODEL",
+                rule_id=f"{IDENTITY_RULE_PACK_ID}.operation.responseModel",
+                evidence={
+                    "schemaSemanticId": target.semantic_id,
+                    "structuralEvidence": _load_edge_evidence(edge),
+                },
+            )
+        elif source.kind == "RequestBody" and edge.kind == "BODY_REFERENCES":
+            state.add_edge(
+                source,
+                schema_model_by_id.get(target.semantic_id),
+                kind="BODY_MODEL",
+                rule_id=f"{IDENTITY_RULE_PACK_ID}.requestBody.model",
+                evidence={
+                    "schemaSemanticId": target.semantic_id,
+                    "structuralEvidence": _load_edge_evidence(edge),
+                },
+            )
+        elif source.kind == "Response" and edge.kind == "RESPONSE_REFERENCES":
+            state.add_edge(
+                source,
+                schema_model_by_id.get(target.semantic_id),
+                kind="RESPONSE_MODEL",
+                rule_id=f"{IDENTITY_RULE_PACK_ID}.response.model",
+                evidence={
+                    "schemaSemanticId": target.semantic_id,
+                    "structuralEvidence": _load_edge_evidence(edge),
+                },
+            )
+        elif source.kind == "Property" and edge.kind == "PROPERTY_OF_TYPE":
+            property_model = property_model_by_id.get(source.semantic_id)
+            schema_model = schema_model_by_id.get(target.semantic_id)
+            if property_model is not None and property_model != schema_model:
+                state.add_edge(
+                    property_model,
+                    schema_model,
+                    kind="MODEL_OF_TYPE",
+                    rule_id=f"{IDENTITY_RULE_PACK_ID}.property.typeModel",
+                    evidence={
+                        "propertySemanticId": source.semantic_id,
+                        "schemaSemanticId": target.semantic_id,
+                        "structuralEvidence": _load_edge_evidence(edge),
+                    },
+                )
+        elif source.kind == "SchemaComponent" and edge.kind == "COMPOSED_OF":
+            state.add_edge(
+                schema_model_by_id.get(source.semantic_id),
+                schema_model_by_id.get(target.semantic_id),
+                kind="MODEL_COMPOSED_OF",
+                rule_id=f"{IDENTITY_RULE_PACK_ID}.schema.compositionModel",
+                evidence={
+                    "sourceSchemaSemanticId": source.semantic_id,
+                    "targetSchemaSemanticId": target.semantic_id,
+                    "structuralEvidence": _load_edge_evidence(edge),
+                },
+            )
+        elif source.kind == "SchemaComponent" and edge.kind == "REFERENCES":
+            state.add_edge(
+                schema_model_by_id.get(source.semantic_id),
+                schema_model_by_id.get(target.semantic_id),
+                kind="MODEL_REFERENCES",
+                rule_id=f"{IDENTITY_RULE_PACK_ID}.schema.referenceModel",
+                evidence={
+                    "sourceSchemaSemanticId": source.semantic_id,
+                    "targetSchemaSemanticId": target.semantic_id,
+                    "structuralEvidence": _load_edge_evidence(edge),
+                },
+            )
+        elif source.kind == "SchemaComponent" and edge.kind == "HAS_VALUE_SCHEMA":
+            state.add_edge(
+                schema_model_by_id.get(source.semantic_id),
+                schema_model_by_id.get(target.semantic_id),
+                kind="MODEL_HAS_VALUE_SCHEMA",
+                rule_id=f"{IDENTITY_RULE_PACK_ID}.schema.valueModel",
+                evidence={
+                    "sourceSchemaSemanticId": source.semantic_id,
+                    "targetSchemaSemanticId": target.semantic_id,
+                    "structuralEvidence": _load_edge_evidence(edge),
+                },
+            )
+        elif source.kind == "ApiEndpoint" and edge.kind == "CONFIGURES_YANG":
+            for model in yang_to_models.get(target.semantic_id, []):
+                state.add_edge(
+                    source,
+                    model,
+                    kind="CONFIGURES_MODEL",
+                    rule_id=f"{IDENTITY_RULE_PACK_ID}.operation.yangModel",
+                    evidence={
+                        "structuralEvidence": _load_edge_evidence(edge),
+                        "yangSemanticId": target.semantic_id,
+                    },
+                )
+
+
+def _ensure_model_entity(
+    state: _SemanticState,
+    *,
+    identity_key: str,
+    name: str,
+    ast_pointer: str,
+    summary: dict[str, Any],
+) -> SemanticNode:
+    existing = state.model_by_key.get(identity_key)
+    if existing is not None:
+        merged_summary = _merge_model_summary(_load_summary(existing), summary)
+        if merged_summary == _load_summary(existing):
+            return existing
+        replacement = SemanticNode(
+            semantic_id=existing.semantic_id,
+            spec_id=existing.spec_id,
+            kind=existing.kind,
+            name=existing.name,
+            ast_node_id=existing.ast_node_id,
+            json_pointer=existing.json_pointer,
+            stable_key=existing.stable_key,
+            summary_json=_json(merged_summary),
+        )
+        state.model_by_key[identity_key] = replacement
+        state.semantic_by_key[(existing.kind, existing.stable_key)] = replacement
+        for index, node in enumerate(state.semantic_graph.nodes):
+            if node.semantic_id == existing.semantic_id:
+                state.semantic_graph.nodes[index] = replacement
+                break
+        return replacement
+    node = state.add_node(
+        kind="ModelEntity",
+        stable_key=f"model:{identity_key}",
+        name=name,
+        ast_pointer=ast_pointer,
+        summary=summary,
+    )
+    state.model_by_key[identity_key] = node
+    return node
+
+
+def _merge_model_summary(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(existing)
+    for key, value in incoming.items():
+        if _is_empty_summary_value(value):
+            continue
+        current = merged.get(key)
+        if _is_empty_summary_value(current):
+            merged[key] = value
+            continue
+        if current == value:
+            continue
+        if isinstance(current, list) or isinstance(value, list):
+            merged[key] = _merge_summary_lists(current, value)
+        elif key in {"identityType", "sourceKind"}:
+            merged[f"{key}s"] = _merge_summary_lists(
+                merged.get(f"{key}s", current),
+                value,
+            )
+        elif key == "sourcePointer":
+            merged["sourcePointers"] = _merge_summary_lists(
+                merged.get("sourcePointers", current),
+                value,
+            )
+        elif key == "required":
+            merged[key] = bool(current) or bool(value)
+    return merged
+
+
+def _merge_summary_lists(left: Any, right: Any) -> list[Any]:
+    values: list[Any] = []
+    for raw in (left, right):
+        items = raw if isinstance(raw, list) else [raw]
+        for item in items:
+            if _is_empty_summary_value(item) or item in values:
+                continue
+            values.append(item)
+    return values
+
+
+def _is_empty_summary_value(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
 
 
 def _ensure_yang_node(
@@ -960,6 +1312,22 @@ def _schema_shape(body: dict[str, Any]) -> str:
     return "primitive"
 
 
+def _component_kind(body: dict[str, Any]) -> str:
+    if isinstance(body.get("enum"), list) and body["enum"]:
+        return "primitive"
+    for key in ("oneOf", "anyOf", "allOf"):
+        if isinstance(body.get(key), list) and body[key]:
+            return "union"
+    additional_properties = body.get("additionalProperties")
+    if additional_properties is True or isinstance(additional_properties, dict):
+        return "map"
+    if body.get("type") == "object" or "properties" in body:
+        return "object"
+    if body.get("type") == "array":
+        return "array"
+    return "primitive"
+
+
 def _schema_type(body: dict[str, Any]) -> str:
     value = body.get("type")
     if isinstance(value, str):
@@ -971,6 +1339,25 @@ def _schema_type(body: dict[str, Any]) -> str:
     return ""
 
 
+def _enum_values(body: dict[str, Any] | None) -> list[str]:
+    if not isinstance(body, dict):
+        return []
+    raw = body.get("enum")
+    if not isinstance(raw, list):
+        return []
+    return [str(v) for v in raw if isinstance(v, (str, int, float, bool))]
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [v for v in value if isinstance(v, str)]
+
+
+def _x_extensions(body: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in body.items() if isinstance(k, str) and k.startswith("x-")}
+
+
 def _supported_device_types(body: dict[str, Any]) -> list[str] | None:
     raw = body.get("x-supportedDeviceType")
     if raw is None:
@@ -980,6 +1367,24 @@ def _supported_device_types(body: dict[str, Any]) -> list[str] | None:
     if isinstance(raw, list):
         return [v for v in raw if isinstance(v, str)]
     return None
+
+
+def _infer_param_hint(param: dict[str, Any]) -> str:
+    schema = param.get("schema") if isinstance(param.get("schema"), dict) else {}
+    name = _as_str(param.get("name")).lower()
+    fmt = _as_str(schema.get("format"))
+    if fmt in {"date-time", "date"}:
+        return f"rfc3339-{fmt}"
+    if name in {"filter", "$filter"} or "odata" in name:
+        return "odata-filter"
+    if name in {"orderby", "$orderby", "order_by"}:
+        return "odata-orderby"
+    if "csv" in name or name.endswith("_list") or name.endswith("ids"):
+        if schema.get("type") == "string":
+            return "comma-list"
+    if name in {"limit", "offset", "page", "page_size"}:
+        return "pagination"
+    return ""
 
 
 def _yang_module_for(yang_path: str) -> str:
@@ -1003,6 +1408,58 @@ def _json(value: Any) -> str:
 
 def _as_str(value: Any) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _load_summary(node: SemanticNode) -> dict[str, Any]:
+    try:
+        value = json.loads(node.summary_json)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _load_edge_evidence(edge: SemanticEdge) -> dict[str, Any]:
+    try:
+        value = json.loads(edge.evidence_json)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _summary_value(node: SemanticNode | None, key: str) -> str:
+    if node is None:
+        return ""
+    value = _load_summary(node).get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _schema_identity_key(node: SemanticNode, summary: dict[str, Any]) -> str:
+    yang_path = summary.get("x-path")
+    if isinstance(yang_path, str) and yang_path:
+        return f"yang:{yang_path}"
+    parts = _pointer_parts(node.json_pointer)
+    if len(parts) == 3 and parts[0] == "components" and parts[1] == "schemas":
+        return f"schema:{_normalize_identity_token(parts[2])}"
+    return f"schema-pointer:{node.json_pointer}"
+
+
+def _property_identity_key(
+    node: SemanticNode,
+    summary: dict[str, Any],
+    parent_model: SemanticNode | None,
+) -> str:
+    yang_path = summary.get("x-path")
+    if isinstance(yang_path, str) and yang_path:
+        return f"yang:{yang_path}"
+    parent_key = _summary_value(parent_model, "identityKey")
+    if parent_key:
+        return f"{parent_key}.property:{_normalize_identity_token(node.name)}"
+    return f"property-pointer:{node.json_pointer}"
+
+
+def _normalize_identity_token(value: str) -> str:
+    normalized = re.sub(r"[^0-9a-zA-Z]+", "-", value.strip()).strip("-").lower()
+    return normalized or "unnamed"
 
 
 def _semantic_id(spec_id: str, kind: str, stable_key: str) -> str:
