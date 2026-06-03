@@ -8,6 +8,7 @@ import shutil
 import tempfile
 
 import pytest
+import real_ladybug as lb
 
 from hpe_networking_central_mcp.compiler.ast_builder import build_ast_graph
 from hpe_networking_central_mcp.compiler.ast_writer import build_ast_database
@@ -17,11 +18,13 @@ from hpe_networking_central_mcp.compiler.projection_writer import (
 from hpe_networking_central_mcp.compiler.semantic_builder import build_semantic_overlay
 from hpe_networking_central_mcp.compiler.semantic_writer import write_semantic_database
 from hpe_networking_central_mcp.compiler.traversal_reader import (
+    fetch_schema_context,
     load_endpoint_context,
-    load_schema_context,
 )
 
 pytestmark = [pytest.mark.compiler, pytest.mark.unit]
+
+_TEST_DB_BUFFER_POOL_SIZE = 256 * 1024 * 1024
 
 
 @pytest.fixture
@@ -131,13 +134,13 @@ def _build_reader_artifacts(repo_tmp_path: Path) -> tuple[Path, Path]:
     semantic = build_semantic_overlay(ast)
     ast_db_path = repo_tmp_path / "knowledge_db_ast"
     compiler_db_path = repo_tmp_path / "knowledge_db_compiler"
-    build_ast_database(ast_db_path, [ast], buffer_pool_size=64 * 1024 * 1024)
-    write_semantic_database(ast_db_path, [semantic], buffer_pool_size=64 * 1024 * 1024)
+    build_ast_database(ast_db_path, [ast], buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE)
+    write_semantic_database(ast_db_path, [semantic], buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE)
     build_compiler_projection_database(
         compiler_db_path,
         [ast],
         [semantic],
-        buffer_pool_size=64 * 1024 * 1024,
+        buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE,
     )
     return compiler_db_path, ast_db_path
 
@@ -152,7 +155,7 @@ def test_endpoint_context_walks_compiler_projection_and_raw_detail(
         ast_db_path=ast_db_path,
         method="post",
         path="/devices/{serial}",
-        buffer_pool_size=64 * 1024 * 1024,
+        buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE,
     )
 
     assert context["endpoint"]["projection_row"]["operationId"] == "createDevice"
@@ -188,55 +191,69 @@ def test_schema_context_walks_properties_targets_and_raw_detail(
 ) -> None:
     compiler_db_path, ast_db_path = _build_reader_artifacts(repo_tmp_path)
 
-    context = load_schema_context(
-        compiler_db_path=compiler_db_path,
-        ast_db_path=ast_db_path,
-        component_id="central:schemas:DeviceCreate",
-        buffer_pool_size=64 * 1024 * 1024,
-    )
+    compiler_db = None
+    ast_db = None
+    try:
+        compiler_db = lb.Database(
+            str(compiler_db_path),
+            buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE,
+        )
+        ast_db = lb.Database(
+            str(ast_db_path),
+            buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE,
+        )
+        compiler_conn = lb.Connection(compiler_db)
+        ast_conn = lb.Connection(ast_db)
+        context = fetch_schema_context(
+            compiler_conn=compiler_conn,
+            ast_conn=ast_conn,
+            component_id="central:schemas:DeviceCreate",
+        )
 
-    assert context["schema"]["raw_openapi"]["x-path"] == "/aruba/device/create"
-    props = {prop["projection_row"]["name"]: prop for prop in context["properties"]}
-    assert set(props) == {"serial", "tags"}
-    assert props["serial"]["raw_openapi"]["minLength"] == 12
-    assert props["serial"]["semantic_summary"]["x-path"] == (
-        "/aruba/device/create/serial"
-    )
-    assert props["tags"]["schema"]["projection_row"]["component_id"] == (
-        "central:schemas:Tag"
-    )
+        assert context["schema"]["raw_openapi"]["x-path"] == "/aruba/device/create"
+        props = {prop["projection_row"]["name"]: prop for prop in context["properties"]}
+        assert set(props) == {"serial", "tags"}
+        assert props["serial"]["raw_openapi"]["minLength"] == 12
+        assert props["serial"]["semantic_summary"]["x-path"] == (
+            "/aruba/device/create/serial"
+        )
+        assert props["tags"]["schema"]["projection_row"]["component_id"] == (
+            "central:schemas:Tag"
+        )
 
-    envelope = load_schema_context(
-        compiler_db_path=compiler_db_path,
-        ast_db_path=ast_db_path,
-        component_id="central:schemas:DeviceEnvelope",
-        buffer_pool_size=64 * 1024 * 1024,
-    )
-    assert [entry["kind"] for entry in envelope["composition"]] == ["allOf", "allOf"]
-    assert any(
-        entry["schema"]["raw_openapi"] == {"$ref": "#/components/schemas/DeviceCreate"}
-        for entry in envelope["composition"]
-    )
+        envelope = fetch_schema_context(
+            compiler_conn=compiler_conn,
+            ast_conn=ast_conn,
+            component_id="central:schemas:DeviceEnvelope",
+        )
+        assert [entry["kind"] for entry in envelope["composition"]] == ["allOf", "allOf"]
+        assert any(
+            entry["schema"]["raw_openapi"] == {"$ref": "#/components/schemas/DeviceCreate"}
+            for entry in envelope["composition"]
+        )
 
-    tag_map = load_schema_context(
-        compiler_db_path=compiler_db_path,
-        ast_db_path=ast_db_path,
-        component_id="central:schemas:TagMap",
-        buffer_pool_size=64 * 1024 * 1024,
-    )
-    assert tag_map["value_schemas"][0]["raw_openapi"] == {
-        "$ref": "#/components/schemas/Tag"
-    }
+        tag_map = fetch_schema_context(
+            compiler_conn=compiler_conn,
+            ast_conn=ast_conn,
+            component_id="central:schemas:TagMap",
+        )
+        assert tag_map["value_schemas"][0]["raw_openapi"] == {
+            "$ref": "#/components/schemas/Tag"
+        }
 
-    tag_alias = load_schema_context(
-        compiler_db_path=compiler_db_path,
-        ast_db_path=ast_db_path,
-        component_id="central:schemas:TagAlias",
-        buffer_pool_size=64 * 1024 * 1024,
-    )
-    assert tag_alias["references"][0]["schema"]["projection_row"]["component_id"] == (
-        "central:schemas:Tag"
-    )
+        tag_alias = fetch_schema_context(
+            compiler_conn=compiler_conn,
+            ast_conn=ast_conn,
+            component_id="central:schemas:TagAlias",
+        )
+        assert tag_alias["references"][0]["schema"]["projection_row"]["component_id"] == (
+            "central:schemas:Tag"
+        )
+    finally:
+        if ast_db is not None:
+            ast_db.close()
+        if compiler_db is not None:
+            compiler_db.close()
 
 
 def test_endpoint_context_can_omit_raw_payloads(repo_tmp_path: Path) -> None:
@@ -248,7 +265,7 @@ def test_endpoint_context_can_omit_raw_payloads(repo_tmp_path: Path) -> None:
         method="POST",
         path="/devices/{serial}",
         include_raw=False,
-        buffer_pool_size=64 * 1024 * 1024,
+        buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE,
     )
 
     assert "raw_openapi" not in context["endpoint"]

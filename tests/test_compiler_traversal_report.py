@@ -24,6 +24,8 @@ from hpe_networking_central_mcp.compiler.traversal_report import (
 
 pytestmark = [pytest.mark.compiler, pytest.mark.unit]
 
+_TEST_DB_BUFFER_POOL_SIZE = 256 * 1024 * 1024
+
 
 @pytest.fixture
 def repo_tmp_path() -> Iterator[Path]:
@@ -104,13 +106,13 @@ def _build_artifacts(repo_tmp_path: Path) -> tuple[Path, Path]:
     semantic = build_semantic_overlay(ast)
     ast_db_path = repo_tmp_path / "knowledge_db_ast"
     compiler_db_path = repo_tmp_path / "knowledge_db_compiler"
-    build_ast_database(ast_db_path, [ast], buffer_pool_size=64 * 1024 * 1024)
-    write_semantic_database(ast_db_path, [semantic], buffer_pool_size=64 * 1024 * 1024)
+    build_ast_database(ast_db_path, [ast], buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE)
+    write_semantic_database(ast_db_path, [semantic], buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE)
     build_compiler_projection_database(
         compiler_db_path,
         [ast],
         [semantic],
-        buffer_pool_size=64 * 1024 * 1024,
+        buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE,
     )
     return compiler_db_path, ast_db_path
 
@@ -123,7 +125,7 @@ def test_compiler_traversal_report_samples_artifacts(repo_tmp_path: Path) -> Non
         ast_db_path=ast_db_path,
         endpoint_limit=10,
         schema_limit=20,
-        buffer_pool_size=64 * 1024 * 1024,
+        buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE,
     )
 
     assert report["status"] == "ok"
