@@ -266,6 +266,77 @@ def test_vendor_extension_is_preserved_as_extension_node() -> None:
     assert json.loads(nodes[0].raw_json) == {"source": "fixture"}
 
 
+def test_example_value_array_items_are_not_validated_as_schema_keywords() -> None:
+    spec = _oas30_spec()
+    media = spec["paths"]["/pets"]["get"]["responses"]["200"]["content"]["application/json"]
+    media["examples"] = {
+        "sample": {
+            "summary": "Example array",
+            "value": {
+                "items": [
+                    {
+                        "stage": "ready",
+                        "clientName": "client-1",
+                    }
+                ]
+            },
+        }
+    }
+
+    graph = build_ast_graph(spec, source="unit/examples")
+    by_pointer = {n.json_pointer: n.kind for n in graph.nodes}
+    assert (
+        by_pointer[
+            "/paths/~1pets/get/responses/200/content/application~1json/examples/sample/value/items/0"
+        ]
+        == "Scalar"
+    )
+    assert reconstruct_spec(graph) == spec
+
+
+def test_schema_property_named_value_under_content_remains_schema() -> None:
+    spec = _oas30_spec()
+    schema = (
+        spec["paths"]["/pets"]["get"]["responses"]["200"]["content"]["application/json"][
+            "schema"
+        ]
+    )
+    schema.clear()
+    schema.update(
+        {
+            "type": "object",
+            "properties": {
+                "value": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                        },
+                    },
+                }
+            },
+        }
+    )
+
+    graph = build_ast_graph(spec, source="unit/schema-value")
+    by_pointer = {n.json_pointer: n.kind for n in graph.nodes}
+
+    assert (
+        by_pointer[
+            "/paths/~1pets/get/responses/200/content/application~1json/schema/properties/value/items"
+        ]
+        == "Items"
+    )
+    assert (
+        by_pointer[
+            "/paths/~1pets/get/responses/200/content/application~1json/schema/properties/value/items/properties/name"
+        ]
+        == "Property"
+    )
+    assert reconstruct_spec(graph) == spec
+
+
 def test_boolean_default_coercion_preserves_invalid_strings() -> None:
     spec = {
         "openapi": "3.0.3",

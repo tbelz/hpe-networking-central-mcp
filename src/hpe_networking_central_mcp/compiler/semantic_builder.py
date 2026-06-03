@@ -311,6 +311,7 @@ def _build_endpoint_nodes_and_edges(state: _SemanticState) -> None:
                 },
             )
             _add_cli_command(state, endpoint, operation, op_pointer)
+            _add_parameter_edges(state, endpoint, path_item, operation, op_pointer)
             _add_request_body_edges(state, endpoint, operation, op_pointer)
             _add_response_edges(state, endpoint, operation, op_pointer)
 
@@ -357,6 +358,92 @@ def _add_cli_command(
     )
 
 
+def _add_parameter_edges(
+    state: _SemanticState,
+    endpoint: SemanticNode,
+    path_item: dict[str, Any],
+    operation: dict[str, Any],
+    op_pointer: str,
+) -> None:
+    merged: dict[tuple[str, str], tuple[dict[str, Any], str, str]] = {}
+    for owner, params in (
+        (_parent_pointer(op_pointer), path_item.get("parameters")),
+        (op_pointer, operation.get("parameters")),
+    ):
+        if not isinstance(params, list):
+            continue
+        for index, parameter in enumerate(params):
+            if not isinstance(parameter, dict):
+                continue
+            param_pointer = _join_pointer(owner, "parameters", str(index))
+            body, body_pointer = _resolve_reference_object(
+                state.ast_graph.spec,
+                parameter,
+                param_pointer,
+            )
+            if not isinstance(body, dict):
+                continue
+            name = _as_str(body.get("name"))
+            location = _as_str(body.get("in"))
+            if not name or not location:
+                continue
+            merged[(location, name)] = (body, body_pointer, param_pointer)
+
+    for body, body_pointer, param_pointer in merged.values():
+        name = _as_str(body.get("name"))
+        location = _as_str(body.get("in"))
+        schema = body.get("schema")
+        schema_pointer = (
+            _join_pointer(body_pointer, "schema")
+            if isinstance(schema, dict)
+            else ""
+        )
+        target_pointer = (
+            _schema_type_pointer(schema, schema_pointer)
+            if isinstance(schema, dict)
+            else ""
+        )
+        node = state.add_node(
+            kind="Parameter",
+            stable_key=f"parameter:{endpoint.stable_key}:{location}:{name}",
+            name=name,
+            ast_pointer=body_pointer,
+            summary={
+                "description": _as_str(body.get("description")),
+                "format": _as_str(schema.get("format")) if isinstance(schema, dict) else "",
+                "in": location,
+                "name": name,
+                "required": bool(body.get("required")),
+                "schemaPointer": schema_pointer,
+                "targetPointer": target_pointer,
+                "type": _schema_type(schema) if isinstance(schema, dict) else "",
+            },
+        )
+        state.add_edge(
+            endpoint,
+            node,
+            kind="HAS_PARAMETER",
+            rule_id=f"{STRUCTURAL_RULE_PACK_ID}.operation.parameter",
+            evidence={
+                "operationPointer": op_pointer,
+                "parameterPointer": body_pointer,
+                "sourcePointer": param_pointer,
+            },
+        )
+        if target_pointer:
+            state.add_edge(
+                node,
+                state.schema_by_pointer.get(target_pointer),
+                kind="PARAMETER_REFERENCES",
+                rule_id=f"{STRUCTURAL_RULE_PACK_ID}.parameter.schema",
+                evidence={
+                    "parameterPointer": body_pointer,
+                    "schemaPointer": schema_pointer,
+                    "targetPointer": target_pointer,
+                },
+            )
+
+
 def _add_request_body_edges(
     state: _SemanticState,
     endpoint: SemanticNode,
@@ -372,11 +459,88 @@ def _add_request_body_edges(
     )
     if not isinstance(body, dict):
         return
-    media, schema, schema_pointer = _pick_media_schema(body.get("content"), body_pointer)
-    if not isinstance(schema, dict) or schema_pointer is None:
+    media_schemas = _iter_media_schemas(body.get("content"), body_pointer)
+    if not media_schemas:
+        body_node = state.add_node(
+            kind="RequestBody",
+            stable_key=f"requestBody:{endpoint.stable_key}:",
+            name=f"{endpoint.name} requestBody",
+            ast_pointer=body_pointer,
+            summary={
+                "contentType": "",
+                "description": _as_str(body.get("description")),
+                "required": bool(body.get("required")),
+                "requestBodyPointer": body_pointer,
+                "sourcePointer": request_pointer,
+            },
+        )
+        state.add_edge(
+            endpoint,
+            body_node,
+            kind="HAS_REQUEST_BODY",
+            rule_id=f"{STRUCTURAL_RULE_PACK_ID}.operation.requestBody.node",
+            evidence={"operationPointer": op_pointer, "requestBodyPointer": body_pointer},
+        )
         return
+    for media, schema, schema_pointer in media_schemas:
+        _add_request_body_media_edges(
+            state,
+            endpoint,
+            body,
+            body_pointer,
+            request_pointer,
+            op_pointer,
+            media,
+            schema,
+            schema_pointer,
+        )
+
+
+def _add_request_body_media_edges(
+    state: _SemanticState,
+    endpoint: SemanticNode,
+    body: dict[str, Any],
+    body_pointer: str,
+    request_pointer: str,
+    op_pointer: str,
+    media: str,
+    schema: dict[str, Any],
+    schema_pointer: str,
+) -> None:
+    body_node = state.add_node(
+        kind="RequestBody",
+        stable_key=f"requestBody:{endpoint.stable_key}:{media}",
+        name=f"{endpoint.name} requestBody",
+        ast_pointer=body_pointer,
+        summary={
+            "contentType": media,
+            "description": _as_str(body.get("description")),
+            "required": bool(body.get("required")),
+            "requestBodyPointer": body_pointer,
+            "sourcePointer": request_pointer,
+        },
+    )
+    state.add_edge(
+        endpoint,
+        body_node,
+        kind="HAS_REQUEST_BODY",
+        rule_id=f"{STRUCTURAL_RULE_PACK_ID}.operation.requestBody.node",
+        evidence={"operationPointer": op_pointer, "requestBodyPointer": body_pointer},
+    )
     target_pointer = _schema_type_pointer(schema, schema_pointer)
     target = state.schema_by_pointer.get(target_pointer)
+    state.add_edge(
+        body_node,
+        target,
+        kind="BODY_REFERENCES",
+        rule_id=f"{STRUCTURAL_RULE_PACK_ID}.requestBody.schema",
+        evidence={
+            "contentType": media,
+            "requestBodyPointer": body_pointer,
+            "schemaPointer": schema_pointer,
+            "targetPointer": target_pointer,
+        },
+    )
     state.add_edge(
         endpoint,
         target,
@@ -417,23 +581,104 @@ def _add_response_edges(
         )
         if not isinstance(body, dict):
             continue
-        media, schema, schema_pointer = _pick_media_schema(body.get("content"), body_pointer)
-        if not isinstance(schema, dict) or schema_pointer is None:
+        media_schemas = _iter_media_schemas(body.get("content"), body_pointer)
+        if not media_schemas:
+            response_node = state.add_node(
+                kind="Response",
+                stable_key=f"response:{endpoint.stable_key}:{status}:",
+                name=f"{endpoint.name} {status}",
+                ast_pointer=body_pointer,
+                summary={
+                    "contentType": "",
+                    "description": _as_str(body.get("description")),
+                    "responsePointer": body_pointer,
+                    "sourcePointer": response_pointer,
+                    "status": str(status),
+                },
+            )
+            state.add_edge(
+                endpoint,
+                response_node,
+                kind="HAS_RESPONSE",
+                rule_id=f"{STRUCTURAL_RULE_PACK_ID}.operation.response.node",
+                evidence={"operationPointer": op_pointer, "responsePointer": body_pointer},
+            )
             continue
-        target_pointer = _schema_type_pointer(schema, schema_pointer)
-        state.add_edge(
-            endpoint,
-            state.schema_by_pointer.get(target_pointer),
-            kind="RETURNS_SCHEMA",
-            rule_id=f"{STRUCTURAL_RULE_PACK_ID}.operation.response",
-            evidence={
-                "contentType": media,
-                "responsePointer": body_pointer,
-                "schemaPointer": schema_pointer,
-                "status": str(status),
-                "targetPointer": target_pointer,
-            },
-        )
+        for media, schema, schema_pointer in media_schemas:
+            _add_response_media_edges(
+                state,
+                endpoint,
+                body,
+                body_pointer,
+                response_pointer,
+                op_pointer,
+                str(status),
+                media,
+                schema,
+                schema_pointer,
+            )
+
+
+def _add_response_media_edges(
+    state: _SemanticState,
+    endpoint: SemanticNode,
+    body: dict[str, Any],
+    body_pointer: str,
+    response_pointer: str,
+    op_pointer: str,
+    status: str,
+    media: str,
+    schema: dict[str, Any],
+    schema_pointer: str,
+) -> None:
+    response_node = state.add_node(
+        kind="Response",
+        stable_key=f"response:{endpoint.stable_key}:{status}:{media}",
+        name=f"{endpoint.name} {status}",
+        ast_pointer=body_pointer,
+        summary={
+            "contentType": media,
+            "description": _as_str(body.get("description")),
+            "responsePointer": body_pointer,
+            "sourcePointer": response_pointer,
+            "status": str(status),
+        },
+    )
+    state.add_edge(
+        endpoint,
+        response_node,
+        kind="HAS_RESPONSE",
+        rule_id=f"{STRUCTURAL_RULE_PACK_ID}.operation.response.node",
+        evidence={"operationPointer": op_pointer, "responsePointer": body_pointer},
+    )
+    target_pointer = _schema_type_pointer(schema, schema_pointer)
+    target = state.schema_by_pointer.get(target_pointer)
+    state.add_edge(
+        response_node,
+        target,
+        kind="RESPONSE_REFERENCES",
+        rule_id=f"{STRUCTURAL_RULE_PACK_ID}.response.schema",
+        evidence={
+            "contentType": media,
+            "responsePointer": body_pointer,
+            "schemaPointer": schema_pointer,
+            "status": str(status),
+            "targetPointer": target_pointer,
+        },
+    )
+    state.add_edge(
+        endpoint,
+        target,
+        kind="RETURNS_SCHEMA",
+        rule_id=f"{STRUCTURAL_RULE_PACK_ID}.operation.response",
+        evidence={
+            "contentType": media,
+            "responsePointer": body_pointer,
+            "schemaPointer": schema_pointer,
+            "status": str(status),
+            "targetPointer": target_pointer,
+        },
+    )
 
 
 def _ensure_yang_node(
@@ -556,6 +801,30 @@ def _pick_media_schema(
     if not isinstance(schema, dict):
         return str(preferred), None, None
     return str(preferred), schema, _join_pointer(content_owner_pointer, "content", str(preferred), "schema")
+
+
+def _iter_media_schemas(
+    content: Any,
+    content_owner_pointer: str,
+) -> list[tuple[str, dict[str, Any], str]]:
+    if not isinstance(content, dict) or not content:
+        return []
+    result: list[tuple[str, dict[str, Any], str]] = []
+    for media, media_type in content.items():
+        if not isinstance(media_type, dict):
+            continue
+        schema = media_type.get("schema")
+        if not isinstance(schema, dict):
+            continue
+        media_name = str(media)
+        result.append(
+            (
+                media_name,
+                schema,
+                _join_pointer(content_owner_pointer, "content", media_name, "schema"),
+            )
+        )
+    return result
 
 
 def _resolve_reference_object(
