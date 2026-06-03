@@ -249,6 +249,8 @@ def _collect_graph_rows(
     schema_parent: dict[str, str] = {}
     schema_refs: dict[str, str] = {}
 
+    _collect_reusable_component_rows(ast, rows)
+
     for edge in semantic.edges:
         if edge.kind in {"HAS_PARAMETER", "HAS_REQUEST_BODY", "HAS_RESPONSE", "HAS_CLI_COMMAND"}:
             endpoint_parent[edge.target_id] = edge.source_id
@@ -458,6 +460,38 @@ def _schema_row(
     }
 
 
+def _collect_reusable_component_rows(
+    ast: AstGraph,
+    rows: dict[str, dict[str, dict[str, Any]]],
+) -> None:
+    components = ast.spec.get("components")
+    if not isinstance(components, dict):
+        return
+    for section in ("headers", "parameters", "requestBodies", "responses"):
+        entries = components.get(section)
+        if not isinstance(entries, dict):
+            continue
+        for name, body in entries.items():
+            if not isinstance(name, str) or not isinstance(body, dict):
+                continue
+            pointer = f"/components/{section}/{_escape_pointer(name)}"
+            component_id = f"{_provider(ast)}:{section}:{name}"
+            row = {
+                "component_id": component_id,
+                "spec_source": _provider(ast),
+                "section": section,
+                "name": name,
+                "type": _str(body.get("type")),
+                "kind": _component_kind(body),
+                "bodyShape": _component_body_shape(body),
+                "required": _string_list(body.get("required")),
+                "enumValues": _string_list(body.get("enum")),
+                "supportedDeviceTypes": _supported_device_types(body),
+                "bodyJson": _raw_json_for(ast, pointer, body),
+            }
+            _put_richest(rows["SchemaComponent"], component_id, row)
+
+
 def _edge_row(
     edge: SemanticEdge,
     nodes: dict[str, SemanticNode],
@@ -533,6 +567,10 @@ def _pointer_parts(pointer: str) -> list[str]:
     return [part.replace("~1", "/").replace("~0", "~") for part in pointer.strip("/").split("/")]
 
 
+def _escape_pointer(value: str) -> str:
+    return value.replace("~", "~0").replace("/", "~1")
+
+
 def _load_summary(node: SemanticNode) -> dict[str, Any]:
     return _load_json(node.summary_json)
 
@@ -547,6 +585,59 @@ def _load_json(raw: str) -> dict[str, Any]:
 
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _raw_json_for(ast: AstGraph, pointer: str, fallback: dict[str, Any]) -> str:
+    for node in ast.nodes:
+        if node.json_pointer == pointer:
+            return node.raw_json
+    return _json(fallback)
+
+
+def _component_body_shape(body: dict[str, Any]) -> str:
+    if isinstance(body.get("enum"), list) and body["enum"]:
+        return "primitive"
+    if isinstance(body.get("oneOf"), list) and body["oneOf"]:
+        return "union-oneOf"
+    if isinstance(body.get("anyOf"), list) and body["anyOf"]:
+        return "union-anyOf"
+    if isinstance(body.get("allOf"), list) and body["allOf"]:
+        return "allOf-composite"
+    if isinstance(body.get("properties"), dict) and body["properties"]:
+        return "object"
+    additional_properties = body.get("additionalProperties")
+    if additional_properties is True or isinstance(additional_properties, dict):
+        return "map"
+    if body.get("type") == "object":
+        return "object"
+    if body.get("type") == "array":
+        return "array"
+    return "primitive"
+
+
+def _component_kind(body: dict[str, Any]) -> str:
+    if isinstance(body.get("enum"), list) and body["enum"]:
+        return "primitive"
+    for key in ("oneOf", "anyOf", "allOf"):
+        if isinstance(body.get(key), list) and body[key]:
+            return "union"
+    additional_properties = body.get("additionalProperties")
+    if additional_properties is True or isinstance(additional_properties, dict):
+        return "map"
+    if body.get("type") == "object" or "properties" in body:
+        return "object"
+    if body.get("type") == "array":
+        return "array"
+    return "primitive"
+
+
+def _supported_device_types(body: dict[str, Any]) -> list[str]:
+    raw = body.get("x-supportedDeviceType")
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, list):
+        return [v for v in raw if isinstance(v, str)]
+    return []
 
 
 def _string_list(value: Any) -> list[str]:

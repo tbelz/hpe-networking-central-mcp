@@ -1126,6 +1126,9 @@ def _schema_type_pointer(schema: dict[str, Any], pointer: str) -> str:
         return ref_pointer
     items = schema.get("items")
     if isinstance(items, dict):
+        items_ref_pointer = _internal_ref_pointer(items.get("$ref"))
+        if items_ref_pointer:
+            return items_ref_pointer
         return _join_pointer(pointer, "items")
     return pointer
 

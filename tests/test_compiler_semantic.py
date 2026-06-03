@@ -275,6 +275,46 @@ def test_semantic_overlay_classifies_additional_properties_schema_as_map() -> No
     assert summary["kind"] == "map"
 
 
+def test_semantic_overlay_links_array_property_to_named_item_schema() -> None:
+    ast_graph = build_ast_graph(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "Array item ref", "version": "1.0"},
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "ScopeIds": {
+                        "type": "string",
+                    },
+                    "DeviceMove": {
+                        "type": "object",
+                        "properties": {
+                            "items": {
+                                "type": "array",
+                                "items": {"$ref": "#/components/schemas/ScopeIds"},
+                            }
+                        },
+                    },
+                }
+            },
+        },
+        source="unit/array-items-ref",
+    )
+
+    semantic = build_semantic_overlay(ast_graph)
+    node_by_id = {node.semantic_id: node for node in semantic.nodes}
+    edge_tuples = {
+        (
+            node_by_id[edge.source_id].name,
+            edge.kind,
+            node_by_id[edge.target_id].name,
+        )
+        for edge in semantic.edges
+    }
+
+    assert ("items", "PROPERTY_OF_TYPE", "ScopeIds") in edge_tuples
+
+
 def test_semantic_overlay_merges_reused_model_entity_summary() -> None:
     ast_graph = build_ast_graph(
         {
