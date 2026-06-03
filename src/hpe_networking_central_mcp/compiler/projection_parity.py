@@ -160,9 +160,8 @@ def format_projection_parity_report(report: dict[str, Any]) -> str:
 
 
 def _row_set(conn, query: str) -> dict[str, dict[str, Any]]:
-    rows = list(conn.execute(query).rows_as_dict())
     result: dict[str, dict[str, Any]] = {}
-    for row in rows:
+    for row in conn.execute(query).rows_as_dict():
         normalized = {key: _normalize(value) for key, value in row.items()}
         result[_key(normalized)] = normalized
     return result
