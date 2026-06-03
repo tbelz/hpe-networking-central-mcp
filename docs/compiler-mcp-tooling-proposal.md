@@ -50,6 +50,12 @@ This keeps the useful parts of the current graph surface while avoiding the
 old failure mode where a hand-maintained projection silently lost source
 attributes.
 
+Raw payload safety matters: the current compiler traversal loaders default
+to `include_raw=True` because they are internal Python helpers. Future MCP
+wrappers MUST pass `include_raw` explicitly to those loaders and must not
+rely on loader defaults. Agent-facing tools should default to
+`include_raw=false` unless their whole purpose is source-detail retrieval.
+
 ## Proposed Future MCP Primitives
 
 These names are placeholders. The important contract is the shape and
@@ -104,6 +110,8 @@ Returns:
 Implementation path:
 
 - Wrap `traversal_reader.load_endpoint_context`.
+- Wrappers MUST pass `include_raw` explicitly to the loader and must not
+  rely on the traversal loader default.
 - Keep response caps similar to existing graph tools.
 - If multiple compiler endpoints match, fail with an explicit ambiguity
   error rather than choosing one.
@@ -133,6 +141,8 @@ Returns:
 Implementation path:
 
 - Wrap `traversal_reader.load_schema_context`.
+- Wrappers MUST pass `include_raw` explicitly to the loader and must not
+  rely on the traversal loader default.
 - Add depth expansion only after single-hop behavior is stable and measured.
 
 ### `get_openapi_source_detail`
@@ -159,6 +169,8 @@ Implementation path:
 - Validate `table_name` against the allowed compiler projection tables.
 - Keep this read-only and bounded; do not expose arbitrary L1 traversal
   as the first agent-facing primitive.
+- This primitive intentionally returns source detail; it should still cap
+  output and should not be substituted for default endpoint/schema context.
 
 ### `get_compiler_graph_health`
 
@@ -180,6 +192,8 @@ Returns:
 Implementation path:
 
 - Wrap `traversal_report.load_compiler_traversal_report`.
+- Health/report wrappers should request compact traversal contexts and
+  should not include raw OpenAPI payloads in normal agent sessions.
 - In normal agent sessions, return manifest/report summaries rather than
   running expensive full-corpus scans on demand.
 

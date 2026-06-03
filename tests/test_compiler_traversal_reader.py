@@ -191,14 +191,19 @@ def test_schema_context_walks_properties_targets_and_raw_detail(
 ) -> None:
     compiler_db_path, ast_db_path = _build_reader_artifacts(repo_tmp_path)
 
-    compiler_db = lb.Database(
-        str(compiler_db_path),
-        buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE,
-    )
-    ast_db = lb.Database(str(ast_db_path), buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE)
-    compiler_conn = lb.Connection(compiler_db)
-    ast_conn = lb.Connection(ast_db)
+    compiler_db = None
+    ast_db = None
     try:
+        compiler_db = lb.Database(
+            str(compiler_db_path),
+            buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE,
+        )
+        ast_db = lb.Database(
+            str(ast_db_path),
+            buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE,
+        )
+        compiler_conn = lb.Connection(compiler_db)
+        ast_conn = lb.Connection(ast_db)
         context = fetch_schema_context(
             compiler_conn=compiler_conn,
             ast_conn=ast_conn,
@@ -245,8 +250,10 @@ def test_schema_context_walks_properties_targets_and_raw_detail(
             "central:schemas:Tag"
         )
     finally:
-        ast_db.close()
-        compiler_db.close()
+        if ast_db is not None:
+            ast_db.close()
+        if compiler_db is not None:
+            compiler_db.close()
 
 
 def test_endpoint_context_can_omit_raw_payloads(repo_tmp_path: Path) -> None:
