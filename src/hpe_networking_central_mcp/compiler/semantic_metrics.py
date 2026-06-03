@@ -27,8 +27,15 @@ def compute_semantic_metrics(graphs: list[SemanticGraph]) -> dict[str, Any]:
     responses_referencing_schema: set[str] = set()
     schema_ids: set[str] = set()
     schemas_with_properties: set[str] = set()
+    schemas_representing_model: set[str] = set()
     property_ids: set[str] = set()
     properties_at_yang: set[str] = set()
+    properties_representing_model: set[str] = set()
+    model_ids: set[str] = set()
+    model_entities_at_yang: set[str] = set()
+    endpoint_accepts_model: set[str] = set()
+    endpoint_returns_model: set[str] = set()
+    endpoint_configures_model: set[str] = set()
 
     for graph in graphs:
         node_by_id = {node.semantic_id: node for node in graph.nodes}
@@ -44,6 +51,8 @@ def compute_semantic_metrics(graphs: list[SemanticGraph]) -> dict[str, Any]:
                 schema_ids.add(node.semantic_id)
             elif node.kind == "Property":
                 property_ids.add(node.semantic_id)
+            elif node.kind == "ModelEntity":
+                model_ids.add(node.semantic_id)
         for edge in graph.derived_edges:
             node_ids_with_provenance.add(edge.semantic_id)
         for edge in graph.edges:
@@ -59,6 +68,12 @@ def compute_semantic_metrics(graphs: list[SemanticGraph]) -> dict[str, Any]:
                     endpoint_returns_schema.add(source.semantic_id)
                 elif edge.kind == "CONFIGURES_YANG":
                     endpoint_configures_yang.add(source.semantic_id)
+                elif edge.kind == "ACCEPTS_MODEL":
+                    endpoint_accepts_model.add(source.semantic_id)
+                elif edge.kind == "RETURNS_MODEL":
+                    endpoint_returns_model.add(source.semantic_id)
+                elif edge.kind == "CONFIGURES_MODEL":
+                    endpoint_configures_model.add(source.semantic_id)
                 elif edge.kind == "HAS_PARAMETER":
                     endpoint_has_parameter.add(source.semantic_id)
                 elif edge.kind == "HAS_REQUEST_BODY":
@@ -71,8 +86,14 @@ def compute_semantic_metrics(graphs: list[SemanticGraph]) -> dict[str, Any]:
                 responses_referencing_schema.add(source.semantic_id)
             elif source.kind == "SchemaComponent" and edge.kind == "HAS_PROPERTY":
                 schemas_with_properties.add(source.semantic_id)
+            elif source.kind == "SchemaComponent" and edge.kind == "REPRESENTS_MODEL":
+                schemas_representing_model.add(source.semantic_id)
             elif source.kind == "Property" and edge.kind == "PROPERTY_AT_YANG":
                 properties_at_yang.add(source.semantic_id)
+            elif source.kind == "Property" and edge.kind == "REPRESENTS_MODEL":
+                properties_representing_model.add(source.semantic_id)
+            elif source.kind == "ModelEntity" and edge.kind == "MODEL_AT_YANG":
+                model_entities_at_yang.add(source.semantic_id)
 
     total_nodes = sum(node_kind_counts.values())
     total_edges = sum(edge_kind_counts.values())
@@ -121,10 +142,30 @@ def compute_semantic_metrics(graphs: list[SemanticGraph]) -> dict[str, Any]:
                 "total": endpoint_count,
                 "ratio": _ratio(len(endpoint_accepts_schema | endpoint_returns_schema), endpoint_count),
             },
+            "endpoints_accepting_model": {
+                "count": len(endpoint_accepts_model),
+                "total": endpoint_count,
+                "ratio": _ratio(len(endpoint_accepts_model), endpoint_count),
+            },
+            "endpoints_returning_model": {
+                "count": len(endpoint_returns_model),
+                "total": endpoint_count,
+                "ratio": _ratio(len(endpoint_returns_model), endpoint_count),
+            },
+            "endpoints_with_any_model_edge": {
+                "count": len(endpoint_accepts_model | endpoint_returns_model),
+                "total": endpoint_count,
+                "ratio": _ratio(len(endpoint_accepts_model | endpoint_returns_model), endpoint_count),
+            },
             "endpoints_configuring_yang": {
                 "count": len(endpoint_configures_yang),
                 "total": endpoint_count,
                 "ratio": _ratio(len(endpoint_configures_yang), endpoint_count),
+            },
+            "endpoints_configuring_model": {
+                "count": len(endpoint_configures_model),
+                "total": endpoint_count,
+                "ratio": _ratio(len(endpoint_configures_model), endpoint_count),
             },
             "request_bodies_referencing_schema": {
                 "count": len(request_bodies_referencing_schema),
@@ -141,10 +182,25 @@ def compute_semantic_metrics(graphs: list[SemanticGraph]) -> dict[str, Any]:
                 "total": schema_count,
                 "ratio": _ratio(len(schemas_with_properties), schema_count),
             },
+            "schemas_representing_model": {
+                "count": len(schemas_representing_model),
+                "total": schema_count,
+                "ratio": _ratio(len(schemas_representing_model), schema_count),
+            },
             "properties_at_yang": {
                 "count": len(properties_at_yang),
                 "total": property_count,
                 "ratio": _ratio(len(properties_at_yang), property_count),
+            },
+            "properties_representing_model": {
+                "count": len(properties_representing_model),
+                "total": property_count,
+                "ratio": _ratio(len(properties_representing_model), property_count),
+            },
+            "model_entities_at_yang": {
+                "count": len(model_entities_at_yang),
+                "total": len(model_ids),
+                "ratio": _ratio(len(model_entities_at_yang), len(model_ids)),
             },
         },
     }

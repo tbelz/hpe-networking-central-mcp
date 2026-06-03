@@ -153,16 +153,23 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
     assert stats["semantic"]["node_count"] > 0
     assert stats["semantic"]["edge_count"] > 0
     assert stats["semantic"]["derived_from_ast_edge_count"] > 0
-    assert stats["semantic"]["rule_packs"] == ["semantic.structural.v1"]
+    assert stats["semantic"]["rule_packs"] == [
+        "semantic.identity.v1",
+        "semantic.structural.v1",
+    ]
     assert stats["semantic"]["metrics"]["node_kind_counts"]["ApiEndpoint"] == 1
+    assert stats["semantic"]["metrics"]["node_kind_counts"]["ModelEntity"] == 6
     assert stats["semantic"]["metrics"]["node_kind_counts"]["Parameter"] == 1
     assert stats["semantic"]["metrics"]["node_kind_counts"]["RequestBody"] == 1
     assert stats["semantic"]["metrics"]["node_kind_counts"]["Response"] == 1
     assert stats["semantic"]["metrics"]["edge_kind_counts"]["BODY_REFERENCES"] == 1
+    assert stats["semantic"]["metrics"]["edge_kind_counts"]["ACCEPTS_MODEL"] == 1
     assert stats["semantic"]["metrics"]["edge_kind_counts"]["HAS_PARAMETER"] == 1
     assert stats["semantic"]["metrics"]["edge_kind_counts"]["HAS_REQUEST_BODY"] == 1
     assert stats["semantic"]["metrics"]["edge_kind_counts"]["HAS_RESPONSE"] == 1
     assert stats["semantic"]["metrics"]["edge_kind_counts"]["RESPONSE_REFERENCES"] == 1
+    assert stats["semantic"]["metrics"]["edge_kind_counts"]["REPRESENTS_MODEL"] == 6
+    assert stats["semantic"]["metrics"]["edge_kind_counts"]["RETURNS_MODEL"] == 1
     assert stats["semantic"]["metrics"]["edge_kind_counts"]["RETURNS_SCHEMA"] == 1
     assert stats["semantic"]["metrics"]["carry_through"] == {
         "raw_spec_count": 3,
@@ -191,6 +198,16 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
     assert stats["semantic"]["metrics"]["coverage"]["endpoints_returning_schema"] == {
         "count": 1,
         "total": 1,
+        "ratio": 1.0,
+    }
+    assert stats["semantic"]["metrics"]["coverage"]["endpoints_with_any_model_edge"] == {
+        "count": 1,
+        "total": 1,
+        "ratio": 1.0,
+    }
+    assert stats["semantic"]["metrics"]["coverage"]["schemas_representing_model"] == {
+        "count": 5,
+        "total": 5,
         "ratio": 1.0,
     }
     assert stats["semantic"]["metrics"]["coverage"]["semantic_nodes_with_ast_provenance"][
@@ -299,6 +316,29 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
                 "response_kind": "Response",
                 "schema": "Pet",
             }
+        ]
+        model_rows = list(
+            conn.execute(
+                """
+                MATCH (e:SemanticNode {kind: 'ApiEndpoint'})
+                      -[edge:SEMANTIC_EDGE]->(model:SemanticNode {kind: 'ModelEntity'})
+                WHERE edge.kind IN ['ACCEPTS_MODEL', 'RETURNS_MODEL']
+                RETURN e.name AS endpoint, edge.kind AS edge_kind, model.name AS model
+                ORDER BY edge.kind
+                """
+            ).rows_as_dict()
+        )
+        assert model_rows == [
+            {
+                "endpoint": "GET /pets",
+                "edge_kind": "ACCEPTS_MODEL",
+                "model": "Pet",
+            },
+            {
+                "endpoint": "GET /pets",
+                "edge_kind": "RETURNS_MODEL",
+                "model": "Pet",
+            },
         ]
         semantic_node_count = list(
             conn.execute("MATCH (n:SemanticNode) RETURN COUNT(n) AS n").rows_as_dict()
