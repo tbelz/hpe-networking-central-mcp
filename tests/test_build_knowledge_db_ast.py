@@ -104,8 +104,11 @@ def _resolved() -> ResolvedSpec:
 def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> None:
     mod = _load_build_module()
     ast_db_path = repo_tmp_path / "knowledge_db_ast"
+    compiler_db_path = repo_tmp_path / "knowledge_db_compiler"
     ast_db_path.mkdir()
+    compiler_db_path.mkdir()
     (ast_db_path / "stale.txt").write_text("old", encoding="utf-8")
+    (compiler_db_path / "stale.txt").write_text("old", encoding="utf-8")
 
     stats = mod._build_ast_artifact(
         ast_db_path,
@@ -124,6 +127,7 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
                 error_type="resolution",
             ),
         ],
+        compiler_projection_db_path=compiler_db_path,
     )
 
     assert stats["enabled"] is True
@@ -213,7 +217,15 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
     assert stats["semantic"]["metrics"]["coverage"]["semantic_nodes_with_ast_provenance"][
         "ratio"
     ] == 1.0
+    assert stats["compiler_projection"]["enabled"] is True
+    assert stats["compiler_projection"]["db_path"] == "knowledge_db_compiler"
+    assert stats["compiler_projection"]["node_kind_counts"]["ApiEndpoint"] == 1
+    assert stats["compiler_projection"]["node_kind_counts"]["SchemaComponent"] == 5
+    assert stats["compiler_projection"]["node_kind_counts"]["Property"] == 1
+    assert stats["compiler_projection"]["edge_kind_counts"]["HAS_REQUEST_BODY"] == 1
+    assert stats["compiler_projection"]["edge_kind_counts"]["BODY_REFERENCES"] == 1
     assert not (ast_db_path / "stale.txt").exists()
+    assert not (compiler_db_path / "stale.txt").exists()
     json.dumps({"ast": stats})
 
     db = lb.Database(str(ast_db_path), max_db_size=256 * 1024 * 1024)
@@ -362,6 +374,53 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
     finally:
         db.close()
 
+    compiler_db = lb.Database(str(compiler_db_path), max_db_size=256 * 1024 * 1024)
+    compiler_conn = lb.Connection(compiler_db)
+    try:
+        typed_rows = list(
+            compiler_conn.execute(
+                """
+                MATCH (e:ApiEndpoint {method: 'GET', path: '/pets'})
+                      -[:HAS_REQUEST_BODY]->(body:RequestBody)
+                      -[:BODY_REFERENCES]->(schema:SchemaComponent)
+                      -[:HAS_PROPERTY]->(prop:Property)
+                RETURN e.endpoint_id AS endpoint,
+                       body.content_type AS content_type,
+                       schema.name AS schema,
+                       prop.name AS property
+                """
+            ).rows_as_dict()
+        )
+        assert typed_rows == [
+            {
+                "endpoint": "GET:/pets",
+                "content_type": "application/json",
+                "schema": "Pet",
+                "property": "id",
+            }
+        ]
+        response_rows = list(
+            compiler_conn.execute(
+                """
+                MATCH (:ApiEndpoint {method: 'GET', path: '/pets'})
+                      -[:HAS_RESPONSE]->(response:Response)
+                      -[:RESPONSE_REFERENCES]->(schema:SchemaComponent)
+                RETURN response.status AS status,
+                       response.content_type AS content_type,
+                       schema.component_id AS component
+                """
+            ).rows_as_dict()
+        )
+        assert response_rows == [
+            {
+                "status": "200",
+                "content_type": "application/json",
+                "component": "unit:schemas:Pet",
+            }
+        ]
+    finally:
+        compiler_db.close()
+
 
 def test_build_ast_artifact_fails_when_resolved_spec_cannot_build(
     repo_tmp_path: Path,
@@ -391,10 +450,13 @@ def test_release_archives_keep_ast_tar_separate(repo_tmp_path: Path) -> None:
     mod = _load_build_module()
     db_path = repo_tmp_path / "knowledge_db"
     ast_db_path = repo_tmp_path / "knowledge_db_ast"
+    compiler_db_path = repo_tmp_path / "knowledge_db_compiler"
     db_path.mkdir()
     ast_db_path.mkdir()
+    compiler_db_path.mkdir()
     (db_path / "db.lbd").write_text("runtime", encoding="utf-8")
     (ast_db_path / "db.lbd").write_text("ast", encoding="utf-8")
+    (compiler_db_path / "db.lbd").write_text("compiler", encoding="utf-8")
     manifest_path = repo_tmp_path / "manifest.json"
     manifest_path.write_text('{"version": "unit"}', encoding="utf-8")
 
@@ -402,10 +464,12 @@ def test_release_archives_keep_ast_tar_separate(repo_tmp_path: Path) -> None:
         repo_tmp_path,
         db_path=db_path,
         ast_db_path=ast_db_path,
+        compiler_projection_db_path=compiler_db_path,
         manifest_path=manifest_path,
     )
 
     assert archives["knowledge_db"].name == "knowledge_db.tar.gz"
+    assert archives["knowledge_db_compiler"].name == "knowledge_db_compiler.tar.gz"
     assert archives["knowledge_db_ast"].name == "knowledge_db_ast.tar.gz"
 
     with tarfile.open(archives["knowledge_db"], "r:gz") as tf:
@@ -413,6 +477,12 @@ def test_release_archives_keep_ast_tar_separate(repo_tmp_path: Path) -> None:
     assert "knowledge_db/db.lbd" in names
     assert "manifest.json" in names
     assert all(not name.startswith("knowledge_db_ast/") for name in names)
+    assert all(not name.startswith("knowledge_db_compiler/") for name in names)
+
+    with tarfile.open(archives["knowledge_db_compiler"], "r:gz") as tf:
+        compiler_names = tf.getnames()
+    assert "knowledge_db_compiler/db.lbd" in compiler_names
+    assert "manifest.json" not in compiler_names
 
     with tarfile.open(archives["knowledge_db_ast"], "r:gz") as tf:
         ast_names = tf.getnames()
