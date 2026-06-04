@@ -23,6 +23,11 @@ If a future agent needs an OpenAPI field that was not projected, it should
 ask for source detail through that provenance path instead of requiring a
 new projection column.
 
+Projection provenance also carries the source document's ingestion status.
+Rows derived from specs that failed strict Task 1 validation but compiled
+losslessly are marked `degraded`; future agent-facing tools should expose
+that marker rather than treating all projected facts as equally validated.
+
 Selected compiler-projection columns exist for frequent, deterministic
 queries; they are not a completeness boundary. Constraint-bearing schema
 and property rows also carry a generic `constraintsJson` payload, while

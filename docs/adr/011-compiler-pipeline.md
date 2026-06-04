@@ -94,8 +94,9 @@ instance of this pattern.
 
 ### L1 — Lossless AST
 
-The compiler frontend (`compiler/frontend.py`) walks the resolved spec
-and emits a generic LadybugDB (`build/knowledge_db_ast/`) that contains a
+Task 1 proves strict validation and reference resolvability, while the L1
+builder walks the cleaned raw spec so `$ref` topology remains visible. It
+emits a generic LadybugDB (`build/knowledge_db_ast/`) that contains a
 node for every OAS construct (Operation, Parameter, Schema, MediaType,
 RequestBody, Response, Header, Discriminator, Example, EnumValue,
 Constraint, Extension, …) and typed edges between them.
@@ -113,6 +114,18 @@ to their owner; they are not silently dropped.
 
 L1 is never queried by agents.  It exists to allow L2 rule packs and the
 L3 projection pass to iterate without re-parsing the spec.
+
+Strict Task 1 validation and compiler carry-through are separate facts.
+A spec that fails strict validation or reference expansion is still offered
+to the lossless raw-spec compiler. If its syntax is understood, L1 persists
+it with `ingestion_status=degraded` plus the Task 1 error, and L3 provenance
+retains that marker. If a degraded input also cannot compile, the manifest
+lists it explicitly as uncompiled. Unknown syntax in a strictly valid input
+remains a build-stopping compiler error.
+
+This distinction prevents strict upstream defects from silently dropping
+otherwise useful API endpoints while ensuring consumers can tell validated
+and degraded facts apart.
 
 ### L2 — Semantic Overlay (rule packs)
 
@@ -232,6 +245,17 @@ instruction changes until cutover.
 | Rule packs accumulate implicit ordering dependencies | Explicit registration manifest; each pack is a pure function |
 | Parity tests give false confidence | Corpus seeded from real agent session gaps and existing tool docstring examples |
 | `_KNOWLEDGE_SCHEMA_VERSION` churn | One bump at cutover; none during the dual-build migration window |
+
+The dual-build implementation uses bounded bulk-write batches and fast
+release compression. Build logs and the manifest record compiler-stage
+timings so scheduled-run performance is evaluated from real runner data,
+not inferred only from unit fixtures.
+
+Task 1 also uses a content-addressed validation cache during scheduled
+builds. A cache hit is allowed only when the cleaned spec hash and strict
+validation toolchain fingerprint match exactly; new or changed specs still
+run through Prance. This is incremental compilation of a deterministic
+frontend result, not a relaxation of validation.
 
 ## Alternatives considered
 

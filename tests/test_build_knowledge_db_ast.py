@@ -101,6 +101,21 @@ def _resolved() -> ResolvedSpec:
     return outcome
 
 
+def test_remove_build_path_handles_ladybug_file_or_directory(repo_tmp_path: Path) -> None:
+    mod = _load_build_module()
+    file_path = repo_tmp_path / "file_db"
+    file_path.write_text("db", encoding="utf-8")
+    directory_path = repo_tmp_path / "directory_db"
+    directory_path.mkdir()
+    (directory_path / "db.lbd").write_text("db", encoding="utf-8")
+
+    mod._remove_build_path(file_path)
+    mod._remove_build_path(directory_path)
+
+    assert not file_path.exists()
+    assert not directory_path.exists()
+
+
 @pytest.mark.timeout(90)
 def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> None:
     mod = _load_build_module()
@@ -133,10 +148,14 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
 
     assert stats["enabled"] is True
     assert stats["db_path"] == "knowledge_db_ast"
+    assert stats["graph_batch_size"] == 256
     assert stats["raw_spec_count"] == 3
     assert stats["task1_resolved_count"] == 1
     assert stats["spec_count"] == 1
     assert stats["task1_failed_count"] == 2
+    assert stats["degraded"]["candidate_count"] == 2
+    assert stats["degraded"]["compiled_count"] == 0
+    assert stats["degraded"]["failed_count"] == 2
     assert stats["task1_failures"] == [
         {
             "source": "unit/bad",
@@ -180,6 +199,8 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
         "raw_spec_count": 3,
         "task1_resolved_count": 1,
         "task1_failed_count": 2,
+        "degraded_compiled_count": 0,
+        "degraded_failed_count": 2,
         "ast_graph_count": 1,
         "semantic_graph_count": 1,
         "resolved_to_ast_ratio": 1.0,
@@ -232,6 +253,7 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
         "semantic_write",
         "projection_collect",
         "projection_write",
+        "compiler_total",
     }
     assert all(value >= 0 for value in stats["timings_seconds"].values())
     assert not (ast_db_path / "stale.txt").exists()
@@ -384,6 +406,84 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
     finally:
         db.close()
 
+
+@pytest.mark.timeout(90)
+def test_build_ast_artifact_carries_strict_failure_as_marked_degraded_graph(
+    repo_tmp_path: Path,
+) -> None:
+    mod = _load_build_module()
+    invalid = _oas_spec()
+    invalid.pop("info")
+    failure = resolve_spec(invalid, source="unit/degraded")
+    assert isinstance(failure, ResolutionFailure)
+    assert failure.raw_spec == invalid
+
+    ast_db_path = repo_tmp_path / "knowledge_db_ast"
+    compiler_db_path = repo_tmp_path / "knowledge_db_compiler"
+    stats = mod._build_ast_artifact(
+        ast_db_path,
+        [],
+        task1_failures=[failure],
+        compiler_projection_db_path=compiler_db_path,
+    )
+
+    assert stats["task1_resolved_count"] == 0
+    assert stats["task1_failed_count"] == 1
+    assert stats["spec_count"] == 1
+    assert stats["degraded"] == {
+        "candidate_count": 1,
+        "compiled_count": 1,
+        "failed_count": 0,
+        "failures": [],
+    }
+    assert stats["semantic"]["metrics"]["carry_through"] == {
+        "raw_spec_count": 1,
+        "task1_resolved_count": 0,
+        "task1_failed_count": 1,
+        "degraded_compiled_count": 1,
+        "degraded_failed_count": 0,
+        "ast_graph_count": 1,
+        "semantic_graph_count": 1,
+        "resolved_to_ast_ratio": 0.0,
+        "raw_to_semantic_ratio": 1.0,
+    }
+
+    ast_db = lb.Database(str(ast_db_path), max_db_size=256 * 1024 * 1024)
+    compiler_db = lb.Database(str(compiler_db_path), max_db_size=256 * 1024 * 1024)
+    try:
+        ast_rows = list(
+            lb.Connection(ast_db).execute(
+                """
+                MATCH (spec:OasSpec)
+                RETURN spec.source AS source,
+                       spec.ingestion_status AS status,
+                       spec.ingestion_error_type AS error_type
+                """
+            ).rows_as_dict()
+        )
+        assert ast_rows == [{
+            "source": "unit/degraded",
+            "status": "degraded",
+            "error_type": "validation",
+        }]
+
+        provenance_rows = list(
+            lb.Connection(compiler_db).execute(
+                """
+                MATCH (row:CompilerProjectionMap {table_name: 'ApiEndpoint'})
+                RETURN row.ingestion_status AS status,
+                       row.ingestion_error_type AS error_type
+                """
+            ).rows_as_dict()
+        )
+        assert provenance_rows == [{
+            "status": "degraded",
+            "error_type": "validation",
+        }]
+    finally:
+        compiler_db.close()
+        ast_db.close()
+
     compiler_db = lb.Database(str(compiler_db_path), max_db_size=256 * 1024 * 1024)
     compiler_conn = lb.Connection(compiler_db)
     try:
@@ -454,6 +554,70 @@ def test_build_ast_artifact_fails_when_resolved_spec_cannot_build(
             [_resolved()],
             task1_failures=[],
         )
+
+
+def test_build_ast_artifact_reports_uncompilable_degraded_spec(
+    repo_tmp_path: Path,
+) -> None:
+    mod = _load_build_module()
+    failure = ResolutionFailure(
+        source="unit/unknown-keyword",
+        title="Unknown keyword",
+        error="strict validation failed",
+        error_type="validation",
+        raw_spec={
+            "openapi": "3.0.3",
+            "info": {"title": "Unknown keyword", "version": "1.0"},
+            "paths": {},
+            "madeUpKeyword": True,
+        },
+    )
+
+    stats = mod._build_ast_artifact(
+        repo_tmp_path / "knowledge_db_ast",
+        [],
+        task1_failures=[failure],
+    )
+
+    assert stats["spec_count"] == 0
+    assert stats["degraded"]["candidate_count"] == 1
+    assert stats["degraded"]["compiled_count"] == 0
+    assert stats["degraded"]["failed_count"] == 1
+    assert stats["degraded"]["failures"][0]["source"] == "unit/unknown-keyword"
+    assert stats["degraded"]["failures"][0]["compiler_error_type"] == (
+        "UnknownKeywordError"
+    )
+    assert "madeUpKeyword" in stats["degraded"]["failures"][0]["compiler_error"]
+
+
+def test_build_ast_artifact_distinguishes_empty_from_missing_degraded_spec(
+    repo_tmp_path: Path,
+) -> None:
+    mod = _load_build_module()
+    empty = ResolutionFailure(
+        source="unit/empty",
+        title="Empty",
+        error="strict validation failed",
+        error_type="validation",
+        raw_spec={},
+    )
+    missing = ResolutionFailure(
+        source="unit/missing",
+        title="Missing",
+        error="strict validation failed",
+        error_type="validation",
+    )
+
+    stats = mod._build_ast_artifact(
+        repo_tmp_path / "knowledge_db_ast",
+        [],
+        task1_failures=[empty, missing],
+    )
+
+    assert stats["degraded"]["compiled_count"] == 1
+    assert stats["degraded"]["failed_count"] == 1
+    assert stats["degraded"]["failures"][0]["source"] == "unit/missing"
+    assert stats["degraded"]["failures"][0]["compiler_error_type"] == "MissingRawSpec"
 
 
 def test_release_archives_keep_ast_tar_separate(repo_tmp_path: Path) -> None:

@@ -148,6 +148,8 @@ _PROJECTION_MAP_SCHEMA = pa.schema([
     ("json_pointer", pa.string()),
     ("spec_id", pa.string()),
     ("source", pa.string()),
+    ("ingestion_status", pa.string()),
+    ("ingestion_error_type", pa.string()),
 ])
 
 _PROJECTION_MAP_DDL = """
@@ -160,6 +162,8 @@ CREATE NODE TABLE IF NOT EXISTS CompilerProjectionMap (
     json_pointer  STRING,
     spec_id       STRING,
     source        STRING,
+    ingestion_status     STRING,
+    ingestion_error_type STRING,
     PRIMARY KEY (projection_id)
 )
 """
@@ -800,6 +804,8 @@ def _add_projection_provenance(
         "json_pointer": node.json_pointer if node is not None else json_pointer,
         "spec_id": ast.spec_id,
         "source": ast.spec_row.get("source", ""),
+        "ingestion_status": ast.spec_row.get("ingestion_status", "strict_valid"),
+        "ingestion_error_type": ast.spec_row.get("ingestion_error_type", ""),
     }
 
 

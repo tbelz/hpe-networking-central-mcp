@@ -233,7 +233,9 @@ def _fetch_provenance(conn, table_name: str, row_id: str) -> dict[str, Any]:
                    row.ast_node_id AS ast_node_id,
                    row.json_pointer AS json_pointer,
                    row.spec_id AS spec_id,
-                   row.source AS source
+                   row.source AS source,
+                   row.ingestion_status AS ingestion_status,
+                   row.ingestion_error_type AS ingestion_error_type
             LIMIT 1
             """,
             parameters={"table_name": table_name, "row_id": row_id},

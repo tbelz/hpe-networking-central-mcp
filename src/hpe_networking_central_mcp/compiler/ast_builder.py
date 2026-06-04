@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from .frontend import ResolvedSpec
+from .frontend import ResolvedSpec, ResolutionFailure
 
 
 _HTTP_METHODS = {
@@ -309,10 +309,37 @@ class UnknownKeywordError(ValueError):
 
 def build_ast_from_resolved(resolved: ResolvedSpec) -> AstGraph:
     """Build L1 from the cleaned raw spec carried by a Task 1 result."""
-    return build_ast_graph(resolved.raw_spec, source=resolved.source, title=resolved.title)
+    return build_ast_graph(
+        resolved.raw_spec,
+        source=resolved.source,
+        title=resolved.title,
+        ingestion_status="strict_valid",
+    )
 
 
-def build_ast_graph(spec: dict[str, Any], *, source: str, title: str | None = None) -> AstGraph:
+def build_ast_from_failure(failure: ResolutionFailure) -> AstGraph:
+    """Build a marked degraded L1 graph from a strict Task 1 failure."""
+    if failure.raw_spec is None:
+        raise ValueError("Task 1 failure did not retain a cleaned raw spec")
+    return build_ast_graph(
+        failure.raw_spec,
+        source=failure.source,
+        title=failure.title,
+        ingestion_status="degraded",
+        ingestion_error_type=failure.error_type,
+        ingestion_error=failure.error,
+    )
+
+
+def build_ast_graph(
+    spec: dict[str, Any],
+    *,
+    source: str,
+    title: str | None = None,
+    ingestion_status: str = "strict_valid",
+    ingestion_error_type: str = "",
+    ingestion_error: str = "",
+) -> AstGraph:
     """Return a lossless AST graph for one cleaned raw OpenAPI document."""
     canonical = _json(spec, sort_keys=True)
     content_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -330,6 +357,9 @@ def build_ast_graph(spec: dict[str, Any], *, source: str, title: str | None = No
             "title": resolved_title,
             "openapi_version": openapi_version,
             "content_hash": content_hash,
+            "ingestion_status": ingestion_status,
+            "ingestion_error_type": ingestion_error_type,
+            "ingestion_error": ingestion_error[:2000],
         },
         root_node_id=f"{spec_id}#",
     )
@@ -513,9 +543,9 @@ def _child_kind(*, parent_kind: str, parent_pointer: str, key: str, value: Any) 
     if parent_kind == "Extension":
         return parent_kind
     parts = _pointer_parts(parent_pointer)
-    if _is_schema_property_map(parts):
+    if parent_kind == "Scalar" and _is_schema_property_map(parts):
         return "Property"
-    if _is_schema_def_map(parts):
+    if parent_kind == "Scalar" and _is_schema_def_map(parts):
         return "Schema"
     if parent_kind == "Constraint":
         return parent_kind

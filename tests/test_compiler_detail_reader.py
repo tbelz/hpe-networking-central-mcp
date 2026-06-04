@@ -126,6 +126,8 @@ def test_projection_detail_recovers_raw_openapi_not_in_typed_projection(
     assert property_detail["provenance"]["json_pointer"] == (
         "/components/schemas/DeviceCreate/properties/serial"
     )
+    assert property_detail["provenance"]["ingestion_status"] == "strict_valid"
+    assert property_detail["provenance"]["ingestion_error_type"] == ""
 
     header_detail = load_projection_detail(
         compiler_db_path=compiler_db_path,

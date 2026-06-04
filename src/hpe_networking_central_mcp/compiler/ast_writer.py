@@ -18,6 +18,9 @@ _SPEC_SCHEMA = pa.schema([
     ("title", pa.string()),
     ("openapi_version", pa.string()),
     ("content_hash", pa.string()),
+    ("ingestion_status", pa.string()),
+    ("ingestion_error_type", pa.string()),
+    ("ingestion_error", pa.string()),
 ])
 
 _NODE_SCHEMA = pa.schema([
