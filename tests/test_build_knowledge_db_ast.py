@@ -590,6 +590,36 @@ def test_build_ast_artifact_reports_uncompilable_degraded_spec(
     assert "madeUpKeyword" in stats["degraded"]["failures"][0]["compiler_error"]
 
 
+def test_build_ast_artifact_distinguishes_empty_from_missing_degraded_spec(
+    repo_tmp_path: Path,
+) -> None:
+    mod = _load_build_module()
+    empty = ResolutionFailure(
+        source="unit/empty",
+        title="Empty",
+        error="strict validation failed",
+        error_type="validation",
+        raw_spec={},
+    )
+    missing = ResolutionFailure(
+        source="unit/missing",
+        title="Missing",
+        error="strict validation failed",
+        error_type="validation",
+    )
+
+    stats = mod._build_ast_artifact(
+        repo_tmp_path / "knowledge_db_ast",
+        [],
+        task1_failures=[empty, missing],
+    )
+
+    assert stats["degraded"]["compiled_count"] == 1
+    assert stats["degraded"]["failed_count"] == 1
+    assert stats["degraded"]["failures"][0]["source"] == "unit/missing"
+    assert stats["degraded"]["failures"][0]["compiler_error_type"] == "MissingRawSpec"
+
+
 def test_release_archives_keep_ast_tar_separate(repo_tmp_path: Path) -> None:
     mod = _load_build_module()
     db_path = repo_tmp_path / "knowledge_db"

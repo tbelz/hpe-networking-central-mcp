@@ -262,6 +262,23 @@ def test_resolve_specs_can_drop_expanded_payload_for_build_pipeline() -> None:
 
     assert result.resolved[0].spec == {}
     assert result.resolved[0].raw_spec == spec
+    assert result.cache_hits == 0
+    assert result.cache_misses == 0
+
+
+@pytest.mark.compiler
+@pytest.mark.unit
+def test_resolution_cache_stats_stay_zero_when_expanded_payload_is_retained() -> None:
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "Expanded batch", "version": "1.0"},
+        "paths": {},
+    }
+
+    result = resolve_specs([spec], cache={})
+
+    assert result.cache_hits == 0
+    assert result.cache_misses == 0
 
 
 @pytest.mark.compiler
@@ -325,6 +342,46 @@ def test_resolution_cache_round_trips_and_rejects_wrong_fingerprint(
     payload["fingerprint"] = "stale-toolchain"
     path.write_text(json.dumps(payload), encoding="utf-8")
     assert load_resolution_cache(path) == {}
+
+
+@pytest.mark.compiler
+@pytest.mark.unit
+def test_resolution_cache_drops_malformed_entries(repo_tmp_path: Path) -> None:
+    path = repo_tmp_path / "compiler-task1-cache.json"
+    path.write_text(
+        json.dumps({
+            "fingerprint": frontend.resolution_cache_fingerprint(),
+            "entries": {
+                "valid-resolved": {"status": "resolved"},
+                "valid-failed": {
+                    "status": "failed",
+                    "error_type": "validation",
+                    "error": "bad spec",
+                },
+                "bad-error-type": {
+                    "status": "failed",
+                    "error_type": 42,
+                    "error": "bad spec",
+                },
+                "bad-error": {
+                    "status": "failed",
+                    "error_type": "validation",
+                    "error": {"message": "bad spec"},
+                },
+                "bad-status": {"status": 42},
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    assert load_resolution_cache(path) == {
+        "valid-resolved": {"status": "resolved"},
+        "valid-failed": {
+            "status": "failed",
+            "error_type": "validation",
+            "error": "bad spec",
+        },
+    }
 
 
 # ── Coverage smoke against a real-spec sample ──────────────────────

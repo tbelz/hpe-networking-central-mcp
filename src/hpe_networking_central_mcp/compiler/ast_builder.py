@@ -319,6 +319,8 @@ def build_ast_from_resolved(resolved: ResolvedSpec) -> AstGraph:
 
 def build_ast_from_failure(failure: ResolutionFailure) -> AstGraph:
     """Build a marked degraded L1 graph from a strict Task 1 failure."""
+    if failure.raw_spec is None:
+        raise ValueError("Task 1 failure did not retain a cleaned raw spec")
     return build_ast_graph(
         failure.raw_spec,
         source=failure.source,

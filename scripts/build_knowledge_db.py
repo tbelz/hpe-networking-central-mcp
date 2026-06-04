@@ -350,7 +350,7 @@ def _build_ast_artifact(
             persist_graphs(graphs, semantic_graphs)
 
         for failure in task1_failures:
-            if not failure.raw_spec:
+            if failure.raw_spec is None:
                 stats["degraded"]["failed_count"] += 1
                 stats["degraded"]["failures"].append({
                     "source": failure.source,

@@ -31,6 +31,7 @@ import importlib.metadata
 import json
 import multiprocessing
 import os
+import tempfile
 import threading
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
@@ -63,7 +64,7 @@ class ResolutionFailure:
     title: str
     error: str
     error_type: Literal["validation", "resolution", "unexpected"]
-    raw_spec: dict[str, Any] = field(default_factory=dict)
+    raw_spec: dict[str, Any] | None = None
 
 
 @dataclass
@@ -205,16 +206,18 @@ def resolve_specs(
     outcomes: list[ResolvedSpec | ResolutionFailure | None] = [None] * len(entries)
     misses: list[tuple[int, tuple[dict[str, Any], str, bool], str]] = []
     result = ResolutionResult()
+    cache_enabled = cache is not None and not retain_resolved_spec
     for index, entry in enumerate(entries):
-        cleaned, source, retain = entry
-        cache_key = _cleaned_spec_hash(cleaned) if cache is not None and not retain else ""
-        cached = cache.get(cache_key) if cache is not None and not retain else None
+        cleaned, source, _ = entry
+        cache_key = _cleaned_spec_hash(cleaned) if cache_enabled else ""
+        cached = cache.get(cache_key) if cache_enabled else None
         if cached is not None:
             outcomes[index] = _cached_outcome(cleaned, source, cached)
             result.cache_hits += 1
         else:
             misses.append((index, entry, cache_key))
-            result.cache_misses += 1
+            if cache_enabled:
+                result.cache_misses += 1
 
     workers = _resolve_worker_count(len(misses), max_workers)
     result.workers_used = workers
@@ -230,7 +233,7 @@ def resolve_specs(
 
     for (index, _, cache_key), outcome in zip(misses, miss_outcomes):
         outcomes[index] = outcome
-        if cache is not None and not retain_resolved_spec:
+        if cache_enabled:
             cache[cache_key] = _cache_entry(outcome)
 
     for outcome in outcomes:
@@ -256,28 +259,37 @@ def load_resolution_cache(path: Path) -> ResolutionCache:
     return {
         key: value
         for key, value in entries.items()
-        if isinstance(key, str)
-        and isinstance(value, dict)
-        and value.get("status") in {"resolved", "failed"}
+        if isinstance(key, str) and _is_valid_cache_entry(value)
     }
 
 
 def write_resolution_cache(path: Path, cache: ResolutionCache) -> None:
     """Persist content-addressed strict-validation outcomes atomically."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(path.suffix + ".tmp")
-    temp_path.write_text(
-        json.dumps(
-            {
-                "fingerprint": resolution_cache_fingerprint(),
-                "entries": cache,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-        encoding="utf-8",
+    payload = json.dumps(
+        {
+            "fingerprint": resolution_cache_fingerprint(),
+            "entries": cache,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
     )
-    temp_path.replace(path)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_file.write(payload)
+            temp_path = Path(temp_file.name)
+        temp_path.replace(path)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 def resolution_cache_fingerprint() -> str:
@@ -389,6 +401,18 @@ def _cache_entry(outcome: ResolvedSpec | ResolutionFailure) -> dict[str, str]:
         "error_type": outcome.error_type,
         "error": outcome.error,
     }
+
+
+def _is_valid_cache_entry(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("status") == "resolved":
+        return True
+    return (
+        value.get("status") == "failed"
+        and value.get("error_type") in {"validation", "resolution", "unexpected"}
+        and isinstance(value.get("error"), str)
+    )
 
 
 def _resolve_worker_count(total: int, requested: int | None) -> int:
