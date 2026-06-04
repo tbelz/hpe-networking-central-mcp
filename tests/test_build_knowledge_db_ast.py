@@ -163,7 +163,7 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
         "semantic.structural.v1",
     }
     assert stats["semantic"]["metrics"]["node_kind_counts"]["ApiEndpoint"] == 1
-    assert stats["semantic"]["metrics"]["node_kind_counts"]["ModelEntity"] == 6
+    assert stats["semantic"]["metrics"]["node_kind_counts"]["ModelEntity"] == 3
     assert stats["semantic"]["metrics"]["node_kind_counts"]["Parameter"] == 1
     assert stats["semantic"]["metrics"]["node_kind_counts"]["RequestBody"] == 1
     assert stats["semantic"]["metrics"]["node_kind_counts"]["Response"] == 1
@@ -173,7 +173,7 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
     assert stats["semantic"]["metrics"]["edge_kind_counts"]["HAS_REQUEST_BODY"] == 1
     assert stats["semantic"]["metrics"]["edge_kind_counts"]["HAS_RESPONSE"] == 1
     assert stats["semantic"]["metrics"]["edge_kind_counts"]["RESPONSE_REFERENCES"] == 1
-    assert stats["semantic"]["metrics"]["edge_kind_counts"]["REPRESENTS_MODEL"] == 6
+    assert stats["semantic"]["metrics"]["edge_kind_counts"]["REPRESENTS_MODEL"] == 3
     assert stats["semantic"]["metrics"]["edge_kind_counts"]["RETURNS_MODEL"] == 1
     assert stats["semantic"]["metrics"]["edge_kind_counts"]["RETURNS_SCHEMA"] == 1
     assert stats["semantic"]["metrics"]["carry_through"] == {
@@ -211,8 +211,8 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
         "ratio": 1.0,
     }
     assert stats["semantic"]["metrics"]["coverage"]["schemas_representing_model"] == {
-        "count": 5,
-        "total": 5,
+        "count": 2,
+        "total": 2,
         "ratio": 1.0,
     }
     assert stats["semantic"]["metrics"]["coverage"]["semantic_nodes_with_ast_provenance"][
@@ -221,7 +221,7 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
     assert stats["compiler_projection"]["enabled"] is True
     assert stats["compiler_projection"]["db_path"] == "knowledge_db_compiler"
     assert stats["compiler_projection"]["node_kind_counts"]["ApiEndpoint"] == 1
-    assert stats["compiler_projection"]["node_kind_counts"]["SchemaComponent"] == 5
+    assert stats["compiler_projection"]["node_kind_counts"]["SchemaComponent"] == 2
     assert stats["compiler_projection"]["node_kind_counts"]["Property"] == 1
     assert stats["compiler_projection"]["edge_kind_counts"]["HAS_REQUEST_BODY"] == 1
     assert stats["compiler_projection"]["edge_kind_counts"]["BODY_REFERENCES"] == 1

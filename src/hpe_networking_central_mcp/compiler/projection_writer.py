@@ -450,14 +450,14 @@ def _collect_graph_rows(
                 _add_projection_provenance(provenance_rows, "Response", typed_id, node, ast)
         elif node.kind == "SchemaComponent":
             row = _schema_row(ast, node, summary, typed_id, raw_by_pointer)
-            _put_richest(rows["SchemaComponent"], typed_id, row)
-            _add_projection_provenance(
-                provenance_rows,
-                "SchemaComponent",
-                typed_id,
-                node,
-                ast,
-            )
+            if _put_richest(rows["SchemaComponent"], typed_id, row):
+                _add_projection_provenance(
+                    provenance_rows,
+                    "SchemaComponent",
+                    typed_id,
+                    node,
+                    ast,
+                )
         elif node.kind == "Property":
             parent_id = typed_ids.get(schema_parent.get(node.semantic_id, ""))
             if parent_id:
@@ -572,14 +572,80 @@ def _parent_endpoint_id(
 def _component_id(ast: AstGraph, node: SemanticNode | None) -> str:
     if node is None:
         return ""
+    return _component_id_for_pointer(ast, node.json_pointer, set())
+
+
+def _component_id_for_pointer(
+    ast: AstGraph,
+    pointer: str,
+    seen: set[str],
+) -> str:
+    """Return a stable, lineage-derived L3 component id for a schema pointer."""
+    if pointer in seen:
+        return _fallback_pointer_id(ast, pointer)
+    seen.add(pointer)
+
     provider = _provider(ast)
-    parts = _pointer_parts(node.json_pointer)
+    parts = _pointer_parts(pointer)
+    body = _get_pointer(ast.spec, pointer)
+    if not isinstance(body, dict):
+        return _fallback_pointer_id(ast, pointer)
+
     if len(parts) >= 3 and parts[0] == "components":
         section = parts[1]
         name = parts[2]
         if len(parts) == 3:
             return f"{provider}:{section}:{name}"
-    return _fallback_id(ast, "inline", node)
+
+    ref_pointer = _internal_ref_pointer(body.get("$ref"))
+    if ref_pointer and _is_ref_only_schema(body):
+        return _component_id_for_pointer(ast, ref_pointer, seen)
+
+    if len(parts) >= 2 and parts[-2] in {"allOf", "anyOf", "oneOf"}:
+        parent_id = _component_id_for_pointer(
+            ast,
+            _pointer_from_parts(parts[:-2]),
+            seen,
+        )
+        return f"{parent_id}#{parts[-2]}:{_safe_id_part(parts[-1])}" if parent_id else ""
+
+    if parts and parts[-1] == "additionalProperties":
+        parent_id = _component_id_for_pointer(
+            ast,
+            _pointer_from_parts(parts[:-1]),
+            seen,
+        )
+        return f"{parent_id}#additionalProperties" if parent_id else ""
+
+    if parts and parts[-1] == "items":
+        if len(parts) >= 3 and parts[-3] in {"properties", "patternProperties"}:
+            parent_id = _component_id_for_pointer(
+                ast,
+                _pointer_from_parts(parts[:-3]),
+                seen,
+            )
+            property_name = _safe_id_part(parts[-2])
+            return f"{parent_id}#prop:{property_name}#items" if parent_id else ""
+        parent_id = _component_id_for_pointer(
+            ast,
+            _pointer_from_parts(parts[:-1]),
+            seen,
+        )
+        return f"{parent_id}#items" if parent_id else ""
+
+    if len(parts) >= 2 and parts[-2] in {"properties", "patternProperties"}:
+        role = _inline_property_schema_role(body)
+        if not role:
+            return ""
+        parent_id = _component_id_for_pointer(
+            ast,
+            _pointer_from_parts(parts[:-2]),
+            seen,
+        )
+        property_name = _safe_id_part(parts[-1])
+        return f"{parent_id}#prop:{property_name}#{role}" if parent_id else ""
+
+    return _fallback_pointer_id(ast, pointer)
 
 
 def _schema_row(
@@ -619,8 +685,9 @@ def _collect_reusable_component_rows(
     components = ast.spec.get("components")
     if not isinstance(components, dict):
         return
-    for section in ("headers", "parameters", "requestBodies", "responses"):
-        entries = components.get(section)
+    for section, entries in components.items():
+        if section == "schemas":
+            continue
         if not isinstance(entries, dict):
             continue
         for name, body in entries.items():
@@ -643,17 +710,17 @@ def _collect_reusable_component_rows(
                 "constraintsJson": _json(collect_constraints(body)),
                 "bodyJson": _raw_json_for(ast, pointer, body),
             }
-            _put_richest(rows["SchemaComponent"], component_id, row)
-            ast_node = ast_by_pointer.get(pointer)
-            _add_projection_provenance(
-                provenance_rows,
-                "SchemaComponent",
-                component_id,
-                None,
-                ast,
-                ast_node_id=ast_node.node_id if ast_node is not None else "",
-                json_pointer=pointer,
-            )
+            if _put_richest(rows["SchemaComponent"], component_id, row):
+                ast_node = ast_by_pointer.get(pointer)
+                _add_projection_provenance(
+                    provenance_rows,
+                    "SchemaComponent",
+                    component_id,
+                    None,
+                    ast,
+                    ast_node_id=ast_node.node_id if ast_node is not None else "",
+                    json_pointer=pointer,
+                )
 
 
 def _edge_row(
@@ -692,10 +759,16 @@ def _edge_row(
     return None
 
 
-def _put_richest(rows: dict[str, dict[str, Any]], key: str, row: dict[str, Any]) -> None:
+def _put_richest(
+    rows: dict[str, dict[str, Any]],
+    key: str,
+    row: dict[str, Any],
+) -> bool:
     current = rows.get(key)
     if current is None or len(row.get("bodyJson") or "") > len(current.get("bodyJson") or ""):
         rows[key] = row
+        return True
+    return False
 
 
 def _apply_projection_schema(conn) -> None:
@@ -760,8 +833,65 @@ def _pointer_parts(pointer: str) -> list[str]:
     return [part.replace("~1", "/").replace("~0", "~") for part in pointer.strip("/").split("/")]
 
 
+def _pointer_from_parts(parts: list[str]) -> str:
+    return "".join(f"/{_escape_pointer(part)}" for part in parts)
+
+
 def _escape_pointer(value: str) -> str:
     return value.replace("~", "~0").replace("/", "~1")
+
+
+def _get_pointer(obj: Any, pointer: str) -> Any:
+    if pointer in {"", "/"}:
+        return obj
+    current = obj
+    for part in _pointer_parts(pointer):
+        if isinstance(current, dict):
+            current = current.get(part)
+        elif isinstance(current, list):
+            try:
+                current = current[int(part)]
+            except (ValueError, IndexError):
+                return None
+        else:
+            return None
+    return current
+
+
+def _internal_ref_pointer(ref: Any) -> str:
+    if not isinstance(ref, str) or not ref.startswith("#/"):
+        return ""
+    return ref[1:]
+
+
+def _is_ref_only_schema(body: dict[str, Any]) -> bool:
+    if not isinstance(body.get("$ref"), str):
+        return False
+    return set(body).issubset({"$ref", "description", "summary", "title"})
+
+
+def _inline_property_schema_role(body: dict[str, Any]) -> str:
+    if isinstance(body.get("properties"), dict):
+        return "object"
+    if any(isinstance(body.get(key), list) and body[key] for key in (
+        "allOf",
+        "anyOf",
+        "oneOf",
+    )):
+        return "union"
+    if body.get("additionalProperties") is True or isinstance(
+        body.get("additionalProperties"),
+        dict,
+    ):
+        return "map"
+    return ""
+
+
+def _fallback_pointer_id(ast: AstGraph, pointer: str) -> str:
+    digest = hashlib.sha1(
+        f"{_provider(ast)}\0{pointer}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"{_provider(ast)}:inline:{digest}"
 
 
 def _load_summary(node: SemanticNode) -> dict[str, Any]:

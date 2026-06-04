@@ -241,8 +241,8 @@ def test_semantic_overlay_builds_agent_highways() -> None:
         "CONFIGURES_MODEL",
         "yang:/ac-ntp:ntp/ac-ntp:server",
     ) in model_edge_tuples
-    # "0" is the index-based name of the first allOf branch, the BaseConfig ref.
-    assert ("NtpProfile", "COMPOSED_OF", "0") in edge_tuples
+    # Transparent composition refs connect directly to their named target.
+    assert ("NtpProfile", "COMPOSED_OF", "BaseConfig") in edge_tuples
     assert ("server", "PROPERTY_AT_YANG", "/ac-ntp:ntp/ac-ntp:server") in edge_tuples
 
     server = next(node for node in nodes_by_kind["Property"] if node.name == "server")
@@ -330,6 +330,66 @@ def test_semantic_overlay_links_array_property_to_named_item_schema() -> None:
         "minItems": 1,
         "x-key": ["id"],
     }
+
+
+def test_semantic_overlay_resolves_transparent_schema_wrappers() -> None:
+    ast_graph = build_ast_graph(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "Transparent refs", "version": "1.0"},
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Leaf": {"type": "string"},
+                    "Base": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                    },
+                    "Composite": {
+                        "allOf": [
+                            {"$ref": "#/components/schemas/Base"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "leaf": {"$ref": "#/components/schemas/Leaf"}
+                                },
+                            },
+                        ]
+                    },
+                    "Map": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "$ref": "#/components/schemas/Leaf"
+                        },
+                    },
+                }
+            },
+        },
+        source="unit/transparent-refs",
+    )
+
+    semantic = build_semantic_overlay(ast_graph)
+    node_by_id = {node.semantic_id: node for node in semantic.nodes}
+    edge_tuples = {
+        (
+            node_by_id[edge.source_id].name,
+            edge.kind,
+            node_by_id[edge.target_id].name,
+        )
+        for edge in semantic.edges
+    }
+    schema_pointers = {
+        node.json_pointer
+        for node in semantic.nodes
+        if node.kind == "SchemaComponent"
+    }
+
+    assert ("Composite", "COMPOSED_OF", "Base") in edge_tuples
+    assert ("Map", "HAS_VALUE_SCHEMA", "Leaf") in edge_tuples
+    assert ("leaf", "PROPERTY_OF_TYPE", "Leaf") in edge_tuples
+    assert "/components/schemas/Composite/allOf/0" not in schema_pointers
+    assert "/components/schemas/Composite/allOf/1/properties/leaf" not in schema_pointers
+    assert "/components/schemas/Map/additionalProperties" not in schema_pointers
 
 
 def test_semantic_overlay_merges_reused_model_entity_summary() -> None:
@@ -420,7 +480,7 @@ def test_semantic_metrics_report_catalog_coverage_ratios() -> None:
     metrics = compute_semantic_metrics([semantic])
 
     assert metrics["node_kind_counts"]["ApiEndpoint"] == 2
-    assert metrics["node_kind_counts"]["ModelEntity"] == 18
+    assert metrics["node_kind_counts"]["ModelEntity"] == 11
     assert metrics["node_kind_counts"]["Parameter"] == 2
     assert metrics["node_kind_counts"]["RequestBody"] == 1
     assert metrics["node_kind_counts"]["Response"] == 4
@@ -432,7 +492,7 @@ def test_semantic_metrics_report_catalog_coverage_ratios() -> None:
     assert metrics["edge_kind_counts"]["HAS_REQUEST_BODY"] == 1
     assert metrics["edge_kind_counts"]["HAS_RESPONSE"] == 4
     assert metrics["edge_kind_counts"]["RESPONSE_REFERENCES"] == 2
-    assert metrics["edge_kind_counts"]["REPRESENTS_MODEL"] == 20
+    assert metrics["edge_kind_counts"]["REPRESENTS_MODEL"] == 11
     assert metrics["edge_kind_counts"]["RETURNS_MODEL"] == 2
     assert metrics["edge_kind_counts"]["RETURNS_SCHEMA"] == 2
     assert metrics["coverage"]["endpoints_with_parameters"] == {
@@ -471,8 +531,8 @@ def test_semantic_metrics_report_catalog_coverage_ratios() -> None:
         "ratio": 0.5,
     }
     assert metrics["coverage"]["schemas_representing_model"] == {
-        "count": 16,
-        "total": 16,
+        "count": 7,
+        "total": 7,
         "ratio": 1.0,
     }
     assert metrics["coverage"]["properties_representing_model"] == {

@@ -247,6 +247,37 @@ def test_dynamic_property_names_do_not_count_as_unknown_or_extension() -> None:
     assert props[0].is_extension is False
 
 
+def test_nested_schema_roles_survive_composition_constraint_containers() -> None:
+    spec = _oas30_spec()
+    spec["components"]["schemas"]["Pet"] = {
+        "allOf": [
+            {
+                "properties": {
+                    "modules": {
+                        "type": "array",
+                        "items": {
+                            "properties": {
+                                "severity": {"type": "string"},
+                            }
+                        },
+                    }
+                }
+            }
+        ]
+    }
+
+    graph = build_ast_graph(spec, source="unit/nested-schema-roles")
+    nodes = {node.json_pointer: node for node in graph.nodes}
+    base = "/components/schemas/Pet/allOf/0/properties/modules"
+
+    assert nodes["/components/schemas/Pet/allOf/0"].kind == "Schema"
+    assert nodes[base].kind == "Property"
+    assert nodes[f"{base}/items"].kind == "Items"
+    assert json.loads(nodes[f"{base}/items"].raw_json)["properties"] == {
+        "severity": {"type": "string"}
+    }
+
+
 def test_unknown_fixed_keyword_fails_loudly() -> None:
     spec = _oas30_spec()
     spec["paths"]["/pets"]["get"]["madeUpKeyword"] = True
