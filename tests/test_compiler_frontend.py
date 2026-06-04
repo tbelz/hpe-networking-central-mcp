@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Iterator
-from pathlib import Path
 import shutil
 import tempfile
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -32,7 +33,6 @@ from hpe_networking_central_mcp.compiler.frontend import (
     resolve_specs,
     write_resolution_cache,
 )
-from typing import Any
 
 # Smoke-test sample stride. ``corpus[::SMOKE_STRIDE]`` distributes the
 # sample across category subdirectories instead of biasing toward a
