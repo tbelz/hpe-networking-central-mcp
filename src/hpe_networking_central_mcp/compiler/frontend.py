@@ -26,16 +26,23 @@ spec.
 
 from __future__ import annotations
 
+import hashlib
+import importlib.metadata
 import json
 import multiprocessing
 import os
 import threading
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 import prance
 import prance.util.url
+
+# Bump when strict resolution policy changes without a dependency-version change.
+_RESOLUTION_CACHE_VERSION = 1
+ResolutionCache = dict[str, dict[str, str]]
 
 
 @dataclass
@@ -56,6 +63,7 @@ class ResolutionFailure:
     title: str
     error: str
     error_type: Literal["validation", "resolution", "unexpected"]
+    raw_spec: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -65,6 +73,8 @@ class ResolutionResult:
     resolved: list[ResolvedSpec] = field(default_factory=list)
     failed: list[ResolutionFailure] = field(default_factory=list)
     workers_used: int = 1
+    cache_hits: int = 0
+    cache_misses: int = 0
 
     @property
     def total(self) -> int:
@@ -159,37 +169,8 @@ def resolve_spec(spec: dict[str, Any], *, source: str) -> ResolvedSpec | Resolut
         ``"unexpected"``.  This function never raises for spec-level
         errors so callers can aggregate failures across a batch.
     """
-    title = _spec_title(spec, source)
     cleaned = clean_spec(spec)
-    try:
-        parser = prance.ResolvingParser(
-            spec_string=json.dumps(cleaned),
-            backend="openapi-spec-validator",
-            lazy=True,
-            strict=True,
-        )
-        parser.parse()
-    except prance.ValidationError as e:
-        return ResolutionFailure(
-            source=source, title=title, error=str(e), error_type="validation"
-        )
-    except prance.util.url.ResolutionError as e:
-        return ResolutionFailure(
-            source=source, title=title, error=str(e), error_type="resolution"
-        )
-    except Exception as e:  # noqa: BLE001 — prance can raise unwrapped library errors
-        return ResolutionFailure(
-            source=source,
-            title=title,
-            error=f"{type(e).__name__}: {e}",
-            error_type="unexpected",
-        )
-    return ResolvedSpec(
-        spec=parser.specification,
-        raw_spec=cleaned,
-        source=source,
-        title=title,
-    )
+    return _resolve_cleaned_spec(cleaned, source=source)
 
 
 def resolve_specs(
@@ -197,6 +178,7 @@ def resolve_specs(
     *,
     max_workers: int | None = None,
     retain_resolved_spec: bool = True,
+    cache: ResolutionCache | None = None,
 ) -> ResolutionResult:
     """Resolve a batch of specs.
 
@@ -212,25 +194,101 @@ def resolve_specs(
     CPU-bound and each spec is independent. Small batches stay sequential to
     avoid process startup overhead. ``executor.map`` preserves input order, so
     the relative order inside the resolved and failed result buckets remains
-    deterministic.
+    deterministic. When expanded output is not retained, callers may provide a
+    content-addressed cache of prior strict outcomes; cache misses still use the
+    same Prance path.
     """
-    entries = [(raw, _source_label(raw), retain_resolved_spec) for raw in specs]
-    workers = _resolve_worker_count(len(entries), max_workers)
-    result = ResolutionResult(workers_used=workers)
+    entries = [
+        (clean_spec(raw), _source_label(raw), retain_resolved_spec)
+        for raw in specs
+    ]
+    outcomes: list[ResolvedSpec | ResolutionFailure | None] = [None] * len(entries)
+    misses: list[tuple[int, tuple[dict[str, Any], str, bool], str]] = []
+    result = ResolutionResult()
+    for index, entry in enumerate(entries):
+        cleaned, source, retain = entry
+        cache_key = _cleaned_spec_hash(cleaned) if cache is not None and not retain else ""
+        cached = cache.get(cache_key) if cache is not None and not retain else None
+        if cached is not None:
+            outcomes[index] = _cached_outcome(cleaned, source, cached)
+            result.cache_hits += 1
+        else:
+            misses.append((index, entry, cache_key))
+            result.cache_misses += 1
+
+    workers = _resolve_worker_count(len(misses), max_workers)
+    result.workers_used = workers
+    miss_entries = [entry for _, entry, _ in misses]
     if workers == 1:
-        outcomes = [_resolve_entry(entry) for entry in entries]
+        miss_outcomes = [_resolve_entry(entry) for entry in miss_entries]
     else:
         executor_kwargs = {}
         if os.environ.get("PYTEST_CURRENT_TEST") or threading.active_count() > 1:
             executor_kwargs["mp_context"] = _safe_process_context()
         with ProcessPoolExecutor(max_workers=workers, **executor_kwargs) as executor:
-            outcomes = list(executor.map(_resolve_entry, entries))
+            miss_outcomes = list(executor.map(_resolve_entry, miss_entries))
+
+    for (index, _, cache_key), outcome in zip(misses, miss_outcomes):
+        outcomes[index] = outcome
+        if cache is not None and not retain_resolved_spec:
+            cache[cache_key] = _cache_entry(outcome)
+
     for outcome in outcomes:
+        assert outcome is not None
         if isinstance(outcome, ResolvedSpec):
             result.resolved.append(outcome)
         else:
             result.failed.append(outcome)
     return result
+
+
+def load_resolution_cache(path: Path) -> ResolutionCache:
+    """Load reusable strict-validation outcomes for unchanged cleaned specs."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if payload.get("fingerprint") != resolution_cache_fingerprint():
+        return {}
+    entries = payload.get("entries")
+    if not isinstance(entries, dict):
+        return {}
+    return {
+        key: value
+        for key, value in entries.items()
+        if isinstance(key, str)
+        and isinstance(value, dict)
+        and value.get("status") in {"resolved", "failed"}
+    }
+
+
+def write_resolution_cache(path: Path, cache: ResolutionCache) -> None:
+    """Persist content-addressed strict-validation outcomes atomically."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(
+        json.dumps(
+            {
+                "fingerprint": resolution_cache_fingerprint(),
+                "entries": cache,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    temp_path.replace(path)
+
+
+def resolution_cache_fingerprint() -> str:
+    """Return the validation-toolchain fingerprint that invalidates old outcomes."""
+    versions = []
+    for package in ("prance", "openapi-spec-validator"):
+        try:
+            versions.append(f"{package}={importlib.metadata.version(package)}")
+        except importlib.metadata.PackageNotFoundError:
+            versions.append(f"{package}=unknown")
+    return f"v{_RESOLUTION_CACHE_VERSION}|" + "|".join(versions)
 
 
 def _source_label(raw: dict[str, Any]) -> str:
@@ -244,11 +302,93 @@ def _resolve_entry(
     entry: tuple[dict[str, Any], str, bool],
 ) -> ResolvedSpec | ResolutionFailure:
     """Process-pool compatible wrapper around :func:`resolve_spec`."""
-    raw, source, retain_resolved_spec = entry
-    outcome = resolve_spec(raw, source=source)
+    cleaned, source, retain_resolved_spec = entry
+    outcome = _resolve_cleaned_spec(cleaned, source=source)
     if isinstance(outcome, ResolvedSpec) and not retain_resolved_spec:
         outcome.spec = {}
     return outcome
+
+
+def _resolve_cleaned_spec(
+    cleaned: dict[str, Any],
+    *,
+    source: str,
+) -> ResolvedSpec | ResolutionFailure:
+    """Resolve one already-cleaned spec without repeating the cleaning walk."""
+    title = _spec_title(cleaned, source)
+    try:
+        parser = prance.ResolvingParser(
+            spec_string=json.dumps(cleaned),
+            backend="openapi-spec-validator",
+            lazy=True,
+            strict=True,
+        )
+        parser.parse()
+    except prance.ValidationError as e:
+        return ResolutionFailure(
+            source=source,
+            title=title,
+            error=str(e),
+            error_type="validation",
+            raw_spec=cleaned,
+        )
+    except prance.util.url.ResolutionError as e:
+        return ResolutionFailure(
+            source=source,
+            title=title,
+            error=str(e),
+            error_type="resolution",
+            raw_spec=cleaned,
+        )
+    except Exception as e:  # noqa: BLE001 — prance can raise unwrapped library errors
+        return ResolutionFailure(
+            source=source,
+            title=title,
+            error=f"{type(e).__name__}: {e}",
+            error_type="unexpected",
+            raw_spec=cleaned,
+        )
+    return ResolvedSpec(
+        spec=parser.specification,
+        raw_spec=cleaned,
+        source=source,
+        title=title,
+    )
+
+
+def _cleaned_spec_hash(cleaned: dict[str, Any]) -> str:
+    canonical = json.dumps(cleaned, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _cached_outcome(
+    cleaned: dict[str, Any],
+    source: str,
+    cached: dict[str, str],
+) -> ResolvedSpec | ResolutionFailure:
+    title = _spec_title(cleaned, source)
+    if cached.get("status") == "resolved":
+        return ResolvedSpec(spec={}, raw_spec=cleaned, source=source, title=title)
+    error_type = cached.get("error_type", "unexpected")
+    if error_type not in {"validation", "resolution", "unexpected"}:
+        error_type = "unexpected"
+    return ResolutionFailure(
+        source=source,
+        title=title,
+        error=cached.get("error", "Cached strict validation failure"),
+        error_type=error_type,  # type: ignore[arg-type]
+        raw_spec=cleaned,
+    )
+
+
+def _cache_entry(outcome: ResolvedSpec | ResolutionFailure) -> dict[str, str]:
+    if isinstance(outcome, ResolvedSpec):
+        return {"status": "resolved"}
+    return {
+        "status": "failed",
+        "error_type": outcome.error_type,
+        "error": outcome.error,
+    }
 
 
 def _resolve_worker_count(total: int, requested: int | None) -> int:

@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import real_ladybug as lb  # noqa: E402
 
 from hpe_networking_central_mcp.compiler.ast_builder import (  # noqa: E402
+    build_ast_from_failure,
     build_ast_from_resolved,
 )
 from hpe_networking_central_mcp.compiler.ast_schema import apply_ast_schema  # noqa: E402
@@ -35,7 +36,10 @@ from hpe_networking_central_mcp.compiler.ast_writer import (  # noqa: E402
 from hpe_networking_central_mcp.compiler.frontend import (  # noqa: E402
     ResolutionFailure,
     ResolvedSpec,
+    load_resolution_cache,
     resolve_specs,
+    resolution_cache_fingerprint,
+    write_resolution_cache,
 )
 from hpe_networking_central_mcp.compiler.projection_writer import (  # noqa: E402
     CompilerProjectionData,
@@ -94,7 +98,16 @@ except ImportError:
 
 
 _DB_BUFFER_POOL_SIZE = 2 * 1024 * 1024 * 1024
-_COMPILER_GRAPH_BATCH_SIZE = 64
+_COMPILER_GRAPH_BATCH_SIZE = 256
+_RELEASE_GZIP_COMPRESSLEVEL = 1
+
+
+def _remove_build_path(path: Path) -> None:
+    """Remove a prior Ladybug artifact whether it is a file or directory."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
 
 
 def _apply_schema(db: lb.Database) -> None:
@@ -234,10 +247,10 @@ def _build_ast_artifact(
     compiler_projection_db_path: Path | None = None,
 ) -> dict:
     """Build the L1 OpenAPI AST artifact from Task 1 resolved specs."""
-    if ast_db_path.exists():
-        shutil.rmtree(ast_db_path)
-    if compiler_projection_db_path is not None and compiler_projection_db_path.exists():
-        shutil.rmtree(compiler_projection_db_path)
+    artifact_started = time.monotonic()
+    _remove_build_path(ast_db_path)
+    if compiler_projection_db_path is not None:
+        _remove_build_path(compiler_projection_db_path)
 
     task1_failures = task1_failures or []
     task1_failed_count = len(task1_failures)
@@ -246,6 +259,7 @@ def _build_ast_artifact(
     stats = {
         "enabled": True,
         "db_path": ast_db_path.name,
+        "graph_batch_size": _COMPILER_GRAPH_BATCH_SIZE,
         "raw_spec_count": raw_spec_count,
         "task1_resolved_count": task1_resolved_count,
         "task1_failed_count": task1_failed_count,
@@ -258,6 +272,12 @@ def _build_ast_artifact(
             }
             for f in task1_failures[:50]
         ],
+        "degraded": {
+            "candidate_count": task1_failed_count,
+            "compiled_count": 0,
+            "failed_count": 0,
+            "failures": [],
+        },
         "spec_count": 0,
         "node_count": 0,
         "child_edge_count": 0,
@@ -290,13 +310,8 @@ def _build_ast_artifact(
     try:
         ast_conn = lb.Connection(ast_db)
         apply_ast_schema(ast_conn)
-        for start in range(0, len(resolved_specs), _COMPILER_GRAPH_BATCH_SIZE):
-            resolved_batch = resolved_specs[start:start + _COMPILER_GRAPH_BATCH_SIZE]
-            started = time.monotonic()
-            graphs = [build_ast_from_resolved(resolved) for resolved in resolved_batch]
-            semantic_graphs = [build_semantic_overlay(graph) for graph in graphs]
-            stats["timings_seconds"]["compile"] += time.monotonic() - started
 
+        def persist_graphs(graphs, semantic_graphs) -> None:
             for graph, semantic_graph in zip(graphs, semantic_graphs):
                 stats["spec_count"] += 1
                 stats["node_count"] += len(graph.nodes)
@@ -325,6 +340,45 @@ def _build_ast_artifact(
             stats["timings_seconds"]["projection_collect"] += (
                 time.monotonic() - started
             )
+
+        for start in range(0, len(resolved_specs), _COMPILER_GRAPH_BATCH_SIZE):
+            resolved_batch = resolved_specs[start:start + _COMPILER_GRAPH_BATCH_SIZE]
+            started = time.monotonic()
+            graphs = [build_ast_from_resolved(resolved) for resolved in resolved_batch]
+            semantic_graphs = [build_semantic_overlay(graph) for graph in graphs]
+            stats["timings_seconds"]["compile"] += time.monotonic() - started
+            persist_graphs(graphs, semantic_graphs)
+
+        for failure in task1_failures:
+            if not failure.raw_spec:
+                stats["degraded"]["failed_count"] += 1
+                stats["degraded"]["failures"].append({
+                    "source": failure.source,
+                    "title": failure.title,
+                    "task1_error_type": failure.error_type,
+                    "compiler_error_type": "MissingRawSpec",
+                    "compiler_error": "Task 1 failure did not retain a cleaned raw spec",
+                })
+                continue
+            started = time.monotonic()
+            try:
+                graph = build_ast_from_failure(failure)
+                semantic_graph = build_semantic_overlay(graph)
+            except Exception as exc:  # noqa: BLE001 - degraded inputs are reported per spec
+                stats["degraded"]["failed_count"] += 1
+                stats["degraded"]["failures"].append({
+                    "source": failure.source,
+                    "title": failure.title,
+                    "task1_error_type": failure.error_type,
+                    "compiler_error_type": type(exc).__name__,
+                    "compiler_error": str(exc)[:500],
+                })
+                continue
+            finally:
+                stats["timings_seconds"]["compile"] += time.monotonic() - started
+            persist_graphs([graph], [semantic_graph])
+            stats["degraded"]["compiled_count"] += 1
+
         apply_semantic_schema(ast_conn)
         for start in range(0, len(semantic_graphs_to_write), _COMPILER_GRAPH_BATCH_SIZE):
             started = time.monotonic()
@@ -342,9 +396,14 @@ def _build_ast_artifact(
         "raw_spec_count": raw_spec_count,
         "task1_resolved_count": task1_resolved_count,
         "task1_failed_count": task1_failed_count,
+        "degraded_compiled_count": stats["degraded"]["compiled_count"],
+        "degraded_failed_count": stats["degraded"]["failed_count"],
         "ast_graph_count": stats["spec_count"],
         "semantic_graph_count": stats["semantic"]["graph_count"],
-        "resolved_to_ast_ratio": _ratio(stats["spec_count"], task1_resolved_count),
+        "resolved_to_ast_ratio": _ratio(
+            stats["spec_count"] - stats["degraded"]["compiled_count"],
+            task1_resolved_count,
+        ),
         "raw_to_semantic_ratio": _ratio(stats["semantic"]["graph_count"], raw_spec_count),
     }
     if compiler_projection_db_path is not None:
@@ -358,6 +417,7 @@ def _build_ast_artifact(
             time.monotonic() - started,
             3,
         )
+    stats["timings_seconds"]["compiler_total"] = time.monotonic() - artifact_started
     stats["timings_seconds"] = {
         name: round(seconds, 3)
         for name, seconds in stats["timings_seconds"].items()
@@ -381,16 +441,28 @@ def _create_release_archives(
 ) -> dict[str, Path]:
     """Create release tarballs for runtime, compiler projection, and L1 AST DBs."""
     tar_path = output_dir / "knowledge_db.tar.gz"
-    with tarfile.open(tar_path, "w:gz") as tf:
+    with tarfile.open(
+        tar_path,
+        "w:gz",
+        compresslevel=_RELEASE_GZIP_COMPRESSLEVEL,
+    ) as tf:
         tf.add(db_path, arcname="knowledge_db")
         tf.add(manifest_path, arcname="manifest.json")
 
     compiler_tar_path = output_dir / "knowledge_db_compiler.tar.gz"
-    with tarfile.open(compiler_tar_path, "w:gz") as tf:
+    with tarfile.open(
+        compiler_tar_path,
+        "w:gz",
+        compresslevel=_RELEASE_GZIP_COMPRESSLEVEL,
+    ) as tf:
         tf.add(compiler_projection_db_path, arcname="knowledge_db_compiler")
 
     ast_tar_path = output_dir / "knowledge_db_ast.tar.gz"
-    with tarfile.open(ast_tar_path, "w:gz") as tf:
+    with tarfile.open(
+        ast_tar_path,
+        "w:gz",
+        compresslevel=_RELEASE_GZIP_COMPRESSLEVEL,
+    ) as tf:
         tf.add(ast_db_path, arcname="knowledge_db_ast")
 
     return {
@@ -1037,11 +1109,11 @@ def main() -> None:
     db_path = output_dir / "knowledge_db"
     ast_db_path = output_dir / "knowledge_db_ast"
     compiler_projection_db_path = output_dir / "knowledge_db_compiler"
+    task1_cache_path = output_dir / "compiler-task1-cache.json"
     cache_dir = output_dir / "spec_cache"
 
     # Clean previous build
-    if db_path.exists():
-        shutil.rmtree(db_path)
+    _remove_build_path(db_path)
     output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1070,12 +1142,19 @@ def main() -> None:
     # still consumes ``specs`` unchanged, while Task 2 consumes the cleaned raw
     # inputs carried by successful Task 1 results.
     task1_started = time.monotonic()
-    task1 = resolve_specs(specs, retain_resolved_spec=False)
+    task1_cache = load_resolution_cache(task1_cache_path)
+    task1 = resolve_specs(
+        specs,
+        retain_resolved_spec=False,
+        cache=task1_cache,
+    )
+    write_resolution_cache(task1_cache_path, task1_cache)
     task1_elapsed = time.monotonic() - task1_started
     print(
         f"  Task 1 ingestion: {len(task1.resolved)} resolved, "
         f"{len(task1.failed)} failed strict validation/resolution "
-        f"using {task1.workers_used} worker(s) in {task1_elapsed:.2f}s"
+        f"using {task1.workers_used} worker(s) in {task1_elapsed:.2f}s "
+        f"({task1.cache_hits} cache hits, {task1.cache_misses} misses)"
     )
     for f in task1.failed:
         print(
@@ -1091,7 +1170,18 @@ def main() -> None:
         compiler_projection_db_path=compiler_projection_db_path,
     )
     ast_stats["task1_worker_count"] = task1.workers_used
+    ast_stats["task1_cache"] = {
+        "path": task1_cache_path.name,
+        "fingerprint": resolution_cache_fingerprint(),
+        "entry_count": len(task1_cache),
+        "hit_count": task1.cache_hits,
+        "miss_count": task1.cache_misses,
+    }
     ast_stats["timings_seconds"]["task1_resolution"] = round(task1_elapsed, 3)
+    ast_stats["timings_seconds"]["compiler_pipeline_total"] = round(
+        task1_elapsed + ast_stats["timings_seconds"]["compiler_total"],
+        3,
+    )
     print(
         f"  AST graph: {ast_stats['spec_count']} specs, "
         f"{ast_stats['node_count']} nodes, "
@@ -1103,6 +1193,12 @@ def main() -> None:
         f"  Semantic overlay: {semantic_stats['node_count']} nodes, "
         f"{semantic_stats['edge_count']} SEMANTIC_EDGE edges, "
         f"{semantic_stats['derived_from_ast_edge_count']} provenance edges"
+    )
+    degraded_stats = ast_stats["degraded"]
+    print(
+        f"  Degraded carry-through: {degraded_stats['compiled_count']}/"
+        f"{degraded_stats['candidate_count']} strict failures compiled, "
+        f"{degraded_stats['failed_count']} uncompiled"
     )
     compiler_projection_stats = ast_stats["compiler_projection"]
     print(

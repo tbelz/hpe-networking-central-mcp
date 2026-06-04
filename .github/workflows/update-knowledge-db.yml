@@ -57,6 +57,21 @@ jobs:
           find build/spec_cache/vsg -maxdepth 2 -type f | head -20
           echo "  ($(find build/spec_cache/vsg -type f | wc -l) files total)"
 
+      - name: Prime compiler Task 1 cache from previous release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PREV=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)
+          if [ -z "$PREV" ]; then
+            echo "No previous release — starting with an empty compiler cache."
+            exit 0
+          fi
+          gh release download "$PREV" --pattern compiler-task1-cache.json --dir build 2>/dev/null || {
+            echo "Previous release has no compiler Task 1 cache — starting empty."
+            exit 0
+          }
+          echo "Primed compiler Task 1 cache from $PREV."
+
       - name: Build knowledge database
         run: uv run --no-sync python scripts/build_knowledge_db.py --output-dir build --tar
 
@@ -271,6 +286,7 @@ jobs:
             build/manifest.json
             build/vsg-cache.tar.gz
             build/central-spec-cache.tar.gz
+            build/compiler-task1-cache.json
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

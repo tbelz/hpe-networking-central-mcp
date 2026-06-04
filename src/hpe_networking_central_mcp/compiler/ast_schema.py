@@ -10,6 +10,9 @@ AST_NODE_TABLES: list[str] = [
         title           STRING,
         openapi_version STRING,
         content_hash    STRING,
+        ingestion_status     STRING,
+        ingestion_error_type STRING,
+        ingestion_error      STRING,
         PRIMARY KEY (spec_id)
     )
     """,

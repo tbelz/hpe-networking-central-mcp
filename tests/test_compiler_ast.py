@@ -470,6 +470,35 @@ def test_task1_result_keeps_cleaned_raw_spec_for_ast_input() -> None:
     assert reconstruct_spec(graph) == outcome.raw_spec
 
 
+def test_schema_property_named_properties_does_not_shadow_keyword_context() -> None:
+    spec = _oas30_spec()
+    spec["components"]["schemas"]["PropertyCollision"] = {
+        "type": "object",
+        "properties": {
+            "properties": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                },
+            },
+        },
+    }
+
+    graph = build_ast_graph(spec, source="unit/property-collision")
+    by_pointer = {node.json_pointer: node.kind for node in graph.nodes}
+
+    assert by_pointer[
+        "/components/schemas/PropertyCollision/properties/properties"
+    ] == "Property"
+    assert by_pointer[
+        "/components/schemas/PropertyCollision/properties/properties/properties"
+    ] == "Scalar"
+    assert by_pointer[
+        "/components/schemas/PropertyCollision/properties/properties/properties/name"
+    ] == "Property"
+    assert reconstruct_spec(graph) == spec
+
+
 def test_writer_persists_ast_graph_to_ladybug() -> None:
     graph = build_ast_graph(_oas30_spec(), source="unit/pets")
     with TemporaryDirectory(prefix="ast_writer_") as tmp:
@@ -551,3 +580,22 @@ def test_real_central_stride_sample_builds_ast(real_central_specs: list[Path]) -
         assert reconstruct_spec(graph) == outcome.raw_spec
         built += 1
     assert built > 0, "expected at least one sampled real spec to resolve and build an AST"
+
+
+@pytest.mark.real_spec
+def test_real_floor_map_property_named_properties_builds_ast(
+    real_central_specs: list[Path],
+) -> None:
+    path = next(
+        (candidate for candidate in real_central_specs if candidate.name == "getfloormapv1.json"),
+        None,
+    )
+    if path is None:
+        pytest.skip("Hydrated corpus does not contain getfloormapv1.json")
+    outcome = resolve_spec(
+        json.loads(path.read_text(encoding="utf-8")),
+        source=f"central/{path.name}",
+    )
+    assert isinstance(outcome, ResolvedSpec), getattr(outcome, "error", None)
+    graph = build_ast_from_resolved(outcome)
+    assert reconstruct_spec(graph) == outcome.raw_spec

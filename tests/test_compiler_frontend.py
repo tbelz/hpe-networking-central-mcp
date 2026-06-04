@@ -14,16 +14,23 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Iterator
 from pathlib import Path
+import shutil
+import tempfile
 
 import pytest
 
+import hpe_networking_central_mcp.compiler.frontend as frontend
 from hpe_networking_central_mcp.compiler.frontend import (
     ResolutionFailure,
     ResolutionResult,
     ResolvedSpec,
+    clean_spec,
+    load_resolution_cache,
     resolve_spec,
     resolve_specs,
+    write_resolution_cache,
 )
 from typing import Any
 
@@ -32,6 +39,17 @@ from typing import Any
 # single alphabetic prefix.  With ~1600 specs and stride 20 the sample
 # is ~80 specs which completes in well under a minute.
 SMOKE_STRIDE = 32
+
+
+@pytest.fixture
+def repo_tmp_path() -> Iterator[Path]:
+    repo_tmp = Path(__file__).resolve().parent.parent / "tmp"
+    repo_tmp.mkdir(exist_ok=True)
+    path = Path(tempfile.mkdtemp(prefix="test_frontend_cache_", dir=repo_tmp))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _load(path: Path) -> dict:
@@ -145,6 +163,7 @@ def test_validation_failure_returns_structured_failure(
     assert result.error_type == "validation"
     assert result.source == "broken-info"
     assert result.error  # non-empty
+    assert result.raw_spec == clean_spec(spec)
 
 
 @pytest.mark.compiler
@@ -165,6 +184,7 @@ def test_resolution_failure_returns_structured_failure(
             # first inside prance, but it must NOT silently succeed.
             assert result.error_type in {"resolution", "validation"}
             assert result.error
+            assert result.raw_spec == clean_spec(mutated)
             return
     pytest.skip("No real spec in the first 50 contains an internal $ref to break.")
 
@@ -242,6 +262,69 @@ def test_resolve_specs_can_drop_expanded_payload_for_build_pipeline() -> None:
 
     assert result.resolved[0].spec == {}
     assert result.resolved[0].raw_spec == spec
+
+
+@pytest.mark.compiler
+@pytest.mark.unit
+def test_resolution_cache_reuses_unchanged_strict_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "Cached", "version": "1.0"},
+        "paths": {},
+        "_spec_source": "unit",
+    }
+    invalid = copy.deepcopy(spec)
+    invalid["info"] = {}
+    cache = {}
+
+    first = resolve_specs([spec, invalid], retain_resolved_spec=False, cache=cache)
+    assert first.cache_hits == 0
+    assert first.cache_misses == 2
+    assert len(cache) == 2
+    assert len(first.resolved) == 1
+    assert len(first.failed) == 1
+
+    def unexpected_resolve(_entry):
+        raise AssertionError("unchanged cached spec should not be revalidated")
+
+    monkeypatch.setattr(frontend, "_resolve_entry", unexpected_resolve)
+    second = resolve_specs([spec, invalid], retain_resolved_spec=False, cache=cache)
+
+    assert second.cache_hits == 2
+    assert second.cache_misses == 0
+    assert len(second.resolved) == 1
+    assert len(second.failed) == 1
+    assert second.resolved[0].spec == {}
+    assert second.resolved[0].raw_spec == {
+        "openapi": "3.0.3",
+        "info": {"title": "Cached", "version": "1.0"},
+        "paths": {},
+    }
+    assert second.failed[0].error_type == "validation"
+    assert second.failed[0].raw_spec == {
+        "openapi": "3.0.3",
+        "info": {},
+        "paths": {},
+    }
+
+
+@pytest.mark.compiler
+@pytest.mark.unit
+def test_resolution_cache_round_trips_and_rejects_wrong_fingerprint(
+    repo_tmp_path: Path,
+) -> None:
+    path = repo_tmp_path / "compiler-task1-cache.json"
+    cache = {"content-hash": {"status": "resolved"}}
+
+    write_resolution_cache(path, cache)
+    assert load_resolution_cache(path) == cache
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["fingerprint"] = "stale-toolchain"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert load_resolution_cache(path) == {}
 
 
 # ── Coverage smoke against a real-spec sample ──────────────────────
