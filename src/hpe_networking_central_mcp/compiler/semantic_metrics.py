@@ -209,6 +209,31 @@ def compute_semantic_metrics(graphs: list[SemanticGraph]) -> dict[str, Any]:
     }
 
 
+def merge_semantic_metrics(reports: list[dict[str, Any]]) -> dict[str, Any]:
+    """Merge metrics from disjoint spec batches and recompute ratios."""
+    if not reports:
+        return compute_semantic_metrics([])
+    node_kind_counts: Counter[str] = Counter()
+    edge_kind_counts: Counter[str] = Counter()
+    coverage: dict[str, dict[str, Any]] = {}
+    for report in reports:
+        node_kind_counts.update(report.get("node_kind_counts", {}))
+        edge_kind_counts.update(report.get("edge_kind_counts", {}))
+        for name, metric in report.get("coverage", {}).items():
+            merged = coverage.setdefault(name, {"count": 0, "total": 0})
+            merged["count"] += int(metric.get("count", 0))
+            merged["total"] += int(metric.get("total", 0))
+    for metric in coverage.values():
+        metric["ratio"] = _ratio(metric["count"], metric["total"])
+    return {
+        "node_kind_counts": dict(sorted(node_kind_counts.items())),
+        "edge_kind_counts": dict(sorted(edge_kind_counts.items())),
+        "total_nodes": sum(node_kind_counts.values()),
+        "total_edges": sum(edge_kind_counts.values()),
+        "coverage": coverage,
+    }
+
+
 def _ratio(count: int, total: int) -> float:
     if total <= 0:
         return 0.0

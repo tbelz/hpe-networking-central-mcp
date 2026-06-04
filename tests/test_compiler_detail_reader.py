@@ -111,6 +111,8 @@ def test_projection_detail_recovers_raw_openapi_not_in_typed_projection(
     )
 
     assert property_detail["projection_row"]["name"] == "serial"
+    assert property_detail["projection_row"]["minLength"] == 12
+    assert property_detail["projection_row"]["constraintsJson"] == '{"minLength":12}'
     assert property_detail["semantic_node"]["kind"] == "Property"
     assert property_detail["semantic_summary"]["xExtensions"] == {
         "x-yang-hint": "/device/serial"

@@ -238,8 +238,17 @@ _FIXED_ALLOWED_KEYS: dict[str, set[str]] = {
     "Items": _SCHEMA_KEYS,
 }
 
+# Structural map/array nodes are reconstructable from AST_CHILD plus scalarJson.
+# Persisting their full recursive JSON duplicates large portions of each spec
+# (Document -> components -> schemas -> properties). Keep raw detail only on
+# meaningful OpenAPI constructs and vendor-extension roots.
+_RAW_DETAIL_KINDS = (frozenset(_FIXED_ALLOWED_KEYS) - {"Document"}) | {
+    "Callback",
+    "Extension",
+}
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, slots=True)
 class AstNode:
     node_id: str
     spec_id: str
@@ -254,7 +263,7 @@ class AstNode:
     is_extension: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AstChildEdge:
     parent_id: str
     child_id: str
@@ -263,14 +272,14 @@ class AstChildEdge:
     index: int | None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AstRefTargetEdge:
     ref_node_id: str
     target_node_id: str
     ref: str
 
 
-@dataclass
+@dataclass(slots=True)
 class AstGraph:
     spec: dict[str, Any]
     spec_row: dict[str, str]
@@ -386,7 +395,13 @@ def _walk(
         key=key,
         index=array_index,
         value_type=value_type,
-        raw_json=_json(obj),
+        raw_json=_raw_json_for_node(
+            obj,
+            kind=kind,
+            pointer=pointer,
+            value_type=value_type,
+            is_extension=is_extension,
+        ),
         scalar_json=_json(obj) if value_type == "scalar" else "",
         is_extension=is_extension,
     )
@@ -711,6 +726,37 @@ def _node_name(*, obj: Any, key: str | None, array_index: int | None) -> str | N
 
 def _json(obj: Any, *, sort_keys: bool = False) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=sort_keys)
+
+
+def _raw_json_for_node(
+    obj: Any,
+    *,
+    kind: str,
+    pointer: str,
+    value_type: str,
+    is_extension: bool,
+) -> str:
+    """Return direct-source detail only where it is not redundant AST storage."""
+    if value_type == "scalar":
+        return ""
+    if is_extension or kind in _RAW_DETAIL_KINDS or _is_schema_detail_node(pointer, value_type):
+        return _json(obj)
+    return ""
+
+
+def _is_schema_detail_node(pointer: str, value_type: str) -> bool:
+    """Recognize inline schema objects even when their structural kind is generic."""
+    if value_type != "object":
+        return False
+    parts = _pointer_parts(pointer)
+    return len(parts) >= 2 and parts[-2] in {
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "prefixItems",
+        "properties",
+        "patternProperties",
+    }
 
 
 def _join_pointer(parent: str, token: str) -> str:

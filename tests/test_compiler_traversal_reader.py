@@ -95,12 +95,17 @@ def _build_reader_artifacts(repo_tmp_path: Path) -> tuple[Path, Path]:
                     "properties": {
                         "serial": {
                             "type": "string",
+                            "default": "UNKNOWN",
                             "description": "device serial",
+                            "pattern": "^[A-Z0-9]+$",
                             "minLength": 12,
+                            "maxLength": 32,
                             "x-path": "/aruba/device/create/serial",
                         },
                         "tags": {
                             "type": "array",
+                            "minItems": 1,
+                            "x-key": ["name"],
                             "items": {"$ref": "#/components/schemas/Tag"},
                         },
                     },
@@ -214,10 +219,17 @@ def test_schema_context_walks_properties_targets_and_raw_detail(
         props = {prop["projection_row"]["name"]: prop for prop in context["properties"]}
         assert set(props) == {"serial", "tags"}
         assert props["serial"]["raw_openapi"]["minLength"] == 12
+        assert props["serial"]["projection_row"]["pattern"] == "^[A-Z0-9]+$"
+        assert props["serial"]["projection_row"]["defaultValue"] == '"UNKNOWN"'
+        assert props["serial"]["projection_row"]["minLength"] == 12
+        assert props["serial"]["projection_row"]["maxLength"] == 32
         assert props["serial"]["semantic_summary"]["x-path"] == (
             "/aruba/device/create/serial"
         )
         assert props["tags"]["schema"]["projection_row"]["component_id"] == (
+            "central:schemas:Tag"
+        )
+        assert props["tags"]["item_schema"]["projection_row"]["component_id"] == (
             "central:schemas:Tag"
         )
 

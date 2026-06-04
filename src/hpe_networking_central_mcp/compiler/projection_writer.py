@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from hpe_networking_central_mcp.graph.schema import (
 )
 
 from .ast_builder import AstGraph
+from .constraints import collect_constraints
 from .semantic_builder import SemanticEdge, SemanticGraph, SemanticNode
 
 _ENDPOINT_SCHEMA = pa.schema([
@@ -75,6 +77,8 @@ _COMPONENT_SCHEMA = pa.schema([
     ("enumValues", pa.list_(pa.string())),
     ("supportedDeviceTypes", pa.list_(pa.string())),
     ("bodyJson", pa.string()),
+    ("arrayKey", pa.list_(pa.string())),
+    ("constraintsJson", pa.string()),
 ])
 
 _PROPERTY_SCHEMA = pa.schema([
@@ -90,6 +94,14 @@ _PROPERTY_SCHEMA = pa.schema([
     ("yangPath", pa.string()),
     ("extensionsJson", pa.string()),
     ("readOnly", pa.bool_()),
+    ("pattern", pa.string()),
+    ("defaultValue", pa.string()),
+    ("minimum", pa.float64()),
+    ("maximum", pa.float64()),
+    ("minLength", pa.int64()),
+    ("maxLength", pa.int64()),
+    ("enumDescriptionsJson", pa.string()),
+    ("constraintsJson", pa.string()),
 ])
 
 _YANG_PATH_SCHEMA = pa.schema([
@@ -158,6 +170,56 @@ CREATE REL TABLE IF NOT EXISTS PARAMETER_REFERENCES (
 )
 """
 
+_COMPILER_PROJECTION_DDL = [
+    "ALTER TABLE SchemaComponent ADD arrayKey STRING[]",
+    "ALTER TABLE SchemaComponent ADD constraintsJson STRING",
+    "ALTER TABLE Property ADD pattern STRING",
+    "ALTER TABLE Property ADD defaultValue STRING",
+    "ALTER TABLE Property ADD minimum DOUBLE",
+    "ALTER TABLE Property ADD maximum DOUBLE",
+    "ALTER TABLE Property ADD minLength INT64",
+    "ALTER TABLE Property ADD maxLength INT64",
+    "ALTER TABLE Property ADD enumDescriptionsJson STRING",
+    "ALTER TABLE Property ADD constraintsJson STRING",
+    "CREATE REL TABLE IF NOT EXISTS HAS_ITEM_SCHEMA (FROM Property TO SchemaComponent)",
+]
+
+
+@dataclass
+class CompilerProjectionData:
+    """Compact cross-spec rows retained while L1/L2 graphs stream to disk."""
+
+    rows: dict[str, dict[str, dict[str, Any]]] = field(default_factory=lambda: {
+        "ApiEndpoint": {},
+        "Parameter": {},
+        "RequestBody": {},
+        "Response": {},
+        "SchemaComponent": {},
+        "Property": {},
+        "YangPath": {},
+        "YangModule": {},
+        "CliCommand": {},
+    })
+    rels: dict[str, dict[tuple[Any, ...], dict[str, Any]]] = field(default_factory=lambda: {
+        "HAS_PARAMETER": {},
+        "PARAMETER_REFERENCES": {},
+        "HAS_REQUEST_BODY": {},
+        "HAS_RESPONSE": {},
+        "BODY_REFERENCES": {},
+        "RESPONSE_REFERENCES": {},
+        "REFERENCES": {},
+        "HAS_PROPERTY": {},
+        "PROPERTY_OF_TYPE": {},
+        "HAS_ITEM_SCHEMA": {},
+        "COMPOSED_OF": {},
+        "HAS_VALUE_SCHEMA": {},
+        "PROPERTY_AT_YANG": {},
+        "CONFIGURES_YANG": {},
+        "HAS_CLI_COMMAND": {},
+        "IN_MODULE": {},
+    })
+    provenance_rows: dict[str, dict[str, Any]] = field(default_factory=dict)
+
 
 def build_compiler_projection_database(
     db_path: Path,
@@ -184,48 +246,64 @@ def build_compiler_projection_database(
     return stats
 
 
+def build_compiler_projection_database_from_data(
+    db_path: Path,
+    data: CompilerProjectionData,
+    *,
+    buffer_pool_size: int | None = None,
+) -> dict[str, Any]:
+    """Create a typed L3 DB from compact rows collected during streaming."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_kwargs = {}
+    if buffer_pool_size is not None:
+        db_kwargs["buffer_pool_size"] = buffer_pool_size
+    db = lb.Database(str(db_path), **db_kwargs)
+    try:
+        conn = lb.Connection(db)
+        _apply_projection_schema(conn)
+        stats = write_compiler_projection_data(conn, data)
+    finally:
+        db.close()
+    stats["db_path"] = db_path.name
+    return stats
+
+
 def write_compiler_projection(
     conn,
     ast_graphs: list[AstGraph],
     semantic_graphs: list[SemanticGraph],
 ) -> dict[str, Any]:
     """Write compiler-produced L3 rows into an open LadybugDB connection."""
-    rows: dict[str, dict[str, dict[str, Any]]] = {
-        "ApiEndpoint": {},
-        "Parameter": {},
-        "RequestBody": {},
-        "Response": {},
-        "SchemaComponent": {},
-        "Property": {},
-        "YangPath": {},
-        "YangModule": {},
-        "CliCommand": {},
-    }
-    rels: dict[str, dict[tuple[Any, ...], dict[str, Any]]] = {
-        "HAS_PARAMETER": {},
-        "PARAMETER_REFERENCES": {},
-        "HAS_REQUEST_BODY": {},
-        "HAS_RESPONSE": {},
-        "BODY_REFERENCES": {},
-        "RESPONSE_REFERENCES": {},
-        "REFERENCES": {},
-        "HAS_PROPERTY": {},
-        "PROPERTY_OF_TYPE": {},
-        "COMPOSED_OF": {},
-        "HAS_VALUE_SCHEMA": {},
-        "PROPERTY_AT_YANG": {},
-        "CONFIGURES_YANG": {},
-        "HAS_CLI_COMMAND": {},
-        "IN_MODULE": {},
-    }
-    provenance_rows: dict[str, dict[str, Any]] = {}
+    data = CompilerProjectionData()
     ast_by_spec = {graph.spec_id: graph for graph in ast_graphs}
     for semantic in semantic_graphs:
         ast = ast_by_spec.get(semantic.spec_id)
         if ast is None:
             continue
-        _collect_graph_rows(ast, semantic, rows, rels, provenance_rows)
+        collect_compiler_projection_graph(data, ast, semantic)
+    return write_compiler_projection_data(conn, data)
 
+
+def collect_compiler_projection_graph(
+    data: CompilerProjectionData,
+    ast: AstGraph,
+    semantic: SemanticGraph,
+) -> None:
+    """Merge one compiler graph pair into compact cross-spec projection rows."""
+    _collect_graph_rows(
+        ast,
+        semantic,
+        data.rows,
+        data.rels,
+        data.provenance_rows,
+    )
+
+
+def write_compiler_projection_data(conn, data: CompilerProjectionData) -> dict[str, Any]:
+    """Persist already-collected compiler projection rows."""
+    rows = data.rows
+    rels = data.rels
+    provenance_rows = data.provenance_rows
     _copy(conn, "ApiEndpoint", list(rows["ApiEndpoint"].values()), _ENDPOINT_SCHEMA)
     _copy(conn, "Parameter", list(rows["Parameter"].values()), _PARAM_SCHEMA)
     _copy(conn, "RequestBody", list(rows["RequestBody"].values()), _REQUEST_BODY_SCHEMA)
@@ -250,6 +328,7 @@ def write_compiler_projection(
     _copy(conn, "REFERENCES", list(rels["REFERENCES"].values()), _REL_REFERENCES_SCHEMA)
     _copy(conn, "HAS_PROPERTY", list(rels["HAS_PROPERTY"].values()), _REL_AB_SCHEMA)
     _copy(conn, "PROPERTY_OF_TYPE", list(rels["PROPERTY_OF_TYPE"].values()), _REL_AB_SCHEMA)
+    _copy(conn, "HAS_ITEM_SCHEMA", list(rels["HAS_ITEM_SCHEMA"].values()), _REL_AB_SCHEMA)
     _copy(conn, "COMPOSED_OF", list(rels["COMPOSED_OF"].values()), _REL_COMPOSED_OF_SCHEMA)
     _copy(conn, "HAS_VALUE_SCHEMA", list(rels["HAS_VALUE_SCHEMA"].values()), _REL_AB_SCHEMA)
     _copy(conn, "PROPERTY_AT_YANG", list(rels["PROPERTY_AT_YANG"].values()), _REL_AB_SCHEMA)
@@ -382,6 +461,7 @@ def _collect_graph_rows(
         elif node.kind == "Property":
             parent_id = typed_ids.get(schema_parent.get(node.semantic_id, ""))
             if parent_id:
+                constraints = _constraints(summary)
                 rows["Property"][typed_id] = {
                     "property_id": typed_id,
                     "parent_component_id": parent_id,
@@ -395,6 +475,17 @@ def _collect_graph_rows(
                     "yangPath": _str(summary.get("x-path")),
                     "extensionsJson": _json(summary.get("xExtensions", {})),
                     "readOnly": bool(summary.get("readOnly")),
+                    "pattern": _str(constraints.get("pattern")),
+                    "defaultValue": _json_if_present(constraints, "default"),
+                    "minimum": _number(constraints.get("minimum")),
+                    "maximum": _number(constraints.get("maximum")),
+                    "minLength": _integer(constraints.get("minLength")),
+                    "maxLength": _integer(constraints.get("maxLength")),
+                    "enumDescriptionsJson": _json_if_present(
+                        constraints,
+                        "x-enumDescriptions",
+                    ),
+                    "constraintsJson": _json(constraints),
                 }
                 _add_projection_provenance(provenance_rows, "Property", typed_id, node, ast)
         elif node.kind == "YangPath":
@@ -513,6 +604,8 @@ def _schema_row(
         "required": _string_list(summary.get("required")),
         "enumValues": _string_list(summary.get("enumValues")),
         "supportedDeviceTypes": _string_list(summary.get("x-supportedDeviceType")),
+        "arrayKey": _string_list(summary.get("x-key")),
+        "constraintsJson": _json(_constraints(summary)),
         "bodyJson": body_json,
     }
 
@@ -546,6 +639,8 @@ def _collect_reusable_component_rows(
                 "required": _string_list(body.get("required")),
                 "enumValues": _string_list(body.get("enum")),
                 "supportedDeviceTypes": _supported_device_types(body),
+                "arrayKey": _string_list(body.get("x-key")),
+                "constraintsJson": _json(collect_constraints(body)),
                 "bodyJson": _raw_json_for(ast, pointer, body),
             }
             _put_richest(rows["SchemaComponent"], component_id, row)
@@ -581,6 +676,7 @@ def _edge_row(
         "RESPONSE_REFERENCES",
         "HAS_PROPERTY",
         "PROPERTY_OF_TYPE",
+        "HAS_ITEM_SCHEMA",
         "HAS_VALUE_SCHEMA",
         "PROPERTY_AT_YANG",
         "CONFIGURES_YANG",
@@ -607,6 +703,8 @@ def _apply_projection_schema(conn) -> None:
         conn.execute(ddl.strip())
     conn.execute(_PARAMETER_REFERENCES_DDL.strip())
     conn.execute(_PROJECTION_MAP_DDL.strip())
+    for ddl in _COMPILER_PROJECTION_DDL:
+        conn.execute(ddl)
 
 
 def _add_projection_provenance(
@@ -668,6 +766,27 @@ def _escape_pointer(value: str) -> str:
 
 def _load_summary(node: SemanticNode) -> dict[str, Any]:
     return _load_json(node.summary_json)
+
+
+def _constraints(summary: dict[str, Any]) -> dict[str, Any]:
+    value = summary.get("constraints")
+    return value if isinstance(value, dict) else {}
+
+
+def _json_if_present(values: dict[str, Any], key: str) -> str:
+    return _json(values[key]) if key in values else ""
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _integer(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 def _load_json(raw: str) -> dict[str, Any]:

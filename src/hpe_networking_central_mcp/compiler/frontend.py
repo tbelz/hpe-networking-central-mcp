@@ -27,6 +27,10 @@ spec.
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
+import threading
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -60,6 +64,7 @@ class ResolutionResult:
 
     resolved: list[ResolvedSpec] = field(default_factory=list)
     failed: list[ResolutionFailure] = field(default_factory=list)
+    workers_used: int = 1
 
     @property
     def total(self) -> int:
@@ -187,7 +192,12 @@ def resolve_spec(spec: dict[str, Any], *, source: str) -> ResolvedSpec | Resolut
     )
 
 
-def resolve_specs(specs: list[dict[str, Any]]) -> ResolutionResult:
+def resolve_specs(
+    specs: list[dict[str, Any]],
+    *,
+    max_workers: int | None = None,
+    retain_resolved_spec: bool = True,
+) -> ResolutionResult:
     """Resolve a batch of specs.
 
     The ``source`` label for each spec combines the ``_spec_source``
@@ -197,15 +207,62 @@ def resolve_specs(specs: list[dict[str, Any]]) -> ResolutionResult:
     as the same ambiguous ``"central"`` label.  Specs without a provider
     tag use the title alone; specs without either fall back to
     ``"unknown"``.
+
+    Batches use a bounded process pool because Prance validation/resolution is
+    CPU-bound and each spec is independent. Small batches stay sequential to
+    avoid process startup overhead. ``executor.map`` preserves input order, so
+    the relative order inside the resolved and failed result buckets remains
+    deterministic.
     """
-    result = ResolutionResult()
-    for raw in specs:
-        provider = raw.get("_spec_source")
-        title = _spec_title(raw, "unknown")
-        source = f"{provider}/{title}" if provider else title
-        outcome = resolve_spec(raw, source=source)
+    entries = [(raw, _source_label(raw), retain_resolved_spec) for raw in specs]
+    workers = _resolve_worker_count(len(entries), max_workers)
+    result = ResolutionResult(workers_used=workers)
+    if workers == 1:
+        outcomes = [_resolve_entry(entry) for entry in entries]
+    else:
+        executor_kwargs = {}
+        if os.environ.get("PYTEST_CURRENT_TEST") or threading.active_count() > 1:
+            executor_kwargs["mp_context"] = _safe_process_context()
+        with ProcessPoolExecutor(max_workers=workers, **executor_kwargs) as executor:
+            outcomes = list(executor.map(_resolve_entry, entries))
+    for outcome in outcomes:
         if isinstance(outcome, ResolvedSpec):
             result.resolved.append(outcome)
         else:
             result.failed.append(outcome)
     return result
+
+
+def _source_label(raw: dict[str, Any]) -> str:
+    """Return the stable provider/title label used for one raw spec."""
+    provider = raw.get("_spec_source")
+    title = _spec_title(raw, "unknown")
+    return f"{provider}/{title}" if provider else title
+
+
+def _resolve_entry(
+    entry: tuple[dict[str, Any], str, bool],
+) -> ResolvedSpec | ResolutionFailure:
+    """Process-pool compatible wrapper around :func:`resolve_spec`."""
+    raw, source, retain_resolved_spec = entry
+    outcome = resolve_spec(raw, source=source)
+    if isinstance(outcome, ResolvedSpec) and not retain_resolved_spec:
+        outcome.spec = {}
+    return outcome
+
+
+def _resolve_worker_count(total: int, requested: int | None) -> int:
+    """Return a bounded worker count, avoiding pool overhead for small batches."""
+    if requested is not None:
+        if requested < 1:
+            raise ValueError("max_workers must be at least 1")
+        return min(total, requested) if total else 1
+    if total < 8:
+        return 1
+    return min(total, 16, os.cpu_count() or 1)
+
+
+def _safe_process_context() -> multiprocessing.context.BaseContext:
+    """Avoid forking multithreaded callers while preferring a lightweight server."""
+    methods = multiprocessing.get_all_start_methods()
+    return multiprocessing.get_context("forkserver" if "forkserver" in methods else "spawn")

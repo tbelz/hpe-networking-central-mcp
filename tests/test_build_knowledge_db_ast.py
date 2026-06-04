@@ -101,6 +101,7 @@ def _resolved() -> ResolvedSpec:
     return outcome
 
 
+@pytest.mark.timeout(90)
 def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> None:
     mod = _load_build_module()
     ast_db_path = repo_tmp_path / "knowledge_db_ast"
@@ -225,6 +226,14 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
     assert stats["compiler_projection"]["edge_kind_counts"]["HAS_REQUEST_BODY"] == 1
     assert stats["compiler_projection"]["edge_kind_counts"]["BODY_REFERENCES"] == 1
     assert stats["compiler_projection"]["provenance_count"] > 0
+    assert set(stats["timings_seconds"]) == {
+        "compile",
+        "ast_write",
+        "semantic_write",
+        "projection_collect",
+        "projection_write",
+    }
+    assert all(value >= 0 for value in stats["timings_seconds"].values())
     assert not (ast_db_path / "stale.txt").exists()
     assert not (compiler_db_path / "stale.txt").exists()
     json.dumps({"ast": stats})

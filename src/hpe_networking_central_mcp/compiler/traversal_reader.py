@@ -270,8 +270,10 @@ def fetch_schema_context(
         """
         MATCH (:SchemaComponent {component_id: $component_id})-[:HAS_PROPERTY]->(prop:Property)
         OPTIONAL MATCH (prop)-[:PROPERTY_OF_TYPE]->(target:SchemaComponent)
+        OPTIONAL MATCH (prop)-[:HAS_ITEM_SCHEMA]->(item:SchemaComponent)
         RETURN prop.property_id AS property_id,
-               target.component_id AS target_component_id
+               target.component_id AS target_component_id,
+               item.component_id AS item_component_id
         ORDER BY prop.name
         """,
         {"component_id": component_id},
@@ -288,6 +290,13 @@ def fetch_schema_context(
             ast_conn,
             "SchemaComponent",
             row.get("target_component_id") or "",
+            include_raw=include_raw,
+        )
+        prop["item_schema"] = _optional_detail(
+            compiler_conn,
+            ast_conn,
+            "SchemaComponent",
+            row.get("item_component_id") or "",
             include_raw=include_raw,
         )
         properties.append(prop)

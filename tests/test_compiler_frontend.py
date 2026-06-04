@@ -196,6 +196,54 @@ def test_resolve_specs_aggregates_mixed_batch(
     assert result.failed[0].error_type == "validation"
 
 
+@pytest.mark.compiler
+@pytest.mark.unit
+def test_resolve_specs_parallel_preserves_deterministic_bucket_order() -> None:
+    specs = [
+        {
+            "openapi": "3.0.3",
+            "info": {"title": f"Parallel {index}", "version": "1.0"},
+            "paths": {},
+            "_spec_source": "unit",
+        }
+        for index in range(8)
+    ]
+    invalid = copy.deepcopy(specs[3])
+    invalid["info"] = {}
+    specs.insert(4, invalid)
+
+    result = resolve_specs(specs, max_workers=2)
+
+    assert result.workers_used == 2
+    assert [resolved.source for resolved in result.resolved] == [
+        f"unit/Parallel {index}" for index in range(8)
+    ]
+    assert [failure.source for failure in result.failed] == ["unit/unknown"]
+    assert result.failed[0].error_type == "validation"
+
+
+@pytest.mark.compiler
+@pytest.mark.unit
+def test_resolve_specs_rejects_non_positive_worker_count() -> None:
+    with pytest.raises(ValueError, match="max_workers must be at least 1"):
+        resolve_specs([], max_workers=0)
+
+
+@pytest.mark.compiler
+@pytest.mark.unit
+def test_resolve_specs_can_drop_expanded_payload_for_build_pipeline() -> None:
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "Compact batch", "version": "1.0"},
+        "paths": {},
+    }
+
+    result = resolve_specs([spec], retain_resolved_spec=False)
+
+    assert result.resolved[0].spec == {}
+    assert result.resolved[0].raw_spec == spec
+
+
 # ── Coverage smoke against a real-spec sample ──────────────────────
 
 

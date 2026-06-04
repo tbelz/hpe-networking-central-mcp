@@ -17,6 +17,7 @@ import json
 import shutil
 import sys
 import tarfile
+import time
 from pathlib import Path
 
 # Ensure the package is importable when running from repo root
@@ -27,8 +28,9 @@ import real_ladybug as lb  # noqa: E402
 from hpe_networking_central_mcp.compiler.ast_builder import (  # noqa: E402
     build_ast_from_resolved,
 )
+from hpe_networking_central_mcp.compiler.ast_schema import apply_ast_schema  # noqa: E402
 from hpe_networking_central_mcp.compiler.ast_writer import (  # noqa: E402
-    build_ast_database,
+    write_ast_graphs,
 )
 from hpe_networking_central_mcp.compiler.frontend import (  # noqa: E402
     ResolutionFailure,
@@ -36,7 +38,9 @@ from hpe_networking_central_mcp.compiler.frontend import (  # noqa: E402
     resolve_specs,
 )
 from hpe_networking_central_mcp.compiler.projection_writer import (  # noqa: E402
-    build_compiler_projection_database,
+    CompilerProjectionData,
+    build_compiler_projection_database_from_data,
+    collect_compiler_projection_graph,
 )
 from hpe_networking_central_mcp.compiler.projection_parity import (  # noqa: E402
     compute_projection_parity,
@@ -47,9 +51,13 @@ from hpe_networking_central_mcp.compiler.semantic_builder import (  # noqa: E402
 )
 from hpe_networking_central_mcp.compiler.semantic_metrics import (  # noqa: E402
     compute_semantic_metrics,
+    merge_semantic_metrics,
+)
+from hpe_networking_central_mcp.compiler.semantic_schema import (  # noqa: E402
+    apply_semantic_schema,
 )
 from hpe_networking_central_mcp.compiler.semantic_writer import (  # noqa: E402
-    write_semantic_database,
+    write_semantic_graphs,
 )
 from hpe_networking_central_mcp.graph.schema import (  # noqa: E402
     KNOWLEDGE_NODE_TABLES,
@@ -86,6 +94,7 @@ except ImportError:
 
 
 _DB_BUFFER_POOL_SIZE = 2 * 1024 * 1024 * 1024
+_COMPILER_GRAPH_BATCH_SIZE = 64
 
 
 def _apply_schema(db: lb.Database) -> None:
@@ -234,8 +243,6 @@ def _build_ast_artifact(
     task1_failed_count = len(task1_failures)
     task1_resolved_count = len(resolved_specs)
     raw_spec_count = task1_resolved_count + task1_failed_count
-    graphs = []
-    semantic_graphs = []
     stats = {
         "enabled": True,
         "db_path": ast_db_path.name,
@@ -268,28 +275,69 @@ def _build_ast_artifact(
             "enabled": compiler_projection_db_path is not None,
             "db_path": compiler_projection_db_path.name if compiler_projection_db_path else "",
         },
+        "timings_seconds": {
+            "compile": 0.0,
+            "ast_write": 0.0,
+            "semantic_write": 0.0,
+            "projection_collect": 0.0,
+        },
     }
     rule_packs: set[str] = set()
+    metric_reports = []
+    projection_data = CompilerProjectionData()
+    semantic_graphs_to_write = []
+    ast_db = lb.Database(str(ast_db_path), buffer_pool_size=_DB_BUFFER_POOL_SIZE)
+    try:
+        ast_conn = lb.Connection(ast_db)
+        apply_ast_schema(ast_conn)
+        for start in range(0, len(resolved_specs), _COMPILER_GRAPH_BATCH_SIZE):
+            resolved_batch = resolved_specs[start:start + _COMPILER_GRAPH_BATCH_SIZE]
+            started = time.monotonic()
+            graphs = [build_ast_from_resolved(resolved) for resolved in resolved_batch]
+            semantic_graphs = [build_semantic_overlay(graph) for graph in graphs]
+            stats["timings_seconds"]["compile"] += time.monotonic() - started
 
-    for resolved in resolved_specs:
-        graph = build_ast_from_resolved(resolved)
-        semantic_graph = build_semantic_overlay(graph)
-        graphs.append(graph)
-        semantic_graphs.append(semantic_graph)
-        stats["spec_count"] += 1
-        stats["node_count"] += len(graph.nodes)
-        stats["child_edge_count"] += len(graph.child_edges)
-        stats["ref_edge_count"] += len(graph.ref_edges)
-        stats["semantic"]["graph_count"] += 1
-        stats["semantic"]["node_count"] += len(semantic_graph.nodes)
-        stats["semantic"]["edge_count"] += len(semantic_graph.edges)
-        stats["semantic"]["derived_from_ast_edge_count"] += len(
-            semantic_graph.derived_edges
-        )
-        rule_packs.update(semantic_graph.rule_packs)
+            for graph, semantic_graph in zip(graphs, semantic_graphs):
+                stats["spec_count"] += 1
+                stats["node_count"] += len(graph.nodes)
+                stats["child_edge_count"] += len(graph.child_edges)
+                stats["ref_edge_count"] += len(graph.ref_edges)
+                stats["semantic"]["graph_count"] += 1
+                stats["semantic"]["node_count"] += len(semantic_graph.nodes)
+                stats["semantic"]["edge_count"] += len(semantic_graph.edges)
+                stats["semantic"]["derived_from_ast_edge_count"] += len(
+                    semantic_graph.derived_edges
+                )
+                rule_packs.update(semantic_graph.rule_packs)
+
+            metric_reports.append(compute_semantic_metrics(semantic_graphs))
+            semantic_graphs_to_write.extend(semantic_graphs)
+            started = time.monotonic()
+            write_ast_graphs(ast_conn, graphs)
+            stats["timings_seconds"]["ast_write"] += time.monotonic() - started
+            started = time.monotonic()
+            for graph, semantic_graph in zip(graphs, semantic_graphs):
+                collect_compiler_projection_graph(
+                    projection_data,
+                    graph,
+                    semantic_graph,
+                )
+            stats["timings_seconds"]["projection_collect"] += (
+                time.monotonic() - started
+            )
+        apply_semantic_schema(ast_conn)
+        for start in range(0, len(semantic_graphs_to_write), _COMPILER_GRAPH_BATCH_SIZE):
+            started = time.monotonic()
+            write_semantic_graphs(
+                ast_conn,
+                semantic_graphs_to_write[start:start + _COMPILER_GRAPH_BATCH_SIZE],
+            )
+            stats["timings_seconds"]["semantic_write"] += time.monotonic() - started
+    finally:
+        ast_db.close()
 
     stats["semantic"]["rule_packs"] = sorted(rule_packs)
-    stats["semantic"]["metrics"] = compute_semantic_metrics(semantic_graphs)
+    stats["semantic"]["metrics"] = merge_semantic_metrics(metric_reports)
     stats["semantic"]["metrics"]["carry_through"] = {
         "raw_spec_count": raw_spec_count,
         "task1_resolved_count": task1_resolved_count,
@@ -299,19 +347,21 @@ def _build_ast_artifact(
         "resolved_to_ast_ratio": _ratio(stats["spec_count"], task1_resolved_count),
         "raw_to_semantic_ratio": _ratio(stats["semantic"]["graph_count"], raw_spec_count),
     }
-    build_ast_database(ast_db_path, graphs, buffer_pool_size=_DB_BUFFER_POOL_SIZE)
-    write_semantic_database(
-        ast_db_path,
-        semantic_graphs,
-        buffer_pool_size=_DB_BUFFER_POOL_SIZE,
-    )
     if compiler_projection_db_path is not None:
-        stats["compiler_projection"] = build_compiler_projection_database(
+        started = time.monotonic()
+        stats["compiler_projection"] = build_compiler_projection_database_from_data(
             compiler_projection_db_path,
-            graphs,
-            semantic_graphs,
+            projection_data,
             buffer_pool_size=_DB_BUFFER_POOL_SIZE,
         )
+        stats["timings_seconds"]["projection_write"] = round(
+            time.monotonic() - started,
+            3,
+        )
+    stats["timings_seconds"] = {
+        name: round(seconds, 3)
+        for name, seconds in stats["timings_seconds"].items()
+    }
     return stats
 
 
@@ -997,16 +1047,10 @@ def main() -> None:
 
     print("=== Building Knowledge Database ===\n")
 
-    # 1. Create DB and apply schema
-    print("[1/6] Creating database and applying schema...")
-    # Cap buffer pool at 2 GB so the build doesn't claim ~80% of system
-    # memory by default (real_ladybug's autosize on a workstation can
-    # easily reserve 12+ GB and starve the parser/scrapers).
-    db = lb.Database(str(db_path), buffer_pool_size=_DB_BUFFER_POOL_SIZE)
-    _apply_schema(db)
-
-    # 2. Sync API specs
-    print("\n[2/6] Refreshing API documentation...")
+    # 1. Sync API specs before opening LadybugDB. Task 1 uses a process pool,
+    # and forking after a native database engine has initialized is unsafe and
+    # needlessly copies its process state into resolver workers.
+    print("[1/6] Refreshing API documentation...")
     if args.sample and args.sample > 0:
         # Prefer the per-output cache so --output-dir is respected; fall
         # back to the standard ./build/spec_cache populated by a prior
@@ -1025,10 +1069,13 @@ def main() -> None:
     # Task 1 (ADR-011): strict validation/resolution.  The legacy populator
     # still consumes ``specs`` unchanged, while Task 2 consumes the cleaned raw
     # inputs carried by successful Task 1 results.
-    task1 = resolve_specs(specs)
+    task1_started = time.monotonic()
+    task1 = resolve_specs(specs, retain_resolved_spec=False)
+    task1_elapsed = time.monotonic() - task1_started
     print(
         f"  Task 1 ingestion: {len(task1.resolved)} resolved, "
-        f"{len(task1.failed)} failed strict validation/resolution"
+        f"{len(task1.failed)} failed strict validation/resolution "
+        f"using {task1.workers_used} worker(s) in {task1_elapsed:.2f}s"
     )
     for f in task1.failed:
         print(
@@ -1036,17 +1083,15 @@ def main() -> None:
             file=sys.stderr,
         )
 
-    print("\n[2b/6] Building L1 OpenAPI AST artifact...")
-    try:
-        ast_stats = _build_ast_artifact(
-            ast_db_path,
-            task1.resolved,
-            task1_failures=task1.failed,
-            compiler_projection_db_path=compiler_projection_db_path,
-        )
-    except Exception:
-        db.close()
-        raise
+    print("\n[2/6] Building L1 OpenAPI AST artifact...")
+    ast_stats = _build_ast_artifact(
+        ast_db_path,
+        task1.resolved,
+        task1_failures=task1.failed,
+        compiler_projection_db_path=compiler_projection_db_path,
+    )
+    ast_stats["task1_worker_count"] = task1.workers_used
+    ast_stats["timings_seconds"]["task1_resolution"] = round(task1_elapsed, 3)
     print(
         f"  AST graph: {ast_stats['spec_count']} specs, "
         f"{ast_stats['node_count']} nodes, "
@@ -1061,12 +1106,24 @@ def main() -> None:
     )
     compiler_projection_stats = ast_stats["compiler_projection"]
     print(
+        "  Compiler timings: "
+        + ", ".join(
+            f"{name}={seconds:.2f}s"
+            for name, seconds in ast_stats["timings_seconds"].items()
+        )
+    )
+    print(
         f"  Compiler projection: {compiler_projection_stats['node_count']} typed nodes, "
         f"{compiler_projection_stats['edge_count']} typed edges"
     )
 
-    # 3. Build index and populate
-    print("\n[3/6] Populating API endpoints...")
+    # 3. Build the legacy runtime artifact only after all process-pool work.
+    print("\n[3/6] Creating runtime database and populating API endpoints...")
+    # Cap buffer pool at 2 GB so the build doesn't claim ~80% of system
+    # memory by default (real_ladybug's autosize on a workstation can
+    # easily reserve 12+ GB and starve the parser/scrapers).
+    db = lb.Database(str(db_path), buffer_pool_size=_DB_BUFFER_POOL_SIZE)
+    _apply_schema(db)
     if specs:
         print(f"  Normalizing {len(specs)} specs (dedup error/object schemas)...")
         specs = [normalize_spec(s) for s in specs]
@@ -1153,7 +1210,6 @@ def main() -> None:
     db.close()
 
     # Write manifest.json alongside the DB
-    import time
     manifest = {
         "version": time.strftime("knowledge-db-%Y%m%d-%H%M%S", time.gmtime()),
         "schema_version": 10,
