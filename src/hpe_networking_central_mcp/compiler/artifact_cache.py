@@ -44,10 +44,8 @@ def load_reusable_compiler_stats(
         manifest_path is None
         or identity.get("external_ref_count", 0) != 0
         or not manifest_path.is_file()
-        or not ast_db_path.is_dir()
-        or not compiler_projection_db_path.is_dir()
-        or not (ast_db_path / "db.lbd").is_file()
-        or not (compiler_projection_db_path / "db.lbd").is_file()
+        or not _is_ladybug_database_file(ast_db_path)
+        or not _is_ladybug_database_file(compiler_projection_db_path)
     ):
         return None
     try:
@@ -83,6 +81,14 @@ def load_reusable_compiler_stats(
     if isinstance(compiler_stats, dict):
         compiler_stats["db_path"] = compiler_projection_db_path.name
     return stats
+
+
+def _is_ladybug_database_file(path: Path) -> bool:
+    """Return whether a restored file has the shape of a LadybugDB artifact."""
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def _corpus_fingerprint(specs: list[dict[str, Any]]) -> str:

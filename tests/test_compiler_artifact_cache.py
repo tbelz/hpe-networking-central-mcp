@@ -93,10 +93,8 @@ def test_reusable_stats_require_exact_identity_and_both_artifacts(
     identity = compiler_artifact_identity([_spec()], repo_root=repo_root)
     ast_db_path = repo_tmp_path / "knowledge_db_ast"
     compiler_db_path = repo_tmp_path / "knowledge_db_compiler"
-    ast_db_path.mkdir()
-    compiler_db_path.mkdir()
-    (ast_db_path / "db.lbd").touch()
-    (compiler_db_path / "db.lbd").touch()
+    ast_db_path.write_bytes(b"ast database")
+    compiler_db_path.write_bytes(b"compiler database")
     manifest_path = repo_tmp_path / "manifest.json"
     manifest_path.write_text(
         json.dumps({
@@ -140,26 +138,25 @@ def test_reusable_stats_require_exact_identity_and_both_artifacts(
         identity=mismatch,
     ) is None
 
-    shutil.rmtree(ast_db_path)
-    assert load_reusable_compiler_stats(
-        manifest_path,
-        ast_db_path=ast_db_path,
-        compiler_projection_db_path=compiler_db_path,
-        identity=identity,
-    ) is None
-
-    ast_db_path.write_text("not a database directory", encoding="utf-8")
-    assert load_reusable_compiler_stats(
-        manifest_path,
-        ast_db_path=ast_db_path,
-        compiler_projection_db_path=compiler_db_path,
-        identity=identity,
-    ) is None
-
     ast_db_path.unlink()
+    assert load_reusable_compiler_stats(
+        manifest_path,
+        ast_db_path=ast_db_path,
+        compiler_projection_db_path=compiler_db_path,
+        identity=identity,
+    ) is None
+
     ast_db_path.mkdir()
-    (ast_db_path / "db.lbd").touch()
-    (compiler_db_path / "db.lbd").unlink()
+    assert load_reusable_compiler_stats(
+        manifest_path,
+        ast_db_path=ast_db_path,
+        compiler_projection_db_path=compiler_db_path,
+        identity=identity,
+    ) is None
+
+    ast_db_path.rmdir()
+    ast_db_path.write_bytes(b"ast database")
+    compiler_db_path.write_bytes(b"")
     assert load_reusable_compiler_stats(
         manifest_path,
         ast_db_path=ast_db_path,

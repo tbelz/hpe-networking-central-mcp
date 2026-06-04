@@ -627,12 +627,9 @@ def test_release_archives_keep_ast_tar_separate(repo_tmp_path: Path) -> None:
     db_path = repo_tmp_path / "knowledge_db"
     ast_db_path = repo_tmp_path / "knowledge_db_ast"
     compiler_db_path = repo_tmp_path / "knowledge_db_compiler"
-    db_path.mkdir()
-    ast_db_path.mkdir()
-    compiler_db_path.mkdir()
-    (db_path / "db.lbd").write_text("runtime", encoding="utf-8")
-    (ast_db_path / "db.lbd").write_text("ast", encoding="utf-8")
-    (compiler_db_path / "db.lbd").write_text("compiler", encoding="utf-8")
+    db_path.write_text("runtime", encoding="utf-8")
+    ast_db_path.write_text("ast", encoding="utf-8")
+    compiler_db_path.write_text("compiler", encoding="utf-8")
     manifest_path = repo_tmp_path / "manifest.json"
     manifest_path.write_text('{"version": "unit"}', encoding="utf-8")
 
@@ -650,19 +647,19 @@ def test_release_archives_keep_ast_tar_separate(repo_tmp_path: Path) -> None:
 
     with tarfile.open(archives["knowledge_db"], "r:gz") as tf:
         names = tf.getnames()
-    assert "knowledge_db/db.lbd" in names
+    assert "knowledge_db" in names
     assert "manifest.json" in names
     assert all(not name.startswith("knowledge_db_ast/") for name in names)
     assert all(not name.startswith("knowledge_db_compiler/") for name in names)
 
     with tarfile.open(archives["knowledge_db_compiler"], "r:gz") as tf:
         compiler_names = tf.getnames()
-    assert "knowledge_db_compiler/db.lbd" in compiler_names
+    assert compiler_names == ["knowledge_db_compiler"]
     assert "manifest.json" not in compiler_names
 
     with tarfile.open(archives["knowledge_db_ast"], "r:gz") as tf:
         ast_names = tf.getnames()
-    assert "knowledge_db_ast/db.lbd" in ast_names
+    assert ast_names == ["knowledge_db_ast"]
     assert "manifest.json" not in ast_names
 
 
@@ -677,10 +674,8 @@ def test_prepare_compiler_artifact_reuses_exact_prior_artifacts(
     identity = mod.compiler_artifact_identity(specs, repo_root=repo_root)
     ast_db_path = repo_tmp_path / "knowledge_db_ast"
     compiler_db_path = repo_tmp_path / "knowledge_db_compiler"
-    ast_db_path.mkdir()
-    compiler_db_path.mkdir()
-    (ast_db_path / "db.lbd").touch()
-    (compiler_db_path / "db.lbd").touch()
+    ast_db_path.write_bytes(b"ast database")
+    compiler_db_path.write_bytes(b"compiler database")
     manifest_path = repo_tmp_path / "prior_manifest.json"
     manifest_path.write_text(
         json.dumps({
