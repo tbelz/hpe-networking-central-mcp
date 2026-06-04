@@ -240,7 +240,8 @@ def test_schema_context_walks_properties_targets_and_raw_detail(
         )
         assert [entry["kind"] for entry in envelope["composition"]] == ["allOf", "allOf"]
         assert any(
-            entry["schema"]["raw_openapi"] == {"$ref": "#/components/schemas/DeviceCreate"}
+            entry["schema"]["projection_row"]["component_id"]
+            == "central:schemas:DeviceCreate"
             for entry in envelope["composition"]
         )
 
@@ -249,9 +250,9 @@ def test_schema_context_walks_properties_targets_and_raw_detail(
             ast_conn=ast_conn,
             component_id="central:schemas:TagMap",
         )
-        assert tag_map["value_schemas"][0]["raw_openapi"] == {
-            "$ref": "#/components/schemas/Tag"
-        }
+        assert tag_map["value_schemas"][0]["projection_row"]["component_id"] == (
+            "central:schemas:Tag"
+        )
 
         tag_alias = fetch_schema_context(
             compiler_conn=compiler_conn,

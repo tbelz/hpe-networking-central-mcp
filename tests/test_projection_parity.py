@@ -10,13 +10,25 @@ import tempfile
 import pytest
 import real_ladybug as lb
 
+from hpe_networking_central_mcp.compiler.ast_builder import build_ast_graph
+from hpe_networking_central_mcp.compiler.projection_writer import (
+    build_compiler_projection_database,
+)
 from hpe_networking_central_mcp.compiler.projection_parity import (
     compute_projection_parity,
     format_projection_parity_report,
 )
+from hpe_networking_central_mcp.compiler.semantic_builder import build_semantic_overlay
 from hpe_networking_central_mcp.graph.schema import (
     KNOWLEDGE_NODE_TABLES,
     KNOWLEDGE_REL_TABLES,
+)
+from hpe_networking_central_mcp.oas_normalize import normalize
+from hpe_networking_central_mcp.oas_schema_graph import (
+    collect_into_batch,
+    flush_batch,
+    new_batch,
+    query_existing_eids,
 )
 
 pytestmark = [pytest.mark.compiler, pytest.mark.unit]
@@ -87,12 +99,145 @@ def test_projection_parity_reports_missing_legacy_signature(
         compiler_db.close()
 
 
+def test_compiler_projection_covers_legacy_structural_schema_identities(
+    repo_tmp_path: Path,
+) -> None:
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "Structural parity", "version": "1.0"},
+        "paths": {
+            "/config": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/Root"}
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/Root"}
+                                }
+                            },
+                        }
+                    },
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "Leaf": {"type": "string"},
+                "Base": {
+                    "type": "object",
+                    "properties": {"base": {"type": "string"}},
+                },
+                "Root": {
+                    "allOf": [
+                        {"$ref": "#/components/schemas/Base"},
+                        {
+                            "type": "object",
+                            "properties": {"branch": {"type": "string"}},
+                        },
+                    ],
+                    "properties": {
+                        "direct": {"$ref": "#/components/schemas/Leaf"},
+                        "nested": {
+                            "type": "object",
+                            "properties": {
+                                "child": {"$ref": "#/components/schemas/Leaf"}
+                            },
+                        },
+                        "entries": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "leaf": {"$ref": "#/components/schemas/Leaf"}
+                                },
+                            },
+                        },
+                    },
+                    "additionalProperties": {"$ref": "#/components/schemas/Leaf"},
+                },
+            }
+        },
+    }
+    legacy_db = _make_db(repo_tmp_path / "legacy_structural")
+    compiler_path = repo_tmp_path / "compiler_structural"
+    normalized = normalize(spec)
+    legacy_conn = lb.Connection(legacy_db)
+    _seed_endpoint(legacy_conn, method="POST", path="/config")
+    batch = new_batch()
+    eids = query_existing_eids(legacy_conn, ["POST:/config"])
+    collect_into_batch(
+        batch,
+        spec_source="central",
+        spec=normalized,
+        endpoints=[("POST", "/config")],
+        existing_eids=eids,
+    )
+    flush_batch(legacy_conn, batch)
+
+    ast = build_ast_graph(spec, source="central/structural-parity")
+    semantic = build_semantic_overlay(ast)
+    build_compiler_projection_database(compiler_path, [ast], [semantic])
+    compiler_db = lb.Database(str(compiler_path), max_db_size=256 * 1024 * 1024)
+    try:
+        report = compute_projection_parity(legacy_conn, lb.Connection(compiler_db))
+        for check in (
+            "body_references",
+            "response_references",
+            "schema_components",
+            "properties",
+            "property_types",
+            "composition",
+            "value_schemas",
+        ):
+            assert report["checks"][check]["legacy_coverage_ratio"] == 1.0, (
+                check,
+                report["checks"][check]["legacy_missing_samples"],
+            )
+    finally:
+        compiler_db.close()
+        legacy_db.close()
+
+
 def _make_db(path: Path) -> lb.Database:
     db = lb.Database(str(path), max_db_size=256 * 1024 * 1024)
     conn = lb.Connection(db)
     for ddl in KNOWLEDGE_NODE_TABLES + KNOWLEDGE_REL_TABLES:
         conn.execute(ddl.strip())
     return db
+
+
+def _seed_endpoint(conn, *, method: str, path: str) -> None:
+    conn.execute(
+        """
+        CREATE (:ApiEndpoint {
+          endpoint_id: $endpoint_id,
+          method: $method,
+          path: $path,
+          summary: '',
+          description: '',
+          operationId: '',
+          category: '',
+          deprecated: false,
+          tags: [],
+          parameters: '',
+          requestBody: '',
+          responses: ''
+        })
+        """,
+        parameters={
+            "endpoint_id": f"{method}:{path}",
+            "method": method,
+            "path": path,
+        },
+    )
 
 
 def _populate_api_shape(conn, *, include_parameter: bool = True) -> None:

@@ -510,13 +510,17 @@ def _validate_keys(obj: dict[str, Any], *, source: str, pointer: str, kind: str)
 
 
 def _child_kind(*, parent_kind: str, parent_pointer: str, key: str, value: Any) -> str:
-    if parent_kind in {"Constraint", "Extension"}:
+    if parent_kind == "Extension":
         return parent_kind
-    if parent_kind in {"Schema", "Property", "Items"}:
-        return _schema_child_kind(parent_pointer=parent_pointer, key=key, value=value)
     parts = _pointer_parts(parent_pointer)
     if _is_schema_property_map(parts):
         return "Property"
+    if _is_schema_def_map(parts):
+        return "Schema"
+    if parent_kind == "Constraint":
+        return parent_kind
+    if parent_kind in {"Schema", "Property", "Items"}:
+        return _schema_child_kind(parent_pointer=parent_pointer, key=key, value=value)
     if key.startswith("x-"):
         return "Extension"
     if parent_kind == "Document":
@@ -625,19 +629,21 @@ def _schema_child_kind(*, parent_pointer: str, key: str, value: Any) -> str:
 def _array_item_kind(
     *, parent_kind: str, parent_pointer: str, parent_key: str | None, value: Any
 ) -> str:
-    if parent_kind in {"Constraint", "Extension"}:
+    if parent_kind == "Extension":
         return parent_kind
     parts = _pointer_parts(parent_pointer)
     if _is_example_value_descendant(parts):
         return "Scalar"
+    if parent_key in {"allOf", "anyOf", "oneOf", "prefixItems"}:
+        return "Schema"
+    if parent_kind == "Constraint":
+        return parent_kind
     if parent_key == "servers":
         return "Server"
     if parent_key == "parameters":
         return "Parameter"
     if parent_key == "tags" and len(parts) == 1:
         return "Tag"
-    if parent_key in {"allOf", "anyOf", "oneOf", "prefixItems"}:
-        return "Schema"
     if parent_key == "security":
         return "Scalar"
     if parent_key in {"enum", "required", "dependentRequired"}:

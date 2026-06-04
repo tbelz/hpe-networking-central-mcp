@@ -30,6 +30,27 @@ _HTTP_METHODS = {
     "trace",
 }
 
+_SCHEMA_CHILD_KEYS = {
+    "additionalItems",
+    "additionalProperties",
+    "contains",
+    "contentSchema",
+    "else",
+    "if",
+    "items",
+    "not",
+    "propertyNames",
+    "then",
+    "unevaluatedItems",
+    "unevaluatedProperties",
+}
+
+_SCHEMA_MAP_KEYS = {
+    "$defs",
+    "definitions",
+    "dependentSchemas",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class SemanticNode:
@@ -294,15 +315,17 @@ def _build_schema_edges(state: _SemanticState) -> None:
                 if not isinstance(child, dict):
                     continue
                 child_pointer = _join_pointer(pointer, composition, str(index))
+                target_pointer = _schema_type_pointer(child, child_pointer)
                 state.add_edge(
                     node,
-                    state.schema_by_pointer.get(child_pointer),
+                    state.schema_by_pointer.get(target_pointer),
                     kind="COMPOSED_OF",
                     rule_id=f"{STRUCTURAL_RULE_PACK_ID}.schema.composition",
                     evidence={
                         "composition": composition,
                         "index": index,
                         "schemaPointer": pointer,
+                        "targetPointer": target_pointer,
                     },
                 )
 
@@ -310,12 +333,17 @@ def _build_schema_edges(state: _SemanticState) -> None:
             child = body.get(map_key)
             if isinstance(child, dict):
                 child_pointer = _join_pointer(pointer, map_key)
+                target_pointer = _schema_type_pointer(child, child_pointer)
                 state.add_edge(
                     node,
-                    state.schema_by_pointer.get(child_pointer),
+                    state.schema_by_pointer.get(target_pointer),
                     kind="HAS_VALUE_SCHEMA",
                     rule_id=f"{STRUCTURAL_RULE_PACK_ID}.schema.value",
-                    evidence={"role": map_key, "schemaPointer": pointer},
+                    evidence={
+                        "role": map_key,
+                        "schemaPointer": pointer,
+                        "targetPointer": target_pointer,
+                    },
                 )
 
 
@@ -1122,12 +1150,27 @@ def _is_required_property(parent_schema: AstNode | None, property_name: str) -> 
 def _is_schema_ast_node(ast_node: AstNode) -> bool:
     if ast_node.value_type != "object":
         return False
-    if ast_node.kind in {"Schema", "Property", "Items"}:
+    body = _load_object(ast_node.raw_json)
+    if body is None:
+        return False
+    if _is_named_component_schema(ast_node.json_pointer):
         return True
+    if _is_ref_only_schema(body):
+        return False
     if _is_property_ast_node(ast_node):
+        return _property_schema_is_structural(body)
+    if ast_node.kind in {"Schema", "Items"}:
         return True
     parts = _pointer_parts(ast_node.json_pointer)
-    return len(parts) >= 2 and parts[-2] in {"allOf", "anyOf", "oneOf", "prefixItems"}
+    if parts and parts[-1] in _SCHEMA_CHILD_KEYS:
+        return True
+    return len(parts) >= 2 and parts[-2] in {
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "prefixItems",
+        *_SCHEMA_MAP_KEYS,
+    }
 
 
 def _is_property_ast_node(ast_node: AstNode) -> bool:
@@ -1137,6 +1180,29 @@ def _is_property_ast_node(ast_node: AstNode) -> bool:
         return True
     parts = _pointer_parts(ast_node.json_pointer)
     return len(parts) >= 2 and parts[-2] in {"properties", "patternProperties"}
+
+
+def _is_ref_only_schema(body: dict[str, Any]) -> bool:
+    """Return whether a schema is only a transparent reference wrapper."""
+    if not isinstance(body.get("$ref"), str):
+        return False
+    return set(body).issubset({"$ref", "description", "summary", "title"})
+
+
+def _property_schema_is_structural(body: dict[str, Any]) -> bool:
+    """Return whether a property needs its own traversable schema node."""
+    if isinstance(body.get("properties"), dict):
+        return True
+    if body.get("additionalProperties") is True or isinstance(
+        body.get("additionalProperties"),
+        dict,
+    ):
+        return True
+    return any(isinstance(body.get(key), list) and body[key] for key in (
+        "allOf",
+        "anyOf",
+        "oneOf",
+    ))
 
 
 def _schema_name(ast_node: AstNode) -> str:
