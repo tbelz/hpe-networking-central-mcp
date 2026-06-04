@@ -25,6 +25,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import real_ladybug as lb  # noqa: E402
 
+from hpe_networking_central_mcp.compiler.artifact_cache import (  # noqa: E402
+    compiler_artifact_identity,
+    load_reusable_compiler_stats,
+)
 from hpe_networking_central_mcp.compiler.ast_builder import (  # noqa: E402
     build_ast_from_failure,
     build_ast_from_resolved,
@@ -470,6 +474,88 @@ def _create_release_archives(
         "knowledge_db_compiler": compiler_tar_path,
         "knowledge_db_ast": ast_tar_path,
     }
+
+
+def _prepare_compiler_artifact(
+    specs: list[dict],
+    *,
+    repo_root: Path,
+    ast_db_path: Path,
+    compiler_projection_db_path: Path,
+    task1_cache_path: Path,
+    reuse_manifest: Path | None,
+) -> dict:
+    """Reuse exact compiler artifacts or build them through Task 1 and L1-L3."""
+    compiler_identity = compiler_artifact_identity(specs, repo_root=repo_root)
+    reuse_started = time.monotonic()
+    ast_stats = load_reusable_compiler_stats(
+        reuse_manifest,
+        ast_db_path=ast_db_path,
+        compiler_projection_db_path=compiler_projection_db_path,
+        identity=compiler_identity,
+    )
+    if ast_stats is not None:
+        reuse_elapsed = time.monotonic() - reuse_started
+        ast_stats["timings_seconds"] = {"compiler_reuse": round(reuse_elapsed, 3)}
+        if not task1_cache_path.exists():
+            write_resolution_cache(task1_cache_path, {})
+        identity_prefix = str(compiler_identity["identity"])[:12]
+        print(
+            "\n[2/6] Reusing content-identical compiler artifacts "
+            f"({identity_prefix})..."
+        )
+        return ast_stats
+
+    # Task 1 (ADR-011): strict validation/resolution. The legacy populator
+    # still consumes ``specs`` unchanged, while Task 2 consumes the cleaned
+    # raw inputs carried by Task 1 outcomes.
+    task1_started = time.monotonic()
+    task1_cache = load_resolution_cache(task1_cache_path)
+    task1 = resolve_specs(
+        specs,
+        retain_resolved_spec=False,
+        cache=task1_cache,
+    )
+    write_resolution_cache(task1_cache_path, task1_cache)
+    task1_elapsed = time.monotonic() - task1_started
+    print(
+        f"  Task 1 ingestion: {len(task1.resolved)} resolved, "
+        f"{len(task1.failed)} failed strict validation/resolution "
+        f"using {task1.workers_used} worker(s) in {task1_elapsed:.2f}s "
+        f"({task1.cache_hits} cache hits, {task1.cache_misses} misses)"
+    )
+    for failure in task1.failed:
+        print(
+            f"    ⚠ {failure.source}: {failure.error_type}: {failure.error[:200]}",
+            file=sys.stderr,
+        )
+
+    print("\n[2/6] Building L1 OpenAPI AST artifact...")
+    ast_stats = _build_ast_artifact(
+        ast_db_path,
+        task1.resolved,
+        task1_failures=task1.failed,
+        compiler_projection_db_path=compiler_projection_db_path,
+    )
+    ast_stats["artifact_cache"] = {
+        **compiler_identity,
+        "reuse_hit": False,
+        "source_manifest": reuse_manifest.name if reuse_manifest else "",
+    }
+    ast_stats["task1_worker_count"] = task1.workers_used
+    ast_stats["task1_cache"] = {
+        "path": task1_cache_path.name,
+        "fingerprint": resolution_cache_fingerprint(),
+        "entry_count": len(task1_cache),
+        "hit_count": task1.cache_hits,
+        "miss_count": task1.cache_misses,
+    }
+    ast_stats["timings_seconds"]["task1_resolution"] = round(task1_elapsed, 3)
+    ast_stats["timings_seconds"]["compiler_pipeline_total"] = round(
+        task1_elapsed + ast_stats["timings_seconds"]["compiler_total"],
+        3,
+    )
+    return ast_stats
 
 
 def _print_build_report(db: lb.Database, schema_stats: dict, violations: list) -> None:
@@ -1103,6 +1189,15 @@ def main() -> None:
                              "if the per-output cache is empty), truncate each provider to "
                              "the first N endpoints, and run the full pipeline against a "
                              "tiny graph. Use 0 (default) for the real full build.")
+    parser.add_argument(
+        "--compiler-reuse-manifest",
+        type=Path,
+        default=None,
+        help=(
+            "Prior release manifest used to reuse already-restored compiler "
+            "artifacts when their content identity matches exactly."
+        ),
+    )
     args = parser.parse_args()
 
     output_dir: Path = args.output_dir.resolve()
@@ -1138,49 +1233,18 @@ def main() -> None:
     if not specs:
         print("⚠ No specs available — database will have no API endpoints.", file=sys.stderr)
 
-    # Task 1 (ADR-011): strict validation/resolution.  The legacy populator
-    # still consumes ``specs`` unchanged, while Task 2 consumes the cleaned raw
-    # inputs carried by successful Task 1 results.
-    task1_started = time.monotonic()
-    task1_cache = load_resolution_cache(task1_cache_path)
-    task1 = resolve_specs(
+    reuse_manifest = (
+        args.compiler_reuse_manifest.resolve()
+        if args.compiler_reuse_manifest is not None
+        else None
+    )
+    ast_stats = _prepare_compiler_artifact(
         specs,
-        retain_resolved_spec=False,
-        cache=task1_cache,
-    )
-    write_resolution_cache(task1_cache_path, task1_cache)
-    task1_elapsed = time.monotonic() - task1_started
-    print(
-        f"  Task 1 ingestion: {len(task1.resolved)} resolved, "
-        f"{len(task1.failed)} failed strict validation/resolution "
-        f"using {task1.workers_used} worker(s) in {task1_elapsed:.2f}s "
-        f"({task1.cache_hits} cache hits, {task1.cache_misses} misses)"
-    )
-    for f in task1.failed:
-        print(
-            f"    ⚠ {f.source}: {f.error_type}: {f.error[:200]}",
-            file=sys.stderr,
-        )
-
-    print("\n[2/6] Building L1 OpenAPI AST artifact...")
-    ast_stats = _build_ast_artifact(
-        ast_db_path,
-        task1.resolved,
-        task1_failures=task1.failed,
+        repo_root=Path(__file__).resolve().parent.parent,
+        ast_db_path=ast_db_path,
         compiler_projection_db_path=compiler_projection_db_path,
-    )
-    ast_stats["task1_worker_count"] = task1.workers_used
-    ast_stats["task1_cache"] = {
-        "path": task1_cache_path.name,
-        "fingerprint": resolution_cache_fingerprint(),
-        "entry_count": len(task1_cache),
-        "hit_count": task1.cache_hits,
-        "miss_count": task1.cache_misses,
-    }
-    ast_stats["timings_seconds"]["task1_resolution"] = round(task1_elapsed, 3)
-    ast_stats["timings_seconds"]["compiler_pipeline_total"] = round(
-        task1_elapsed + ast_stats["timings_seconds"]["compiler_total"],
-        3,
+        task1_cache_path=task1_cache_path,
+        reuse_manifest=reuse_manifest,
     )
     print(
         f"  AST graph: {ast_stats['spec_count']} specs, "

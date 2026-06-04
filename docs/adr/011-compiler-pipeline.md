@@ -257,6 +257,18 @@ validation toolchain fingerprint match exactly; new or changed specs still
 run through Prance. This is incremental compilation of a deterministic
 frontend result, not a relaxation of validation.
 
+The persisted L1/L2 and compiler-projection artifacts are also
+content-addressed as one compiler output unit. Scheduled builds restore the
+prior release's `knowledge_db_ast` and `knowledge_db_compiler` artifacts and
+reuse them only when both the order-independent cleaned-spec corpus fingerprint
+and the compiler implementation fingerprint match exactly. Any changed source
+spec, provider identity, compiler module, build orchestration, or locked
+dependency forces the normal Task 1 through projection rebuild. Projection
+parity still opens the restored compiler database later in the same run, so
+artifact reuse does not bypass the cross-projection gate. Specs containing
+external `$ref` targets are conservatively never artifact-reused because the
+referenced resource is not part of the local corpus fingerprint.
+
 ## Alternatives considered
 
 - **Patch the current populator incrementally.**  Rejected: the silent-
