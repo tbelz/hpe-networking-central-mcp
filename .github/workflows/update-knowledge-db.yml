@@ -72,8 +72,32 @@ jobs:
           }
           echo "Primed compiler Task 1 cache from $PREV."
 
+      - name: Prime content-identical compiler artifacts from previous release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build/compiler_reuse
+          PREV=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)
+          if [ -z "$PREV" ]; then
+            echo "No previous release — compiler artifacts will be rebuilt."
+            exit 0
+          fi
+          for ASSET in manifest.json knowledge_db_ast.tar.gz knowledge_db_compiler.tar.gz; do
+            gh release download "$PREV" --pattern "$ASSET" --dir build/compiler_reuse 2>/dev/null || {
+              echo "Previous release lacks $ASSET — compiler artifacts will be rebuilt."
+              exit 0
+            }
+          done
+          tar xzf build/compiler_reuse/knowledge_db_ast.tar.gz -C build
+          tar xzf build/compiler_reuse/knowledge_db_compiler.tar.gz -C build
+          echo "Restored prior compiler artifacts for content-identity validation."
+
       - name: Build knowledge database
-        run: uv run --no-sync python scripts/build_knowledge_db.py --output-dir build --tar
+        run: >
+          uv run --no-sync python scripts/build_knowledge_db.py
+          --output-dir build
+          --compiler-reuse-manifest build/compiler_reuse/manifest.json
+          --tar
 
       - name: Re-tar VSG cache for next run
         if: always()
@@ -241,8 +265,9 @@ jobs:
           NEW_DOC=$(jq -r '.doc_count // 0' build/manifest.json)
           OLD_CATS=$(jq -r '.categories | sort | join(",")' /tmp/prev/manifest.json)
           NEW_CATS=$(jq -r '.categories | sort | join(",")' build/manifest.json)
-          OLD_AST=$(jq -c '.ast // null' /tmp/prev/manifest.json)
-          NEW_AST=$(jq -c '.ast // null' build/manifest.json)
+          OLD_COMPILER_ID=$(jq -r '.ast.artifact_cache.identity // ""' /tmp/prev/manifest.json)
+          NEW_COMPILER_ID=$(jq -r '.ast.artifact_cache.identity // ""' build/manifest.json)
+          NEW_EXTERNAL_REFS=$(jq -r '.ast.artifact_cache.external_ref_count // 0' build/manifest.json)
           OLD_COMPILER=$(jq -c '.compiler_projection // null' /tmp/prev/manifest.json)
           NEW_COMPILER=$(jq -c '.compiler_projection // null' build/manifest.json)
           OLD_PARITY=$(jq -c '.projection_parity // null' /tmp/prev/manifest.json)
@@ -250,14 +275,15 @@ jobs:
 
           echo "Previous: ${OLD_EP} endpoints, ${OLD_CAT} categories, ${OLD_DOC} docs"
           echo "Current:  ${NEW_EP} endpoints, ${NEW_CAT} categories, ${NEW_DOC} docs"
-          echo "Previous AST: ${OLD_AST}"
-          echo "Current AST:  ${NEW_AST}"
+          echo "Previous compiler artifact identity: ${OLD_COMPILER_ID}"
+          echo "Current compiler artifact identity:  ${NEW_COMPILER_ID}"
+          echo "Current external compiler references: ${NEW_EXTERNAL_REFS}"
           echo "Previous compiler projection: ${OLD_COMPILER}"
           echo "Current compiler projection:  ${NEW_COMPILER}"
           echo "Previous projection parity: ${OLD_PARITY}"
           echo "Current projection parity:  ${NEW_PARITY}"
 
-          if [ "$OLD_EP" = "$NEW_EP" ] && [ "$OLD_CAT" = "$NEW_CAT" ] && [ "$OLD_CATS" = "$NEW_CATS" ] && [ "$OLD_DOC" = "$NEW_DOC" ] && [ "$OLD_AST" = "$NEW_AST" ] && [ "$OLD_COMPILER" = "$NEW_COMPILER" ] && [ "$OLD_PARITY" = "$NEW_PARITY" ]; then
+          if [ "$NEW_EXTERNAL_REFS" = "0" ] && [ "$OLD_EP" = "$NEW_EP" ] && [ "$OLD_CAT" = "$NEW_CAT" ] && [ "$OLD_CATS" = "$NEW_CATS" ] && [ "$OLD_DOC" = "$NEW_DOC" ] && [ "$OLD_COMPILER_ID" = "$NEW_COMPILER_ID" ] && [ "$OLD_COMPILER" = "$NEW_COMPILER" ] && [ "$OLD_PARITY" = "$NEW_PARITY" ]; then
             echo "No changes detected — skipping release."
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else

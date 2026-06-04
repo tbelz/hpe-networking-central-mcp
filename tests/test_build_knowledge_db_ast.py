@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 import importlib.util
 import json
 import shutil
 import tarfile
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 import real_ladybug as lb
+import yaml
 
 from hpe_networking_central_mcp.compiler.ast_builder import UnknownKeywordError
 from hpe_networking_central_mcp.compiler.frontend import (
     ResolutionFailure,
+    ResolutionResult,
     ResolvedSpec,
     resolve_spec,
 )
@@ -662,6 +664,120 @@ def test_release_archives_keep_ast_tar_separate(repo_tmp_path: Path) -> None:
         ast_names = tf.getnames()
     assert "knowledge_db_ast/db.lbd" in ast_names
     assert "manifest.json" not in ast_names
+
+
+def test_prepare_compiler_artifact_reuses_exact_prior_artifacts(
+    repo_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = _load_build_module()
+    repo_root = repo_tmp_path / "repo"
+    repo_root.mkdir()
+    specs = [_oas_spec()]
+    identity = mod.compiler_artifact_identity(specs, repo_root=repo_root)
+    ast_db_path = repo_tmp_path / "knowledge_db_ast"
+    compiler_db_path = repo_tmp_path / "knowledge_db_compiler"
+    ast_db_path.mkdir()
+    compiler_db_path.mkdir()
+    (ast_db_path / "db.lbd").touch()
+    (compiler_db_path / "db.lbd").touch()
+    manifest_path = repo_tmp_path / "prior_manifest.json"
+    manifest_path.write_text(
+        json.dumps({
+            "ast": {
+                "spec_count": 1,
+                "node_count": 10,
+                "child_edge_count": 9,
+                "ref_edge_count": 0,
+                "semantic": {"node_count": 2, "edge_count": 1},
+                "degraded": {"candidate_count": 0, "compiled_count": 0, "failed_count": 0},
+                "compiler_projection": {"node_count": 2, "edge_count": 1},
+                "timings_seconds": {"compiler_total": 4.0},
+                "artifact_cache": identity,
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    def unexpected_resolve(*_args, **_kwargs):
+        raise AssertionError("exact compiler artifacts should skip Task 1")
+
+    monkeypatch.setattr(mod, "resolve_specs", unexpected_resolve)
+
+    stats = mod._prepare_compiler_artifact(
+        specs,
+        repo_root=repo_root,
+        ast_db_path=ast_db_path,
+        compiler_projection_db_path=compiler_db_path,
+        task1_cache_path=repo_tmp_path / "compiler-task1-cache.json",
+        reuse_manifest=manifest_path,
+    )
+
+    assert stats["artifact_cache"]["reuse_hit"] is True
+    assert set(stats["timings_seconds"]) == {"compiler_reuse"}
+    assert (repo_tmp_path / "compiler-task1-cache.json").is_file()
+
+
+def test_prepare_compiler_artifact_rebuilds_on_reuse_miss(
+    repo_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = _load_build_module()
+    resolved = _resolved()
+    task1 = ResolutionResult(resolved=[resolved], workers_used=1)
+    monkeypatch.setattr(mod, "load_resolution_cache", lambda _path: {})
+    monkeypatch.setattr(mod, "resolve_specs", lambda *_args, **_kwargs: task1)
+    monkeypatch.setattr(mod, "write_resolution_cache", lambda *_args: None)
+    monkeypatch.setattr(
+        mod,
+        "_build_ast_artifact",
+        lambda *_args, **_kwargs: {
+            "timings_seconds": {"compiler_total": 3.0},
+            "compiler_projection": {},
+        },
+    )
+
+    stats = mod._prepare_compiler_artifact(
+        [_oas_spec()],
+        repo_root=repo_tmp_path,
+        ast_db_path=repo_tmp_path / "knowledge_db_ast",
+        compiler_projection_db_path=repo_tmp_path / "knowledge_db_compiler",
+        task1_cache_path=repo_tmp_path / "compiler-task1-cache.json",
+        reuse_manifest=None,
+    )
+
+    assert stats["artifact_cache"]["reuse_hit"] is False
+    assert stats["task1_cache"]["hit_count"] == 0
+    assert stats["task1_cache"]["miss_count"] == 0
+    assert stats["timings_seconds"]["compiler_pipeline_total"] >= 3.0
+
+
+def test_release_workflow_restores_and_uses_compiler_artifacts() -> None:
+    workflow_path = (
+        Path(__file__).resolve().parent.parent
+        / ".github"
+        / "workflows"
+        / "update-knowledge-db.yml"
+    )
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["build-knowledge-db"]["steps"]
+    by_name = {step.get("name"): step for step in steps}
+
+    prime = by_name["Prime content-identical compiler artifacts from previous release"][
+        "run"
+    ]
+    assert "knowledge_db_ast.tar.gz" in prime
+    assert "knowledge_db_compiler.tar.gz" in prime
+    assert "manifest.json" in prime
+
+    build = by_name["Build knowledge database"]["run"]
+    assert "--compiler-reuse-manifest build/compiler_reuse/manifest.json" in build
+
+    diff = by_name["Check for changes against latest release"]["run"]
+    assert ".ast.artifact_cache.identity" in diff
+    assert ".ast.artifact_cache.external_ref_count" in diff
+    assert '[ "$NEW_EXTERNAL_REFS" = "0" ]' in diff
+    assert ".ast // null" not in diff
 
 
 @pytest.mark.real_spec
