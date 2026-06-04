@@ -266,6 +266,21 @@ def test_vendor_extension_is_preserved_as_extension_node() -> None:
     assert json.loads(nodes[0].raw_json) == {"source": "fixture"}
 
 
+def test_persisted_raw_json_avoids_recursive_structural_duplication() -> None:
+    graph = build_ast_graph(_oas30_spec(), source="unit/compact-raw")
+    by_pointer = {node.json_pointer: node for node in graph.nodes}
+
+    assert by_pointer[""].raw_json == ""
+    assert by_pointer["/components"].raw_json == ""
+    assert by_pointer["/components/schemas"].raw_json == ""
+    assert by_pointer["/components/schemas/Pet"].raw_json
+    assert by_pointer["/components/schemas/Pet/properties/id"].raw_json
+    assert by_pointer[
+        "/components/schemas/Pet/x-central-note"
+    ].raw_json == '{"source":"fixture"}'
+    assert reconstruct_spec(graph) == _oas30_spec()
+
+
 def test_example_value_array_items_are_not_validated_as_schema_keywords() -> None:
     spec = _oas30_spec()
     media = spec["paths"]["/pets"]["get"]["responses"]["200"]["content"]["application/json"]

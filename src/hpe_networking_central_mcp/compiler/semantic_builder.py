@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .ast_builder import AstGraph, AstNode
+from .constraints import collect_constraints
 
 STRUCTURAL_RULE_PACK_ID = "semantic.structural.v1"
 IDENTITY_RULE_PACK_ID = "semantic.identity.v1"
@@ -30,7 +31,7 @@ _HTTP_METHODS = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SemanticNode:
     semantic_id: str
     spec_id: str
@@ -42,7 +43,7 @@ class SemanticNode:
     summary_json: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SemanticEdge:
     source_id: str
     target_id: str
@@ -51,14 +52,14 @@ class SemanticEdge:
     evidence_json: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SemanticDerivedFromEdge:
     semantic_id: str
     ast_node_id: str
     role: str
 
 
-@dataclass
+@dataclass(slots=True)
 class SemanticGraph:
     spec_id: str
     rule_packs: tuple[str, ...] = (STRUCTURAL_RULE_PACK_ID, IDENTITY_RULE_PACK_ID)
@@ -169,6 +170,7 @@ def _build_schema_nodes(state: _SemanticState) -> None:
             ast_pointer=pointer,
             summary={
                 "bodyShape": _schema_shape(body),
+                "constraints": collect_constraints(body),
                 "description": _as_str(body.get("description")),
                 "enumValues": _enum_values(body),
                 "format": _as_str(body.get("format")),
@@ -176,6 +178,7 @@ def _build_schema_nodes(state: _SemanticState) -> None:
                 "kind": _component_kind(body),
                 "required": _string_list(body.get("required")),
                 "type": _schema_type(body),
+                "x-key": _string_list(body.get("x-key")),
                 "x-path": body.get("x-path") if isinstance(body.get("x-path"), str) else "",
                 "xExtensions": _x_extensions(body),
                 "x-supportedDeviceType": _supported_device_types(body),
@@ -200,6 +203,7 @@ def _build_property_nodes(state: _SemanticState) -> None:
             name=property_name,
             ast_pointer=ast_node.json_pointer,
             summary={
+                "constraints": collect_constraints(body),
                 "description": _as_str(body.get("description")),
                 "enumValues": _enum_values(body),
                 "format": _as_str(body.get("format")),
@@ -236,6 +240,23 @@ def _build_property_nodes(state: _SemanticState) -> None:
             rule_id=f"{STRUCTURAL_RULE_PACK_ID}.property.type",
             evidence={"schemaPointer": type_pointer},
         )
+
+        items = body.get("items")
+        if isinstance(items, dict):
+            item_pointer = _schema_type_pointer(
+                items,
+                _join_pointer(ast_node.json_pointer, "items"),
+            )
+            state.add_edge(
+                node,
+                state.schema_by_pointer.get(item_pointer),
+                kind="HAS_ITEM_SCHEMA",
+                rule_id=f"{STRUCTURAL_RULE_PACK_ID}.property.items",
+                evidence={
+                    "itemPointer": item_pointer,
+                    "propertyPointer": ast_node.json_pointer,
+                },
+            )
 
         yang_path = body.get("x-path")
         if isinstance(yang_path, str) and yang_path:
@@ -896,6 +917,18 @@ def _add_endpoint_model_shortcuts(
                         "structuralEvidence": _load_edge_evidence(edge),
                     },
                 )
+        elif source.kind == "Property" and edge.kind == "HAS_ITEM_SCHEMA":
+            state.add_edge(
+                property_model_by_id.get(source.semantic_id),
+                schema_model_by_id.get(target.semantic_id),
+                kind="MODEL_HAS_ITEM_SCHEMA",
+                rule_id=f"{IDENTITY_RULE_PACK_ID}.property.itemModel",
+                evidence={
+                    "propertySemanticId": source.semantic_id,
+                    "schemaSemanticId": target.semantic_id,
+                    "structuralEvidence": _load_edge_evidence(edge),
+                },
+            )
         elif source.kind == "SchemaComponent" and edge.kind == "COMPOSED_OF":
             state.add_edge(
                 schema_model_by_id.get(source.semantic_id),

@@ -18,7 +18,10 @@ from hpe_networking_central_mcp.compiler.semantic_builder import (
     build_semantic_overlay,
     _internal_ref_pointer,
 )
-from hpe_networking_central_mcp.compiler.semantic_metrics import compute_semantic_metrics
+from hpe_networking_central_mcp.compiler.semantic_metrics import (
+    compute_semantic_metrics,
+    merge_semantic_metrics,
+)
 
 pytestmark = [pytest.mark.compiler, pytest.mark.unit]
 
@@ -291,6 +294,9 @@ def test_semantic_overlay_links_array_property_to_named_item_schema() -> None:
                         "properties": {
                             "items": {
                                 "type": "array",
+                                "minItems": 1,
+                                "maxItems": 20,
+                                "x-key": ["id"],
                                 "items": {"$ref": "#/components/schemas/ScopeIds"},
                             }
                         },
@@ -313,6 +319,17 @@ def test_semantic_overlay_links_array_property_to_named_item_schema() -> None:
     }
 
     assert ("items", "PROPERTY_OF_TYPE", "ScopeIds") in edge_tuples
+    assert ("items", "HAS_ITEM_SCHEMA", "ScopeIds") in edge_tuples
+
+    item_property = next(
+        node for node in semantic.nodes if node.kind == "Property" and node.name == "items"
+    )
+    item_summary = json.loads(item_property.summary_json)
+    assert item_summary["constraints"] == {
+        "maxItems": 20,
+        "minItems": 1,
+        "x-key": ["id"],
+    }
 
 
 def test_semantic_overlay_merges_reused_model_entity_summary() -> None:
@@ -519,6 +536,21 @@ def test_semantic_metrics_count_configures_model_as_any_model_edge() -> None:
         "total": 1,
         "ratio": 1.0,
     }
+
+
+def test_merge_semantic_metrics_matches_single_catalog_report() -> None:
+    first = build_semantic_overlay(
+        build_ast_graph(_semantic_spec(), source="unit/semantic-first")
+    )
+    second = build_semantic_overlay(
+        build_ast_graph(_semantic_spec_with_untyped_endpoint(), source="unit/semantic-second")
+    )
+
+    merged = merge_semantic_metrics(
+        [compute_semantic_metrics([first]), compute_semantic_metrics([second])]
+    )
+
+    assert merged == compute_semantic_metrics([first, second])
 
 
 @pytest.mark.parametrize(

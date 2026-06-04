@@ -83,6 +83,7 @@ def _build_artifacts(repo_tmp_path: Path) -> tuple[Path, Path]:
                         "id": {"$ref": "#/components/schemas/PetId"},
                         "tags": {
                             "type": "array",
+                            "minItems": 1,
                             "items": {"$ref": "#/components/schemas/Tag"},
                         },
                     },
@@ -134,6 +135,8 @@ def test_compiler_traversal_report_samples_artifacts(repo_tmp_path: Path) -> Non
     assert report["totals"]["parameters"] == 1
     assert report["totals"]["request_bodies"] == 1
     assert report["totals"]["responses"] == 1
+    assert report["totals"]["properties_with_constraints"] == 1
+    assert report["totals"]["item_schema_edges"] == 1
     assert report["sample"]["endpoint_count"] == 1
     assert report["endpoint_context"]["ok"] == 1
     assert report["endpoint_context"]["with_parameter_schema"] == 1
@@ -141,6 +144,7 @@ def test_compiler_traversal_report_samples_artifacts(repo_tmp_path: Path) -> Non
     assert report["endpoint_context"]["with_response_schema"] == 1
     assert report["schema_context"]["with_properties"] > 0
     assert report["schema_context"]["with_property_schema"] > 0
+    assert report["schema_context"]["with_item_schema"] > 0
     assert report["schema_context"]["with_composition"] > 0
     assert report["schema_context"]["with_value_schemas"] > 0
     assert report["schema_context"]["with_references"] > 0

@@ -91,13 +91,29 @@ def test_projection_materializes_reusable_response_header_and_array_item_ref(
                     "properties": {
                         "items": {
                             "type": "array",
+                            "minItems": 1,
+                            "x-key": ["scopeId"],
                             "items": {"$ref": "#/components/schemas/ScopeIds"},
                         }
                     },
                 },
                 "Error": {
                     "type": "object",
-                    "properties": {"message": {"type": "string"}},
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                            "default": "unknown",
+                            "pattern": "^[a-z]+$",
+                            "minLength": 1,
+                            "maxLength": 64,
+                            "x-enumDescriptions": {"unknown": "Unknown error"},
+                        },
+                        "code": {
+                            "type": "integer",
+                            "minimum": 400,
+                            "maximum": 599,
+                        },
+                    },
                 },
                 "ScopeIds": {"type": "string"},
             },
@@ -152,6 +168,84 @@ def test_projection_materializes_reusable_response_header_and_array_item_ref(
         )
         assert item_type_rows == [
             {"target_component_id": "central:schemas:ScopeIds"}
+        ]
+
+        item_schema_rows = list(
+            conn.execute(
+                """
+                MATCH (schema:SchemaComponent {component_id: 'central:schemas:DeviceMove'})
+                      -[:HAS_PROPERTY]->(prop:Property {name: 'items'})
+                      -[:HAS_ITEM_SCHEMA]->(target:SchemaComponent)
+                RETURN target.component_id AS target_component_id
+                """
+            ).rows_as_dict()
+        )
+        assert item_schema_rows == [
+            {"target_component_id": "central:schemas:ScopeIds"}
+        ]
+
+        constraint_rows = list(
+            conn.execute(
+                """
+                MATCH (:SchemaComponent {component_id: 'central:schemas:Error'})
+                      -[:HAS_PROPERTY]->(prop:Property)
+                RETURN prop.name AS name,
+                       prop.pattern AS pattern,
+                       prop.defaultValue AS defaultValue,
+                       prop.minimum AS minimum,
+                       prop.maximum AS maximum,
+                       prop.minLength AS minLength,
+                       prop.maxLength AS maxLength,
+                       prop.enumDescriptionsJson AS enumDescriptionsJson,
+                       prop.constraintsJson AS constraintsJson
+                ORDER BY prop.name
+                """
+            ).rows_as_dict()
+        )
+        assert constraint_rows == [
+            {
+                "name": "code",
+                "pattern": "",
+                "defaultValue": "",
+                "minimum": 400.0,
+                "maximum": 599.0,
+                "minLength": None,
+                "maxLength": None,
+                "enumDescriptionsJson": "",
+                "constraintsJson": '{"maximum":599,"minimum":400}',
+            },
+            {
+                "name": "message",
+                "pattern": "^[a-z]+$",
+                "defaultValue": '"unknown"',
+                "minimum": None,
+                "maximum": None,
+                "minLength": 1,
+                "maxLength": 64,
+                "enumDescriptionsJson": '{"unknown":"Unknown error"}',
+                "constraintsJson": (
+                    '{"default":"unknown","maxLength":64,"minLength":1,'
+                    '"pattern":"^[a-z]+$","x-enumDescriptions":'
+                    '{"unknown":"Unknown error"}}'
+                ),
+            },
+        ]
+
+        array_key_rows = list(
+            conn.execute(
+                """
+                MATCH (component:SchemaComponent {name: 'items'})
+                WHERE size(component.arrayKey) > 0
+                RETURN component.arrayKey AS arrayKey,
+                       component.constraintsJson AS constraintsJson
+                """
+            ).rows_as_dict()
+        )
+        assert array_key_rows == [
+            {
+                "arrayKey": ["scopeId"],
+                "constraintsJson": '{"minItems":1,"x-key":["scopeId"]}',
+            }
         ]
 
         parameter_type_rows = list(

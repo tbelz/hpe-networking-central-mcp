@@ -24,18 +24,24 @@ _PKG_DIR = (
     / "src"
     / "hpe_networking_central_mcp"
 )
-if str(_PKG_DIR) not in sys.path:
-    sys.path.insert(0, str(_PKG_DIR))
 
 
 def _load_central_helpers():
-    spec = importlib.util.spec_from_file_location(
-        "central_helpers_under_test", _PKG_DIR / "central_helpers.py"
-    )
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    package_path = str(_PKG_DIR)
+    added_path = package_path not in sys.path
+    if added_path:
+        sys.path.insert(0, package_path)
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "central_helpers_under_test", _PKG_DIR / "central_helpers.py"
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    finally:
+        if added_path:
+            sys.path.remove(package_path)
 
 
 @pytest.fixture(scope="module")

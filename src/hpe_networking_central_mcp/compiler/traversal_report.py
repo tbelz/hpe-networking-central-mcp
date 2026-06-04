@@ -56,6 +56,18 @@ def compute_compiler_traversal_report(
         "parameters": _count(compiler_conn, "MATCH (n:Parameter) RETURN COUNT(n) AS n"),
         "request_bodies": _count(compiler_conn, "MATCH (n:RequestBody) RETURN COUNT(n) AS n"),
         "responses": _count(compiler_conn, "MATCH (n:Response) RETURN COUNT(n) AS n"),
+        "properties_with_constraints": _count(
+            compiler_conn,
+            """
+            MATCH (n:Property)
+            WHERE n.constraintsJson <> '{}'
+            RETURN COUNT(n) AS n
+            """,
+        ),
+        "item_schema_edges": _count(
+            compiler_conn,
+            "MATCH (:Property)-[edge:HAS_ITEM_SCHEMA]->(:SchemaComponent) RETURN COUNT(edge) AS n",
+        ),
         "yang_paths": _count(compiler_conn, "MATCH (n:YangPath) RETURN COUNT(n) AS n"),
         "cli_commands": _count(compiler_conn, "MATCH (n:CliCommand) RETURN COUNT(n) AS n"),
     }
@@ -174,6 +186,7 @@ def _empty_schema_metrics() -> dict[str, int]:
         "ok": 0,
         "with_properties": 0,
         "with_property_schema": 0,
+        "with_item_schema": 0,
         "with_composition": 0,
         "with_value_schemas": 0,
         "with_references": 0,
@@ -210,6 +223,8 @@ def _merge_schema_context(metrics: dict[str, int], context: dict[str, Any]) -> N
         metrics["with_properties"] += 1
     if any(prop.get("schema") for prop in properties if isinstance(prop, dict)):
         metrics["with_property_schema"] += 1
+    if any(prop.get("item_schema") for prop in properties if isinstance(prop, dict)):
+        metrics["with_item_schema"] += 1
     if context.get("composition"):
         metrics["with_composition"] += 1
     if context.get("value_schemas"):

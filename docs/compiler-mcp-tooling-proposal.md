@@ -23,6 +23,13 @@ If a future agent needs an OpenAPI field that was not projected, it should
 ask for source detail through that provenance path instead of requiring a
 new projection column.
 
+Selected compiler-projection columns exist for frequent, deterministic
+queries; they are not a completeness boundary. Constraint-bearing schema
+and property rows also carry a generic `constraintsJson` payload, while
+provenance remains the escape hatch for every source attribute and vendor
+extension. Adding a convenience column must never be required merely to
+prevent source-data loss.
+
 Recently added compiler-only readers already prove this shape:
 
 - `detail_reader.py`: resolves a typed projection row to projection data,
@@ -133,6 +140,7 @@ Returns:
 - schema projection row.
 - direct properties.
 - property target schemas.
+- array item schemas.
 - composition branches.
 - value schemas for arrays/maps.
 - direct schema references.
