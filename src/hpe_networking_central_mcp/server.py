@@ -100,9 +100,11 @@ def _is_recoverable_runtime_db_open_error(exc: BaseException) -> bool:
         marker in msg
         for marker in (
             "corrupt",
+            ".wal",
             "wal file",
             "invalid wal",
             "not a database",
+            "reading past the end",
         )
     )
 

@@ -39,6 +39,7 @@ htmlcov/
 !scripts/dev_test.sh
 !scripts/test_changed.sh
 !scripts/hydrate_test_fixtures.sh
+!scripts/ci_docker_v2_smoke.sh
 config_validation_report.json
 
 # Agent / local scratch logs (in-repo equivalent of /tmp)
