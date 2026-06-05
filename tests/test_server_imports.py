@@ -30,6 +30,15 @@ pytestmark = pytest.mark.unit
 
 def test_server_module_imports_cleanly(monkeypatch, tmp_path):
     """Importing ``server`` must not raise — exercises every module-level statement."""
+    for var in (
+        "MCP_COMPILER_TOOLS",
+        "MCP_COMPILER_DB_PATH",
+        "MCP_COMPILER_AST_DB_PATH",
+        "MCP_KNOWLEDGE_PROJECTION",
+        "KNOWLEDGE_PROJECTION",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
     # Force the credential gate open with throwaway values.
     monkeypatch.setenv("CENTRAL_BASE_URL", "https://example.invalid")
     monkeypatch.setenv("CENTRAL_CLIENT_ID", "test")
@@ -85,6 +94,11 @@ def test_server_module_imports_offline(monkeypatch, tmp_path):
         "GREENLAKE_CLIENT_ID",
         "GREENLAKE_CLIENT_SECRET",
         "READ_ONLY",
+        "MCP_COMPILER_TOOLS",
+        "MCP_COMPILER_DB_PATH",
+        "MCP_COMPILER_AST_DB_PATH",
+        "MCP_KNOWLEDGE_PROJECTION",
+        "KNOWLEDGE_PROJECTION",
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("SCRIPT_LIBRARY_PATH", str(tmp_path / "scripts"))
