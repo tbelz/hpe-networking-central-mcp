@@ -341,6 +341,7 @@ def test_force_refresh_reinstalls_when_local_tag_matches_release(tmp_path, monke
     db_path = tmp_path / "kdb"
     db_path.mkdir()
     (db_path / "db.lbd").write_bytes(b"corrupt")
+    (tmp_path / "kdb.wal").write_bytes(b"stale corrupt wal")
     (tmp_path / "manifest.json").write_text(
         json.dumps(
             {
@@ -399,6 +400,7 @@ def test_force_refresh_reinstalls_when_local_tag_matches_release(tmp_path, monke
     ) is True
     assert download_calls == [asset_url, manifest_url]
     assert (db_path / "db.lbd").read_bytes() == b"fresh"
+    assert not (tmp_path / "kdb.wal").exists()
 
 
 def test_v2_request_does_not_reuse_same_release_legacy_install(tmp_path, monkeypatch):

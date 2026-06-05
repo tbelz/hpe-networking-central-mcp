@@ -36,3 +36,16 @@ jobs:
           CENTRAL_BASE_URL: ""
           CENTRAL_CLIENT_ID: ""
           CENTRAL_CLIENT_SECRET: ""
+
+  docker-v2-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build local Docker image
+        run: docker build -t hpe-networking-central-mcp:ci .
+
+      - name: Run v2 compiler smoke profile
+        run: bash scripts/ci_docker_v2_smoke.sh hpe-networking-central-mcp:ci "${{ github.repository }}"

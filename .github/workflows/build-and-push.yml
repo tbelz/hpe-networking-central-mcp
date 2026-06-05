@@ -117,6 +117,9 @@ jobs:
       packages: read
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -183,3 +186,8 @@ jobs:
               pass
           " 2>/dev/null && break
           done
+
+      - name: Verify v2 compiler smoke profile starts from release artifacts
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}"
+          bash scripts/ci_docker_v2_smoke.sh "$IMAGE" "${{ github.repository }}"

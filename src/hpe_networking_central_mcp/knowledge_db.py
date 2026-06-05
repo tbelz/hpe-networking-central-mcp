@@ -232,11 +232,7 @@ def download_knowledge_db(
                 )
                 return False
 
-            if db_path.exists():
-                if db_path.is_dir():
-                    shutil.rmtree(db_path)
-                else:
-                    db_path.unlink()
+            _remove_existing_install(db_path)
             if extracted_db.is_dir():
                 shutil.copytree(extracted_db, db_path)
             else:
@@ -286,6 +282,33 @@ def _local_install_matches(
         and state.get("knowledge_archive_member") == archive_member
         and state.get("knowledge_projection") == projection
     )
+
+
+def _remove_existing_install(db_path: Path) -> None:
+    """Remove a DB install and known Ladybug sidecars before reinstalling."""
+    if db_path.exists():
+        if db_path.is_dir():
+            shutil.rmtree(db_path)
+        else:
+            db_path.unlink()
+    for sidecar in _candidate_sidecar_paths(db_path):
+        if not sidecar.exists():
+            continue
+        if sidecar.is_dir():
+            shutil.rmtree(sidecar)
+        else:
+            sidecar.unlink()
+
+
+def _candidate_sidecar_paths(db_path: Path) -> list[Path]:
+    """Return conservative file names Ladybug/Kuzu may create beside DB files."""
+    names = (
+        f"{db_path.name}.wal",
+        f"{db_path.name}-wal",
+        f"{db_path.name}.tmp",
+        f"{db_path.name}.lock",
+    )
+    return [db_path.with_name(name) for name in names]
 
 
 def _download_manifest_asset(release: dict, *, tmp_dir: Path) -> Path:
