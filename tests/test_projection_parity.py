@@ -99,6 +99,114 @@ def test_projection_parity_reports_missing_legacy_signature(
         compiler_db.close()
 
 
+def test_projection_parity_classifies_variant_id_aliases_as_effectively_covered(
+    repo_tmp_path: Path,
+) -> None:
+    legacy_db = _make_db(repo_tmp_path / "legacy")
+    compiler_db = _make_db(repo_tmp_path / "compiler")
+    try:
+        _populate_api_shape(lb.Connection(legacy_db))
+        _populate_api_shape(
+            lb.Connection(compiler_db),
+            component_id="central:schemas:Pet@abcdef123456",
+        )
+
+        report = compute_projection_parity(
+            lb.Connection(legacy_db),
+            lb.Connection(compiler_db),
+        )
+
+        schema_check = report["checks"]["schema_components"]
+        body_check = report["checks"]["body_references"]
+        property_check = report["checks"]["properties"]
+        assert report["all_legacy_covered"] is False
+        assert report["all_legacy_effectively_covered"] is True
+        assert report["total_legacy_missing"] > 0
+        assert report["total_legacy_effective_missing"] == 0
+        assert schema_check["legacy_missing_count"] == 1
+        assert schema_check["legacy_alias_equivalent_count"] == 1
+        assert schema_check["legacy_effective_missing_count"] == 0
+        assert body_check["legacy_alias_equivalent_count"] == 1
+        assert property_check["legacy_alias_equivalent_count"] == 1
+    finally:
+        legacy_db.close()
+        compiler_db.close()
+
+
+def test_projection_parity_classifies_alternate_reachable_targets(
+    repo_tmp_path: Path,
+) -> None:
+    legacy_db = _make_db(repo_tmp_path / "legacy")
+    compiler_db = _make_db(repo_tmp_path / "compiler")
+    try:
+        _populate_api_shape(lb.Connection(legacy_db))
+        _populate_api_shape(
+            lb.Connection(compiler_db),
+            component_id="central:schemas:SpecificPet",
+        )
+
+        report = compute_projection_parity(
+            lb.Connection(legacy_db),
+            lb.Connection(compiler_db),
+        )
+
+        response_check = report["checks"]["response_references"]
+        body_check = report["checks"]["body_references"]
+        assert response_check["legacy_missing_count"] == 1
+        assert response_check["legacy_alias_equivalent_count"] == 0
+        assert response_check["legacy_alternate_target_count"] == 1
+        assert response_check["legacy_effective_missing_count"] == 0
+        assert body_check["legacy_alternate_target_count"] == 1
+        assert report["checks"]["schema_components"]["legacy_effective_missing_count"] == 1
+        assert report["total_legacy_effective_missing"] > 0
+        assert "effective" in format_projection_parity_report(report)
+    finally:
+        legacy_db.close()
+        compiler_db.close()
+
+
+def test_projection_parity_keeps_missing_multi_target_context_effective(
+    repo_tmp_path: Path,
+) -> None:
+    legacy_db = _make_db(repo_tmp_path / "legacy")
+    compiler_db = _make_db(repo_tmp_path / "compiler")
+    try:
+        legacy_conn = lb.Connection(legacy_db)
+        compiler_conn = lb.Connection(compiler_db)
+        for conn, include_second_branch in (
+            (legacy_conn, True),
+            (compiler_conn, False),
+        ):
+            _seed_component(conn, "central:schemas:Root")
+            _seed_component(conn, "central:schemas:BranchA")
+            _seed_component(conn, "central:schemas:BranchB")
+            conn.execute(
+                """
+                MATCH (root:SchemaComponent {component_id: 'central:schemas:Root'}),
+                      (branch:SchemaComponent {component_id: 'central:schemas:BranchA'})
+                CREATE (root)-[:COMPOSED_OF {kind: 'allOf'}]->(branch)
+                """
+            )
+            if include_second_branch:
+                conn.execute(
+                    """
+                    MATCH (root:SchemaComponent {component_id: 'central:schemas:Root'}),
+                          (branch:SchemaComponent {component_id: 'central:schemas:BranchB'})
+                    CREATE (root)-[:COMPOSED_OF {kind: 'allOf'}]->(branch)
+                    """
+                )
+
+        report = compute_projection_parity(legacy_conn, compiler_conn)
+
+        composition_check = report["checks"]["composition"]
+        assert composition_check["legacy_missing_count"] == 1
+        assert composition_check["legacy_alternate_target_count"] == 0
+        assert composition_check["legacy_effective_missing_count"] == 1
+    finally:
+        legacy_db.close()
+        compiler_db.close()
+
+
 def test_compiler_projection_covers_legacy_structural_schema_identities(
     repo_tmp_path: Path,
 ) -> None:
@@ -240,7 +348,37 @@ def _seed_endpoint(conn, *, method: str, path: str) -> None:
     )
 
 
-def _populate_api_shape(conn, *, include_parameter: bool = True) -> None:
+def _seed_component(conn, component_id: str) -> None:
+    conn.execute(
+        """
+        CREATE (:SchemaComponent {
+          component_id: $component_id,
+          spec_source: 'central',
+          section: 'schemas',
+          name: $name,
+          type: 'object',
+          kind: 'object',
+          bodyShape: 'object',
+          required: [],
+          enumValues: [],
+          supportedDeviceTypes: [],
+          bodyJson: '{"type":"object"}'
+        })
+        """,
+        parameters={
+            "component_id": component_id,
+            "name": component_id.rsplit(":", 1)[-1],
+        },
+    )
+
+
+def _populate_api_shape(
+    conn,
+    *,
+    include_parameter: bool = True,
+    component_id: str = "central:schemas:Pet",
+) -> None:
+    property_id = f"{component_id}#prop:id"
     conn.execute(
         """
         CREATE (:ApiEndpoint {
@@ -262,7 +400,7 @@ def _populate_api_shape(conn, *, include_parameter: bool = True) -> None:
     conn.execute(
         """
         CREATE (:SchemaComponent {
-          component_id: 'central:schemas:Pet',
+          component_id: $component_id,
           spec_source: 'central',
           section: 'schemas',
           name: 'Pet',
@@ -274,13 +412,14 @@ def _populate_api_shape(conn, *, include_parameter: bool = True) -> None:
           supportedDeviceTypes: [],
           bodyJson: '{"type":"object","properties":{"id":{"type":"string"}}}'
         })
-        """
+        """,
+        parameters={"component_id": component_id},
     )
     conn.execute(
         """
         CREATE (:Property {
-          property_id: 'central:schemas:Pet#prop:id',
-          parent_component_id: 'central:schemas:Pet',
+          property_id: $property_id,
+          parent_component_id: $component_id,
           name: 'id',
           type: 'string',
           format: '',
@@ -292,7 +431,8 @@ def _populate_api_shape(conn, *, include_parameter: bool = True) -> None:
           extensionsJson: '{"x-path":"/ac-pet:pets/ac-pet:id"}',
           readOnly: false
         })
-        """
+        """,
+        parameters={"component_id": component_id, "property_id": property_id},
     )
     conn.execute(
         """
@@ -301,9 +441,10 @@ def _populate_api_shape(conn, *, include_parameter: bool = True) -> None:
           endpoint_id: 'GET:/pets',
           content_type: 'application/json',
           required: false,
-          root_component_ref: 'central:schemas:Pet'
+          root_component_ref: $component_id
         })
-        """
+        """,
+        parameters={"component_id": component_id},
     )
     conn.execute(
         """
@@ -312,9 +453,10 @@ def _populate_api_shape(conn, *, include_parameter: bool = True) -> None:
           endpoint_id: 'GET:/pets',
           status: '200',
           content_type: 'application/json',
-          root_component_ref: 'central:schemas:Pet'
+          root_component_ref: $component_id
         })
-        """
+        """,
+        parameters={"component_id": component_id},
     )
     conn.execute(
         """
@@ -367,8 +509,8 @@ def _populate_api_shape(conn, *, include_parameter: bool = True) -> None:
         MATCH (e:ApiEndpoint {endpoint_id: 'GET:/pets'}),
               (body:RequestBody {request_body_id: 'GET:/pets#requestBody:application~1json'}),
               (response:Response {response_id: 'GET:/pets#response:200:application~1json'}),
-              (schema:SchemaComponent {component_id: 'central:schemas:Pet'}),
-              (prop:Property {property_id: 'central:schemas:Pet#prop:id'}),
+              (schema:SchemaComponent {component_id: $component_id}),
+              (prop:Property {property_id: $property_id}),
               (yang:YangPath {yangPath: '/ac-pet:pets/ac-pet:id'}),
               (module:YangModule {module: 'ac-pet'}),
               (command:CliCommand {command_id: 'GET:/pets::show pets'})
@@ -381,5 +523,6 @@ def _populate_api_shape(conn, *, include_parameter: bool = True) -> None:
                (e)-[:CONFIGURES_YANG]->(yang),
                (yang)-[:IN_MODULE]->(module),
                (e)-[:HAS_CLI_COMMAND]->(command)
-        """
+        """,
+        parameters={"component_id": component_id, "property_id": property_id},
     )
