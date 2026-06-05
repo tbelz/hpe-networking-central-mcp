@@ -27,7 +27,7 @@ def test_compiler_tool_settings_default_to_disabled_sidecars(monkeypatch, tmp_pa
     assert settings.compiler_ast_db_path == tmp_path / "knowledge_db_ast"
 
 
-def test_v2_projection_defaults_compiler_db_to_runtime_graph(monkeypatch, tmp_path):
+def test_v2_projection_keeps_compiler_db_as_sidecar_by_default(monkeypatch, tmp_path):
     graph_db_path = tmp_path / "graph_db"
     monkeypatch.setenv("GRAPH_DB_PATH", str(graph_db_path))
     monkeypatch.setenv("MCP_KNOWLEDGE_PROJECTION", "v2")
@@ -36,7 +36,7 @@ def test_v2_projection_defaults_compiler_db_to_runtime_graph(monkeypatch, tmp_pa
     settings = load_settings()
 
     assert settings.knowledge_projection == "v2"
-    assert settings.compiler_db_path == graph_db_path
+    assert settings.compiler_db_path == tmp_path / "knowledge_db_compiler"
 
 
 def test_compiler_tool_settings_accept_explicit_overrides(monkeypatch, tmp_path):

@@ -119,11 +119,18 @@ def test_server_module_imports_offline(monkeypatch, tmp_path):
     # Discovery tools must still be present.
     for must_have in ("query_graph", "write_graph", "list_scripts", "save_script"):
         assert must_have in tool_names, f"{must_have} missing in discovery-only mode"
-    assert "find_api_endpoints" not in tool_names
+    for compiler_only in (
+        "find_api_endpoints",
+        "get_api_endpoint_context",
+        "get_api_schema_context",
+        "get_openapi_source_detail",
+        "get_compiler_graph_health",
+    ):
+        assert compiler_only not in tool_names
 
 
 def test_server_registers_compiler_tools_when_enabled(monkeypatch, tmp_path):
-    """Compiler context tools are opt-in and can register without live creds."""
+    """Compiler provenance/health tools are opt-in and register without creds."""
     for var in (
         "CENTRAL_BASE_URL",
         "CENTRAL_CLIENT_ID",
@@ -152,11 +159,11 @@ def test_server_registers_compiler_tools_when_enabled(monkeypatch, tmp_path):
     tool_mgr = getattr(module.mcp, "_tool_manager", None)
     assert tool_mgr is not None, "FastMCP changed tool-manager attribute name"
     tool_names = {t.name for t in tool_mgr._tools.values()}
-    for compiler_tool in (
+    for compiler_tool in ("get_openapi_source_detail", "get_compiler_graph_health"):
+        assert compiler_tool in tool_names
+    for removed_tool in (
         "find_api_endpoints",
         "get_api_endpoint_context",
         "get_api_schema_context",
-        "get_openapi_source_detail",
-        "get_compiler_graph_health",
     ):
-        assert compiler_tool in tool_names
+        assert removed_tool not in tool_names

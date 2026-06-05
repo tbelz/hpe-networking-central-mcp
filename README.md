@@ -261,8 +261,10 @@ if you prefer environment variables.
 
 Use this profile after a knowledge DB release has been published from
 `main`. It keeps the session discovery-only, loads the compiler/v2 graph
-as the runtime graph, and enables the compiler context tools added for
-ADR-011 validation.
+as the runtime graph, and keeps API discovery on the normal graph query
+tools. `MCP_COMPILER_TOOLS=true` only adds compiler sidecar provenance and
+health diagnostics; it does not replace `query_api_schema`, `query_fts`,
+or `query_yang`.
 
 ```json
 {

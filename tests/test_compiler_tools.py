@@ -160,91 +160,11 @@ def _make_tools(compiler_db_path: Path, ast_db_path: Path) -> dict[str, Any]:
     return {tool.name: tool.fn for tool in mcp._tool_manager._tools.values()}
 
 
-def _assert_no_raw_payloads(value: Any) -> None:
-    if isinstance(value, list):
-        for item in value:
-            _assert_no_raw_payloads(item)
-    elif isinstance(value, dict):
-        assert "raw_openapi" not in value
-        assert "rawJson" not in value
-        assert "scalarJson" not in value
-        for item in value.values():
-            _assert_no_raw_payloads(item)
-
-
-def test_find_api_endpoints_filters_and_limits(repo_tmp_path: Path) -> None:
+def test_compiler_tool_surface_is_provenance_and_health_only(repo_tmp_path: Path) -> None:
     compiler_db_path, ast_db_path = _build_tool_artifacts(repo_tmp_path)
     tools = _make_tools(compiler_db_path, ast_db_path)
 
-    parsed = json.loads(
-        tools["find_api_endpoints"](
-            query="Create",
-            method="post",
-            path_contains="/devices",
-            limit=1,
-        )
-    )
-
-    assert parsed["total"] == 1
-    assert parsed["endpoints"][0]["method"] == "POST"
-    assert parsed["endpoints"][0]["path"] == "/devices/{serial}"
-    assert parsed["endpoints"][0]["operationId"] == "createDevice"
-
-
-def test_endpoint_context_excludes_raw_by_default(repo_tmp_path: Path) -> None:
-    compiler_db_path, ast_db_path = _build_tool_artifacts(repo_tmp_path)
-    tools = _make_tools(compiler_db_path, ast_db_path)
-
-    parsed = json.loads(
-        tools["get_api_endpoint_context"](
-            method="POST",
-            path="/devices/{serial}",
-        )
-    )
-
-    assert parsed["endpoint"]["projection_row"]["operationId"] == "createDevice"
-    assert parsed["parameters"][0]["schema"]["projection_row"]["type"] == "string"
-    assert parsed["request_bodies"][0]["schema"]["projection_row"]["component_id"] == (
-        "central:schemas:DeviceCreate"
-    )
-    assert parsed["responses"][0]["schema"]["projection_row"]["component_id"] == (
-        "central:schemas:Device"
-    )
-    _assert_no_raw_payloads(parsed)
-
-
-def test_schema_context_includes_item_composition_value_and_reference_edges(
-    repo_tmp_path: Path,
-) -> None:
-    compiler_db_path, ast_db_path = _build_tool_artifacts(repo_tmp_path)
-    tools = _make_tools(compiler_db_path, ast_db_path)
-
-    create = json.loads(
-        tools["get_api_schema_context"](component_id="central:schemas:DeviceCreate")
-    )
-    props = {prop["projection_row"]["name"]: prop for prop in create["properties"]}
-    assert props["tags"]["item_schema"]["projection_row"]["component_id"] == (
-        "central:schemas:Tag"
-    )
-
-    envelope = json.loads(
-        tools["get_api_schema_context"](component_id="central:schemas:DeviceEnvelope")
-    )
-    assert [entry["kind"] for entry in envelope["composition"]] == ["allOf", "allOf"]
-
-    tag_map = json.loads(
-        tools["get_api_schema_context"](component_id="central:schemas:TagMap")
-    )
-    assert tag_map["value_schemas"][0]["projection_row"]["component_id"] == (
-        "central:schemas:Tag"
-    )
-
-    tag_alias = json.loads(
-        tools["get_api_schema_context"](component_id="central:schemas:TagAlias")
-    )
-    assert tag_alias["references"][0]["schema"]["projection_row"]["component_id"] == (
-        "central:schemas:Tag"
-    )
+    assert set(tools) == {"get_openapi_source_detail", "get_compiler_graph_health"}
 
 
 def test_source_detail_recovers_unprojected_vendor_extension(
@@ -285,7 +205,7 @@ def test_missing_compiler_artifacts_raise_clear_tool_error(tmp_path: Path) -> No
     tools = _make_tools(tmp_path / "missing_compiler", tmp_path / "missing_ast")
 
     with pytest.raises(ToolError, match="Compiler artifacts are unavailable"):
-        tools["find_api_endpoints"]()
+        tools["get_compiler_graph_health"]()
 
 
 def test_response_cap_redacts_raw_payloads(repo_tmp_path: Path, monkeypatch) -> None:
