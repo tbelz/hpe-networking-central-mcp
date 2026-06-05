@@ -199,6 +199,8 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         enumValues           STRING[],
         supportedDeviceTypes STRING[],
         bodyJson             STRING,
+        arrayKey             STRING[],
+        constraintsJson      STRING,
         PRIMARY KEY (component_id)
     )
     """,
@@ -221,6 +223,14 @@ KNOWLEDGE_NODE_TABLES: list[str] = [
         yangPath             STRING,
         extensionsJson       STRING,
         readOnly             BOOLEAN,
+        pattern              STRING,
+        defaultValue         STRING,
+        minimum              DOUBLE,
+        maximum              DOUBLE,
+        minLength            INT64,
+        maxLength            INT64,
+        enumDescriptionsJson STRING,
+        constraintsJson      STRING,
         PRIMARY KEY (property_id)
     )
     """,
@@ -269,10 +279,12 @@ KNOWLEDGE_REL_TABLES: list[str] = [
     "CREATE REL TABLE IF NOT EXISTS HAS_RESPONSE (FROM ApiEndpoint TO Response)",
     "CREATE REL TABLE IF NOT EXISTS BODY_REFERENCES (FROM RequestBody TO SchemaComponent)",
     "CREATE REL TABLE IF NOT EXISTS RESPONSE_REFERENCES (FROM Response TO SchemaComponent)",
+    "CREATE REL TABLE IF NOT EXISTS PARAMETER_REFERENCES (FROM Parameter TO SchemaComponent)",
     "CREATE REL TABLE IF NOT EXISTS REFERENCES (FROM SchemaComponent TO SchemaComponent, via STRING)",
     # ── Property-level edges (ADR 009 Phase 2C) ──────────────────────
     "CREATE REL TABLE IF NOT EXISTS HAS_PROPERTY (FROM SchemaComponent TO Property)",
     "CREATE REL TABLE IF NOT EXISTS PROPERTY_OF_TYPE (FROM Property TO SchemaComponent)",
+    "CREATE REL TABLE IF NOT EXISTS HAS_ITEM_SCHEMA (FROM Property TO SchemaComponent)",
     "CREATE REL TABLE IF NOT EXISTS COMPOSED_OF (FROM SchemaComponent TO SchemaComponent, kind STRING)",
     "CREATE REL TABLE IF NOT EXISTS HAS_VALUE_SCHEMA (FROM SchemaComponent TO SchemaComponent)",
     # ── YANG reverse-index edges (Phase 3) ───────────────────────────
@@ -393,6 +405,23 @@ ALTER_ADD_LAST_SYNCED_AT: list[str] = [
     "ALTER TABLE SiteCollection ADD lastSyncedAt TIMESTAMP",
     "ALTER TABLE DeviceGroup ADD lastSyncedAt TIMESTAMP",
     "ALTER TABLE Device ADD lastSyncedAt TIMESTAMP",
+]
+
+# Compatibility ALTERs for databases built before the ADR-011 compiler
+# projection columns were promoted into the bootstrap DDL. Build outputs after
+# this change create the columns directly; startup applies these idempotently
+# for older local/downloaded graphs.
+ALTER_ADD_COMPILER_PROJECTION_COLUMNS: list[str] = [
+    "ALTER TABLE SchemaComponent ADD arrayKey STRING[]",
+    "ALTER TABLE SchemaComponent ADD constraintsJson STRING",
+    "ALTER TABLE Property ADD pattern STRING",
+    "ALTER TABLE Property ADD defaultValue STRING",
+    "ALTER TABLE Property ADD minimum DOUBLE",
+    "ALTER TABLE Property ADD maximum DOUBLE",
+    "ALTER TABLE Property ADD minLength INT64",
+    "ALTER TABLE Property ADD maxLength INT64",
+    "ALTER TABLE Property ADD enumDescriptionsJson STRING",
+    "ALTER TABLE Property ADD constraintsJson STRING",
 ]
 
 

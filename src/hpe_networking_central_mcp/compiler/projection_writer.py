@@ -840,7 +840,13 @@ def _apply_projection_schema(conn) -> None:
     conn.execute(_PARAMETER_REFERENCES_DDL.strip())
     conn.execute(_PROJECTION_MAP_DDL.strip())
     for ddl in _COMPILER_PROJECTION_DDL:
-        conn.execute(ddl)
+        try:
+            conn.execute(ddl)
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "already exists" in msg or "already has" in msg or "duplicate" in msg:
+                continue
+            raise
 
 
 def _add_projection_provenance(

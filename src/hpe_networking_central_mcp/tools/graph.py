@@ -585,28 +585,16 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
     def query_api_schema(cypher: str = "", parameters: str = "{}", queries: list[dict] | None = None) -> str:
         """Cypher over the OpenAPI subgraph: endpoints, schemas, properties, YANG.
 
-        Nodes: ``ApiEndpoint(method, path, summary, operationId, category)``,
-        ``Parameter(name, location, required, type)``,
-        ``RequestBody``, ``Response(status)``,
-        ``SchemaComponent(component_id PK, name, section, kind, bodyShape,
-        supportedDeviceTypes, bodyJson)``,
-        ``Property(property_id PK, parent_component_id, name, type,
-        required, enumValues, supportedDeviceTypes, yangPath, readOnly)``,
-        ``YangPath(yangPath PK, module)``.
+        Main nodes: ``ApiEndpoint``, ``Parameter``, ``RequestBody``,
+        ``Response``, ``SchemaComponent``, ``Property``, ``YangPath``.
+        Main edges: ``HAS_*``, ``BODY_REFERENCES``,
+        ``RESPONSE_REFERENCES``, ``PARAMETER_REFERENCES``,
+        ``COMPOSED_OF``, ``PROPERTY_OF_TYPE``, ``HAS_ITEM_SCHEMA``,
+        ``HAS_VALUE_SCHEMA``, ``PROPERTY_AT_YANG``, ``CONFIGURES_YANG``.
+        Full schema and more examples: ``graph://schema``.
 
-        ``bodyShape`` ∈ {object, union-oneOf, union-anyOf, allOf-composite,
-        map, array, primitive, unresolved}.
-
-        Edges: ``HAS_PARAMETER``, ``HAS_REQUEST_BODY``, ``HAS_RESPONSE``,
-        ``BODY_REFERENCES``, ``RESPONSE_REFERENCES``,
-        ``COMPOSED_OF {kind}``, ``HAS_PROPERTY``, ``HAS_VALUE_SCHEMA``,
-        ``PROPERTY_OF_TYPE``, ``PROPERTY_AT_YANG``, ``CONFIGURES_YANG``.
-
-        ## CANONICAL — walk all fields of a request body
-
-        Properties live ONLY on the declaring component. Use
-        ``COMPOSED_OF*0..5`` (picks up allOf parents and promoted inline
-        branches), ``DISTINCT``, and the device-type filter:
+        Canonical request-body walk. Properties live only on the declaring
+        component; use ``COMPOSED_OF*0..5`` for allOf/promoted inline fields:
 
         ```cypher
         MATCH (e:ApiEndpoint {method: $m, path: $p})
@@ -617,23 +605,27 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         WHERE $deviceType IS NULL
            OR size(coalesce(p.supportedDeviceTypes, [])) = 0
            OR $deviceType IN p.supportedDeviceTypes
+        OPTIONAL MATCH (p)-[:PROPERTY_OF_TYPE]->(child:SchemaComponent)
+        OPTIONAL MATCH (p)-[:HAS_ITEM_SCHEMA]->(item:SchemaComponent)
         RETURN DISTINCT c.name AS declaredOn, p.name, p.type, p.required,
-               p.enumValues, p.yangPath
+               p.enumValues, p.yangPath, p.constraintsJson,
+               child.component_id AS childSchema,
+               item.component_id AS itemSchema
         ORDER BY declaredOn, p.required DESC, p.name
         ```
 
-        Nested object (``type=''``): follow ``PROPERTY_OF_TYPE`` to the
-        child SchemaComponent and recurse.
+        Nested object: follow ``PROPERTY_OF_TYPE``. Array item shape:
+        follow ``HAS_ITEM_SCHEMA``. Then recurse into the child component's
+        ``COMPOSED_OF*0..5`` / ``HAS_PROPERTY`` tree.
 
         Required parameters:
 
         ```cypher
         MATCH (e:ApiEndpoint {method: $m, path: $p})
               -[:HAS_PARAMETER]->(p:Parameter {required: true})
-        RETURN p.name, p.location, p.type
+        OPTIONAL MATCH (p)-[:PARAMETER_REFERENCES]->(schema:SchemaComponent)
+        RETURN p.name, p.location, p.type, schema.component_id AS schema
         ```
-
-        Caps and ``get_raw_schema`` escape hatch as in ``query_graph``.
 
         Args:
             cypher: Read-only Cypher.
