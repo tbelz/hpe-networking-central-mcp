@@ -8,6 +8,7 @@ import shutil
 import tempfile
 
 import pytest
+import pyarrow as pa
 import real_ladybug as lb
 
 from hpe_networking_central_mcp.compiler.ast_builder import build_ast_graph
@@ -15,6 +16,7 @@ from hpe_networking_central_mcp.compiler.projection_writer import (
     build_compiler_projection_database,
 )
 from hpe_networking_central_mcp.compiler.projection_parity import (
+    _structural_equivalent_missing_keys,
     compute_projection_parity,
     format_projection_parity_report,
 )
@@ -207,6 +209,91 @@ def test_projection_parity_keeps_missing_multi_target_context_effective(
         compiler_db.close()
 
 
+def test_projection_parity_classifies_structural_inline_schema_equivalence(
+    repo_tmp_path: Path,
+) -> None:
+    legacy_db = _make_db(repo_tmp_path / "legacy_shape")
+    compiler_db = _make_db(repo_tmp_path / "compiler_shape")
+    try:
+        legacy_conn = lb.Connection(legacy_db)
+        compiler_conn = lb.Connection(compiler_db)
+        legacy_body = (
+            '{"type":"object","properties":'
+            '{"id":{"type":"string"},"state":{"enum":["ok"],"type":"string"}}}'
+        )
+        compiler_body = (
+            '{"description":"inline array item","type":"object","properties":'
+            '{"id":{"description":"identifier","type":"string"},'
+            '"state":{"description":"state","enum":["ok"],"type":"string"}}}'
+        )
+        for conn, component_id, body in (
+            (legacy_conn, "central:schemas:Shape_abc123", legacy_body),
+            (compiler_conn, "central:inline:root#prop:items#items", compiler_body),
+        ):
+            _seed_component_with_body(conn, component_id, body)
+            for prop in ("id", "state"):
+                conn.execute(
+                    """
+                    MATCH (component:SchemaComponent {component_id: $component_id})
+                    CREATE (component)-[:HAS_PROPERTY]->(:Property {
+                      property_id: $component_id + '#prop:' + $prop,
+                      parent_component_id: $component_id,
+                      name: $prop,
+                      type: 'string',
+                      format: '',
+                      required: false,
+                      enumValues: [],
+                      description: '',
+                      supportedDeviceTypes: [],
+                      yangPath: '',
+                      extensionsJson: '{}',
+                      readOnly: false
+                    })
+                    """,
+                    parameters={"component_id": component_id, "prop": prop},
+                )
+
+        report = compute_projection_parity(legacy_conn, compiler_conn)
+
+        schema_check = report["checks"]["schema_components"]
+        property_check = report["checks"]["properties"]
+        assert schema_check["legacy_missing_count"] == 1
+        assert schema_check["legacy_structural_equivalent_count"] == 1
+        assert schema_check["legacy_effective_missing_count"] == 0
+        assert property_check["legacy_missing_count"] == 2
+        assert property_check["legacy_structural_equivalent_count"] == 2
+        assert property_check["legacy_effective_missing_count"] == 0
+        assert report["all_legacy_effectively_covered"] is True
+    finally:
+        legacy_db.close()
+        compiler_db.close()
+
+
+def test_projection_parity_does_not_classify_empty_property_shapes() -> None:
+    structural_keys = _structural_equivalent_missing_keys(
+        "properties",
+        legacy={
+            "legacy": {
+                "component_id": "central:schemas:Shape_abc123",
+                "property": "id",
+                "__component_body_json": "",
+            }
+        },
+        compiler={
+            "compiler": {
+                "component_id": "central:inline:root#prop:items",
+                "property": "id",
+                "__component_body_json": "",
+            }
+        },
+        missing_keys=["legacy"],
+        alias_equivalent_keys=[],
+        alternate_target_keys=[],
+    )
+
+    assert structural_keys == []
+
+
 def test_compiler_projection_covers_legacy_structural_schema_identities(
     repo_tmp_path: Path,
 ) -> None:
@@ -349,25 +436,26 @@ def _seed_endpoint(conn, *, method: str, path: str) -> None:
 
 
 def _seed_component(conn, component_id: str) -> None:
+    _seed_component_with_body(conn, component_id, '{"type":"object"}')
+
+
+def _seed_component_with_body(conn, component_id: str, body_json: str) -> None:
     conn.execute(
-        """
-        CREATE (:SchemaComponent {
-          component_id: $component_id,
-          spec_source: 'central',
-          section: 'schemas',
-          name: $name,
-          type: 'object',
-          kind: 'object',
-          bodyShape: 'object',
-          required: [],
-          enumValues: [],
-          supportedDeviceTypes: [],
-          bodyJson: '{"type":"object"}'
-        })
-        """,
+        "COPY SchemaComponent FROM $df",
         parameters={
-            "component_id": component_id,
-            "name": component_id.rsplit(":", 1)[-1],
+            "df": pa.table({
+                "component_id": [component_id],
+                "spec_source": ["central"],
+                "section": ["schemas"],
+                "name": [component_id.rsplit(":", 1)[-1]],
+                "type": ["object"],
+                "kind": ["object"],
+                "bodyShape": ["object"],
+                "required": [[]],
+                "enumValues": [[]],
+                "supportedDeviceTypes": [[]],
+                "bodyJson": [body_json],
+            })
         },
     )
 
