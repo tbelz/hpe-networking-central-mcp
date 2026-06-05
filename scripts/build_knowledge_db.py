@@ -57,6 +57,9 @@ from hpe_networking_central_mcp.compiler.projection_parity import (  # noqa: E40
     compute_projection_parity,
     format_projection_parity_report,
 )
+from hpe_networking_central_mcp.compiler.traversal_report import (  # noqa: E402
+    load_compiler_traversal_report,
+)
 from hpe_networking_central_mcp.compiler.semantic_builder import (  # noqa: E402
     build_semantic_overlay,
 )
@@ -89,6 +92,7 @@ from hpe_networking_central_mcp.oas_schema_graph import (  # noqa: E402
     query_existing_eids,
 )
 from hpe_networking_central_mcp.graph.invariants import (  # noqa: E402
+    InvariantViolation,
     assert_graph_invariants,
     format_report,
 )
@@ -107,6 +111,51 @@ except ImportError:
 _DB_BUFFER_POOL_SIZE = 2 * 1024 * 1024 * 1024
 _COMPILER_GRAPH_BATCH_SIZE = 256
 _RELEASE_GZIP_COMPRESSLEVEL = 1
+
+
+def _serialize_invariant_violations(
+    violations: list[InvariantViolation],
+) -> list[dict]:
+    """Return JSON-safe invariant violation payloads for build manifests."""
+    return [
+        {
+            "invariant": violation.invariant,
+            "detail": violation.detail,
+            "sample": violation.sample,
+        }
+        for violation in violations
+    ]
+
+
+def _compiler_cutover_gates(
+    *,
+    projection_parity: dict,
+    compiler_invariant_violations: list[InvariantViolation],
+    compiler_traversal: dict,
+) -> dict:
+    """Summarize whether compiler artifacts satisfy ADR-011 cutover gates."""
+    parity_passed = bool(projection_parity.get("all_legacy_effectively_covered"))
+    invariants_passed = not compiler_invariant_violations
+    traversal_passed = int(compiler_traversal.get("failure_count", 0) or 0) == 0
+    return {
+        "passed": parity_passed and invariants_passed and traversal_passed,
+        "parity_passed": parity_passed,
+        "invariants_passed": invariants_passed,
+        "traversal_passed": traversal_passed,
+    }
+
+
+def _format_compiler_gate_failure(gates: dict) -> str:
+    failed = [
+        name
+        for name, passed in (
+            ("parity", gates.get("parity_passed")),
+            ("invariants", gates.get("invariants_passed")),
+            ("traversal", gates.get("traversal_passed")),
+        )
+        if not passed
+    ]
+    return ", ".join(failed) if failed else "unknown"
 
 
 def _remove_build_path(path: Path) -> None:
@@ -1193,6 +1242,10 @@ def main() -> None:
                              "still exit 0. Intended for local debugging only.")
     parser.add_argument("--no-invariants", action="store_true",
                         help="Skip the post-flush invariant audit entirely.")
+    parser.add_argument("--strict-compiler", action="store_true",
+                        help="Fail the build if compiler projection parity, "
+                             "compiler graph invariants, or compiler traversal "
+                             "health fail. Intended for release cutover gates.")
     parser.add_argument("--sample", type=int, default=0, metavar="N",
                         help="Dev/CI shortcut: skip spec sync, load cached specs from "
                              "<output-dir>/spec_cache (falling back to ./build/spec_cache "
@@ -1357,6 +1410,59 @@ def main() -> None:
         del legacy_conn
     print("  " + format_projection_parity_report(projection_parity).replace("\n", "\n  "))
 
+    print("\n[3g/6] Auditing compiler projection cutover gates...")
+    if not args.no_invariants:
+        compiler_db = lb.Database(
+            str(compiler_projection_db_path),
+            buffer_pool_size=_DB_BUFFER_POOL_SIZE,
+        )
+        compiler_invariant_conn = lb.Connection(compiler_db)
+        try:
+            compiler_invariant_violations = assert_graph_invariants(
+                compiler_invariant_conn,
+                strict=False,
+            )
+        finally:
+            compiler_db.close()
+            del compiler_invariant_conn
+    else:
+        compiler_invariant_violations = []
+    compiler_invariants = {
+        "enabled": not args.no_invariants,
+        "violation_count": len(compiler_invariant_violations),
+        "violations": _serialize_invariant_violations(compiler_invariant_violations),
+    }
+    print("  Compiler invariants: " + format_report(compiler_invariant_violations))
+
+    compiler_traversal = load_compiler_traversal_report(
+        compiler_db_path=compiler_projection_db_path,
+        ast_db_path=ast_db_path,
+        endpoint_limit=500,
+        schema_limit=500,
+        buffer_pool_size=_DB_BUFFER_POOL_SIZE,
+    )
+    print(
+        "  Compiler traversal: "
+        f"{compiler_traversal['status']} "
+        f"({compiler_traversal['failure_count']} failures; "
+        f"{compiler_traversal['sample']['endpoint_count']} endpoints, "
+        f"{compiler_traversal['sample']['schema_count']} schemas sampled)"
+    )
+    compiler_cutover_gates = _compiler_cutover_gates(
+        projection_parity=projection_parity,
+        compiler_invariant_violations=compiler_invariant_violations,
+        compiler_traversal=compiler_traversal,
+    )
+    print(f"  Compiler cutover gates: {compiler_cutover_gates}")
+    if args.strict_compiler and not compiler_cutover_gates["passed"]:
+        print(
+            "\n✗ --strict-compiler: refusing to ship compiler artifacts; "
+            f"failed gates: {_format_compiler_gate_failure(compiler_cutover_gates)}.",
+            file=sys.stderr,
+        )
+        db.close()
+        sys.exit(3)
+
     # 4. Sync and populate VSG documentation
     print("\n[4/6] Refreshing and populating VSG documentation...")
     doc_entries, vsg_health = _sync_docs(cache_dir)
@@ -1392,6 +1498,9 @@ def main() -> None:
         "ast": ast_stats,
         "compiler_projection": compiler_projection_stats,
         "projection_parity": projection_parity,
+        "compiler_invariants": compiler_invariants,
+        "compiler_traversal": compiler_traversal,
+        "compiler_cutover_gates": compiler_cutover_gates,
     }
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

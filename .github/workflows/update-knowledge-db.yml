@@ -97,6 +97,8 @@ jobs:
           uv run --no-sync python scripts/build_knowledge_db.py
           --output-dir build
           --compiler-reuse-manifest build/compiler_reuse/manifest.json
+          --strict
+          --strict-compiler
           --tar
 
       - name: Re-tar VSG cache for next run

@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+import subprocess
+import sys
 import tarfile
 import tempfile
 from collections.abc import Iterator
@@ -773,12 +775,144 @@ def test_release_workflow_restores_and_uses_compiler_artifacts() -> None:
 
     build = by_name["Build knowledge database"]["run"]
     assert "--compiler-reuse-manifest build/compiler_reuse/manifest.json" in build
+    assert "--strict" in build
+    assert "--strict-compiler" in build
 
     diff = by_name["Check for changes against latest release"]["run"]
     assert ".ast.artifact_cache.identity" in diff
     assert ".ast.artifact_cache.external_ref_count" in diff
     assert '[ "$NEW_EXTERNAL_REFS" = "0" ]' in diff
     assert ".ast // null" not in diff
+
+
+def test_compiler_cutover_gates_pass_when_all_inputs_are_clean() -> None:
+    mod = _load_build_module()
+
+    gates = mod._compiler_cutover_gates(
+        projection_parity={"all_legacy_effectively_covered": True},
+        compiler_invariant_violations=[],
+        compiler_traversal={"failure_count": 0},
+    )
+
+    assert gates == {
+        "passed": True,
+        "parity_passed": True,
+        "invariants_passed": True,
+        "traversal_passed": True,
+    }
+
+
+def test_compiler_cutover_gates_fail_for_effective_parity_gap() -> None:
+    mod = _load_build_module()
+
+    gates = mod._compiler_cutover_gates(
+        projection_parity={"all_legacy_effectively_covered": False},
+        compiler_invariant_violations=[],
+        compiler_traversal={"failure_count": 0},
+    )
+
+    assert gates["passed"] is False
+    assert gates["parity_passed"] is False
+    assert mod._format_compiler_gate_failure(gates) == "parity"
+
+
+def test_compiler_cutover_gates_fail_for_invariant_violation() -> None:
+    mod = _load_build_module()
+    violation = mod.InvariantViolation(
+        invariant="INV-X",
+        detail="broken shape",
+        sample=[{"component_id": "central:schemas:Broken"}],
+    )
+
+    gates = mod._compiler_cutover_gates(
+        projection_parity={"all_legacy_effectively_covered": True},
+        compiler_invariant_violations=[violation],
+        compiler_traversal={"failure_count": 0},
+    )
+
+    assert gates["passed"] is False
+    assert gates["invariants_passed"] is False
+    assert mod._serialize_invariant_violations([violation]) == [
+        {
+            "invariant": "INV-X",
+            "detail": "broken shape",
+            "sample": [{"component_id": "central:schemas:Broken"}],
+        }
+    ]
+
+
+def test_compiler_cutover_gates_fail_for_traversal_failure() -> None:
+    mod = _load_build_module()
+
+    gates = mod._compiler_cutover_gates(
+        projection_parity={"all_legacy_effectively_covered": True},
+        compiler_invariant_violations=[],
+        compiler_traversal={"failure_count": 2},
+    )
+
+    assert gates["passed"] is False
+    assert gates["traversal_passed"] is False
+    assert mod._format_compiler_gate_failure(gates) == "traversal"
+
+
+def test_sample_build_strict_compiler_writes_cutover_manifest(
+    repo_tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    central_dir = repo_tmp_path / "spec_cache" / "central"
+    glp_dir = repo_tmp_path / "spec_cache" / "glp"
+    central_dir.mkdir(parents=True)
+    glp_dir.mkdir(parents=True)
+    shutil.copy2(
+        repo_root
+        / "tests"
+        / "fixtures"
+        / "oas"
+        / "real_excerpts"
+        / "central_config_createairgroupservicedefinitionsservicebyid.json",
+        central_dir / "central.json",
+    )
+    shutil.copy2(
+        repo_root
+        / "tests"
+        / "fixtures"
+        / "oas"
+        / "real_excerpts"
+        / "glp_audit_logs.json",
+        glp_dir / "glp.json",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/build_knowledge_db.py",
+            "--output-dir",
+            str(repo_tmp_path),
+            "--sample",
+            "1",
+            "--strict",
+            "--strict-compiler",
+            "--tar",
+        ],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr + "\n" + result.stdout
+    manifest = json.loads((repo_tmp_path / "manifest.json").read_text())
+    assert manifest["compiler_invariants"]["violation_count"] == 0
+    assert manifest["compiler_traversal"]["failure_count"] == 0
+    assert manifest["compiler_cutover_gates"] == {
+        "passed": True,
+        "parity_passed": True,
+        "invariants_passed": True,
+        "traversal_passed": True,
+    }
+    assert (repo_tmp_path / "knowledge_db_compiler.tar.gz").exists()
+    assert (repo_tmp_path / "knowledge_db_ast.tar.gz").exists()
 
 
 @pytest.mark.real_spec

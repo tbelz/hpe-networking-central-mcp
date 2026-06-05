@@ -257,6 +257,44 @@ not need, omit the `--glp-*` flags if you're only using Central APIs,
 or fall back to the equivalent `-e CENTRAL_BASE_URL=...` Docker flags
 if you prefer environment variables.
 
+### Compiler v2 smoke-test profile
+
+Use this profile after a knowledge DB release has been published from
+`main`. It keeps the session discovery-only, loads the compiler/v2 graph
+as the runtime graph, and enables the compiler context tools added for
+ADR-011 validation.
+
+```json
+{
+  "mcpServers": {
+    "hpe-networking-central-mcp-v2-smoke": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm", "--pull", "always",
+        "-v", "central-mcp-v2-data:/data",
+        "-v", "central-scripts:/scripts/library",
+        "-e", "KNOWLEDGE_RELEASE_REPO=tbelz/hpe-networking-central-mcp",
+        "-e", "MCP_KNOWLEDGE_PROJECTION=v2",
+        "-e", "MCP_COMPILER_TOOLS=true",
+        "ghcr.io/tbelz/hpe-networking-central-mcp:main"
+      ]
+    }
+  }
+}
+```
+
+For live read-only API testing, add the Central/GreenLake credentials and
+`--read-only` after the image name:
+
+```json
+"--central-url", "https://apigw-YOUR_CLUSTER.central.arubanetworks.com",
+"--client-id", "REPLACE_WITH_YOUR_CENTRAL_CLIENT_ID",
+"--client-secret", "REPLACE_WITH_YOUR_CENTRAL_CLIENT_SECRET",
+"--glp-client-id", "REPLACE_WITH_YOUR_GLP_CLIENT_ID",
+"--glp-client-secret", "REPLACE_WITH_YOUR_GLP_CLIENT_SECRET",
+"--read-only"
+```
+
 ## Tools
 
 | Tool | Description |
