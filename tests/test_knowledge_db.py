@@ -336,6 +336,71 @@ def test_skips_download_when_local_tag_matches_release(tmp_path, monkeypatch):
     assert (db_path / "db.lbd").read_bytes() == b"existing"
 
 
+def test_force_refresh_reinstalls_when_local_tag_matches_release(tmp_path, monkeypatch):
+    """Startup recovery can replace a tagged but corrupt persisted DB."""
+    db_path = tmp_path / "kdb"
+    db_path.mkdir()
+    (db_path / "db.lbd").write_bytes(b"corrupt")
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "release_tag": "knowledge-db-test",
+                "schema_version": 10,
+                "knowledge_asset": "knowledge_db_compiler.tar.gz",
+                "knowledge_archive_member": "knowledge_db_compiler",
+                "knowledge_projection": "v2",
+            }
+        )
+    )
+
+    asset_url = "https://example.invalid/knowledge_db_compiler.tar.gz"
+    manifest_url = "https://example.invalid/manifest.json"
+    download_calls: list[str] = []
+
+    def handler(request):
+        url = str(request.url)
+        if "api.github.com" in url:
+            return httpx.Response(
+                200,
+                json=_release_payload(
+                    asset_url,
+                    tag="knowledge-db-test",
+                    assets=[
+                        {
+                            "name": "knowledge_db_compiler.tar.gz",
+                            "browser_download_url": asset_url,
+                        },
+                        {
+                            "name": "manifest.json",
+                            "browser_download_url": manifest_url,
+                        },
+                    ],
+                ),
+            )
+        download_calls.append(url)
+        if url == asset_url:
+            return httpx.Response(
+                200,
+                content=_make_tarball({"knowledge_db_compiler/db.lbd": b"fresh"}),
+            )
+        if url == manifest_url:
+            return httpx.Response(200, content=json.dumps({"schema_version": 10}).encode())
+        return httpx.Response(404)
+
+    _install_transport(monkeypatch, handler)
+
+    assert download_knowledge_db(
+        "owner/repo",
+        db_path,
+        asset_name="knowledge_db_compiler.tar.gz",
+        archive_member="knowledge_db_compiler",
+        projection="v2",
+        force=True,
+    ) is True
+    assert download_calls == [asset_url, manifest_url]
+    assert (db_path / "db.lbd").read_bytes() == b"fresh"
+
+
 def test_v2_request_does_not_reuse_same_release_legacy_install(tmp_path, monkeypatch):
     db_path = tmp_path / "kdb"
     db_path.mkdir()
