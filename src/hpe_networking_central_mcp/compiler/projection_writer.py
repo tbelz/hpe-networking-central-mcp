@@ -17,6 +17,11 @@ from hpe_networking_central_mcp.graph.schema import (
 )
 
 from .ast_builder import AstGraph
+from .catalog_identity import (
+    CatalogIdentityRegistry,
+    build_catalog_identity_registry,
+    provider_from_source,
+)
 from .constraints import collect_constraints
 from .semantic_builder import SemanticEdge, SemanticGraph, SemanticNode
 
@@ -193,6 +198,7 @@ _COMPILER_PROJECTION_DDL = [
 class CompilerProjectionData:
     """Compact cross-spec rows retained while L1/L2 graphs stream to disk."""
 
+    catalog_identities: CatalogIdentityRegistry = field(default_factory=CatalogIdentityRegistry)
     rows: dict[str, dict[str, dict[str, Any]]] = field(default_factory=lambda: {
         "ApiEndpoint": {},
         "Parameter": {},
@@ -278,7 +284,9 @@ def write_compiler_projection(
     semantic_graphs: list[SemanticGraph],
 ) -> dict[str, Any]:
     """Write compiler-produced L3 rows into an open LadybugDB connection."""
-    data = CompilerProjectionData()
+    data = CompilerProjectionData(
+        catalog_identities=build_catalog_identity_registry(ast_graphs),
+    )
     ast_by_spec = {graph.spec_id: graph for graph in ast_graphs}
     for semantic in semantic_graphs:
         ast = ast_by_spec.get(semantic.spec_id)
@@ -294,9 +302,15 @@ def collect_compiler_projection_graph(
     semantic: SemanticGraph,
 ) -> None:
     """Merge one compiler graph pair into compact cross-spec projection rows."""
+    if not data.catalog_identities.is_finalized:
+        raise RuntimeError(
+            "CompilerProjectionData.catalog_identities must be finalized "
+            "before collecting compiler projection rows"
+        )
     _collect_graph_rows(
         ast,
         semantic,
+        data.catalog_identities,
         data.rows,
         data.rels,
         data.provenance_rows,
@@ -305,6 +319,7 @@ def collect_compiler_projection_graph(
 
 def write_compiler_projection_data(conn, data: CompilerProjectionData) -> dict[str, Any]:
     """Persist already-collected compiler projection rows."""
+    data.catalog_identities.finalize()
     rows = data.rows
     rels = data.rels
     provenance_rows = data.provenance_rows
@@ -356,12 +371,14 @@ def write_compiler_projection_data(conn, data: CompilerProjectionData) -> dict[s
             for table, table_rows in sorted(rels.items())
             if table_rows
         },
+        "catalog_identity": data.catalog_identities.stats(),
     }
 
 
 def _collect_graph_rows(
     ast: AstGraph,
     semantic: SemanticGraph,
+    catalog_identities: CatalogIdentityRegistry,
     rows: dict[str, dict[str, dict[str, Any]]],
     rels: dict[str, dict[tuple[Any, ...], dict[str, Any]]],
     provenance_rows: dict[str, dict[str, Any]],
@@ -375,7 +392,13 @@ def _collect_graph_rows(
     schema_parent: dict[str, str] = {}
     schema_refs: dict[str, str] = {}
 
-    _collect_reusable_component_rows(ast, rows, provenance_rows, ast_by_pointer)
+    _collect_reusable_component_rows(
+        ast,
+        catalog_identities,
+        rows,
+        provenance_rows,
+        ast_by_pointer,
+    )
 
     for edge in semantic.edges:
         if edge.kind in {"HAS_PARAMETER", "HAS_REQUEST_BODY", "HAS_RESPONSE", "HAS_CLI_COMMAND"}:
@@ -386,7 +409,17 @@ def _collect_graph_rows(
             schema_refs[edge.source_id] = edge.target_id
 
     for node in semantic.nodes:
-        typed_id = _typed_node_id(ast, node, summaries[node.semantic_id], endpoint_parent, schema_parent, typed_ids, nodes, summaries)
+        typed_id = _typed_node_id(
+            ast,
+            catalog_identities,
+            node,
+            summaries[node.semantic_id],
+            endpoint_parent,
+            schema_parent,
+            typed_ids,
+            nodes,
+            summaries,
+        )
         if typed_id:
             typed_ids[node.semantic_id] = typed_id
 
@@ -454,14 +487,14 @@ def _collect_graph_rows(
                 _add_projection_provenance(provenance_rows, "Response", typed_id, node, ast)
         elif node.kind == "SchemaComponent":
             row = _schema_row(ast, node, summary, typed_id, raw_by_pointer)
-            if _put_richest(rows["SchemaComponent"], typed_id, row):
-                _add_projection_provenance(
-                    provenance_rows,
-                    "SchemaComponent",
-                    typed_id,
-                    node,
-                    ast,
-                )
+            _put_richest(rows["SchemaComponent"], typed_id, row)
+            _add_projection_provenance(
+                provenance_rows,
+                "SchemaComponent",
+                typed_id,
+                node,
+                ast,
+            )
         elif node.kind == "Property":
             parent_id = typed_ids.get(schema_parent.get(node.semantic_id, ""))
             if parent_id:
@@ -523,6 +556,7 @@ def _collect_graph_rows(
 
 def _typed_node_id(
     ast: AstGraph,
+    catalog_identities: CatalogIdentityRegistry,
     node: SemanticNode,
     summary: dict[str, Any],
     endpoint_parent: dict[str, str],
@@ -534,11 +568,15 @@ def _typed_node_id(
     if node.kind == "ApiEndpoint":
         return f"{summary.get('method')}:{summary.get('path')}"
     if node.kind == "SchemaComponent":
-        return _component_id(ast, node)
+        return _component_id(ast, catalog_identities, node)
     if node.kind == "Property":
         parent = nodes.get(schema_parent.get(node.semantic_id, ""))
-        parent_id = _component_id(ast, parent) if parent else ""
-        return f"{parent_id}#prop:{node.name}" if parent_id else _fallback_id(ast, "property", node)
+        parent_id = _component_id(ast, catalog_identities, parent) if parent else ""
+        return (
+            f"{parent_id}#prop:{node.name}"
+            if parent_id
+            else _fallback_id(ast, "property", node)
+        )
     if node.kind == "Parameter":
         endpoint_id = _parent_endpoint_id(node, endpoint_parent, nodes, summaries)
         return f"{endpoint_id}#param:{summary.get('in')}:{node.name}" if endpoint_id else ""
@@ -573,14 +611,19 @@ def _parent_endpoint_id(
     return f"{summary.get('method')}:{summary.get('path')}"
 
 
-def _component_id(ast: AstGraph, node: SemanticNode | None) -> str:
+def _component_id(
+    ast: AstGraph,
+    catalog_identities: CatalogIdentityRegistry,
+    node: SemanticNode | None,
+) -> str:
     if node is None:
         return ""
-    return _component_id_for_pointer(ast, node.json_pointer, set())
+    return _component_id_for_pointer(ast, catalog_identities, node.json_pointer, set())
 
 
 def _component_id_for_pointer(
     ast: AstGraph,
+    catalog_identities: CatalogIdentityRegistry,
     pointer: str,
     seen: set[str],
 ) -> str:
@@ -599,15 +642,21 @@ def _component_id_for_pointer(
         section = parts[1]
         name = parts[2]
         if len(parts) == 3:
-            return f"{provider}:{section}:{name}"
+            return catalog_identities.component_id(
+                provider=provider,
+                section=section,
+                name=name,
+                body=body,
+            )
 
     ref_pointer = _internal_ref_pointer(body.get("$ref"))
     if ref_pointer and _is_ref_only_schema(body):
-        return _component_id_for_pointer(ast, ref_pointer, seen)
+        return _component_id_for_pointer(ast, catalog_identities, ref_pointer, seen)
 
     if len(parts) >= 2 and parts[-2] in {"allOf", "anyOf", "oneOf"}:
         parent_id = _component_id_for_pointer(
             ast,
+            catalog_identities,
             _pointer_from_parts(parts[:-2]),
             seen,
         )
@@ -616,6 +665,7 @@ def _component_id_for_pointer(
     if parts and parts[-1] == "additionalProperties":
         parent_id = _component_id_for_pointer(
             ast,
+            catalog_identities,
             _pointer_from_parts(parts[:-1]),
             seen,
         )
@@ -625,6 +675,7 @@ def _component_id_for_pointer(
         if len(parts) >= 3 and parts[-3] in {"properties", "patternProperties"}:
             parent_id = _component_id_for_pointer(
                 ast,
+                catalog_identities,
                 _pointer_from_parts(parts[:-3]),
                 seen,
             )
@@ -632,6 +683,7 @@ def _component_id_for_pointer(
             return f"{parent_id}#prop:{property_name}#items" if parent_id else ""
         parent_id = _component_id_for_pointer(
             ast,
+            catalog_identities,
             _pointer_from_parts(parts[:-1]),
             seen,
         )
@@ -643,6 +695,7 @@ def _component_id_for_pointer(
             return ""
         parent_id = _component_id_for_pointer(
             ast,
+            catalog_identities,
             _pointer_from_parts(parts[:-2]),
             seen,
         )
@@ -682,6 +735,7 @@ def _schema_row(
 
 def _collect_reusable_component_rows(
     ast: AstGraph,
+    catalog_identities: CatalogIdentityRegistry,
     rows: dict[str, dict[str, dict[str, Any]]],
     provenance_rows: dict[str, dict[str, Any]],
     ast_by_pointer: dict[str, Any],
@@ -698,7 +752,12 @@ def _collect_reusable_component_rows(
             if not isinstance(name, str) or not isinstance(body, dict):
                 continue
             pointer = f"/components/{section}/{_escape_pointer(name)}"
-            component_id = f"{_provider(ast)}:{section}:{name}"
+            component_id = catalog_identities.component_id(
+                provider=_provider(ast),
+                section=section,
+                name=name,
+                body=body,
+            )
             row = {
                 "component_id": component_id,
                 "spec_source": _provider(ast),
@@ -714,17 +773,17 @@ def _collect_reusable_component_rows(
                 "constraintsJson": _json(collect_constraints(body)),
                 "bodyJson": _raw_json_for(ast, pointer, body),
             }
-            if _put_richest(rows["SchemaComponent"], component_id, row):
-                ast_node = ast_by_pointer.get(pointer)
-                _add_projection_provenance(
-                    provenance_rows,
-                    "SchemaComponent",
-                    component_id,
-                    None,
-                    ast,
-                    ast_node_id=ast_node.node_id if ast_node is not None else "",
-                    json_pointer=pointer,
-                )
+            _put_richest(rows["SchemaComponent"], component_id, row)
+            ast_node = ast_by_pointer.get(pointer)
+            _add_projection_provenance(
+                provenance_rows,
+                "SchemaComponent",
+                component_id,
+                None,
+                ast,
+                ast_node_id=ast_node.node_id if ast_node is not None else "",
+                json_pointer=pointer,
+            )
 
 
 def _edge_row(
@@ -794,14 +853,30 @@ def _add_projection_provenance(
     ast_node_id: str = "",
     json_pointer: str = "",
 ) -> None:
-    projection_id = f"{table_name}:{row_id}"
+    semantic_id = node.semantic_id if node is not None else ""
+    source_ast_node_id = node.ast_node_id if node is not None else ast_node_id
+    source_json_pointer = node.json_pointer if node is not None else json_pointer
+    projection_source_key = "|".join(
+        [
+            table_name,
+            row_id,
+            semantic_id,
+            source_ast_node_id,
+            ast.spec_id,
+            source_json_pointer,
+        ]
+    )
+    projection_digest = hashlib.sha1(
+        projection_source_key.encode("utf-8")
+    ).hexdigest()[:16]
+    projection_id = f"{table_name}:{row_id}:{projection_digest}"
     rows[projection_id] = {
         "projection_id": projection_id,
         "table_name": table_name,
         "row_id": row_id,
-        "semantic_id": node.semantic_id if node is not None else "",
-        "ast_node_id": node.ast_node_id if node is not None else ast_node_id,
-        "json_pointer": node.json_pointer if node is not None else json_pointer,
+        "semantic_id": semantic_id,
+        "ast_node_id": source_ast_node_id,
+        "json_pointer": source_json_pointer,
         "spec_id": ast.spec_id,
         "source": ast.spec_row.get("source", ""),
         "ingestion_status": ast.spec_row.get("ingestion_status", "strict_valid"),
@@ -825,8 +900,7 @@ def _fallback_id(ast: AstGraph, prefix: str, node: SemanticNode) -> str:
 
 
 def _provider(ast: AstGraph) -> str:
-    source = ast.spec_row.get("source", "")
-    return source.split("/", 1)[0] if "/" in source else source or "unknown"
+    return provider_from_source(ast.spec_row.get("source", ""))
 
 
 def _safe_id_part(value: str) -> str:

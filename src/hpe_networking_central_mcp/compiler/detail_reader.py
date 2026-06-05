@@ -178,7 +178,8 @@ def fetch_projection_detail(
 ) -> dict[str, Any]:
     """Return projected row data plus its semantic and AST source detail."""
     projection_row = _fetch_projection_row(compiler_conn, table_name, row_id)
-    provenance = _fetch_provenance(compiler_conn, table_name, row_id)
+    provenance_rows = _fetch_provenance_rows(compiler_conn, table_name, row_id)
+    provenance = provenance_rows[0]
     semantic_node = _fetch_semantic_node(ast_conn, provenance.get("semantic_id") or "")
     ast_node = _fetch_ast_node(
         ast_conn,
@@ -194,6 +195,7 @@ def fetch_projection_detail(
         "row_id": row_id,
         "projection_row": projection_row,
         "provenance": provenance,
+        "provenance_rows": provenance_rows,
         "semantic_node": semantic_node,
         "semantic_summary": _load_json((semantic_node or {}).get("summaryJson")),
         "ast_node": ast_node,
@@ -221,7 +223,7 @@ def _fetch_projection_row(conn, table_name: str, row_id: str) -> dict[str, Any]:
     return rows[0]
 
 
-def _fetch_provenance(conn, table_name: str, row_id: str) -> dict[str, Any]:
+def _fetch_provenance_rows(conn, table_name: str, row_id: str) -> list[dict[str, Any]]:
     rows = list(
         conn.execute(
             """
@@ -236,7 +238,6 @@ def _fetch_provenance(conn, table_name: str, row_id: str) -> dict[str, Any]:
                    row.source AS source,
                    row.ingestion_status AS ingestion_status,
                    row.ingestion_error_type AS ingestion_error_type
-            LIMIT 1
             """,
             parameters={"table_name": table_name, "row_id": row_id},
         ).rows_as_dict()
@@ -245,7 +246,15 @@ def _fetch_provenance(conn, table_name: str, row_id: str) -> dict[str, Any]:
         raise ProjectionRowNotFoundError(
             f"No compiler projection provenance found for {table_name}:{row_id}"
         )
-    return rows[0]
+    rows.sort(
+        key=lambda row: (
+            0 if row.get("ingestion_status") == "strict_valid" else 1,
+            row.get("source") or "",
+            row.get("semantic_id") or "",
+            row.get("ast_node_id") or "",
+        )
+    )
+    return rows
 
 
 def _fetch_semantic_node(conn, semantic_id: str) -> dict[str, Any] | None:

@@ -249,6 +249,12 @@ def test_build_ast_artifact_writes_queryable_ladybug_db(repo_tmp_path: Path) -> 
     assert stats["compiler_projection"]["edge_kind_counts"]["HAS_REQUEST_BODY"] == 1
     assert stats["compiler_projection"]["edge_kind_counts"]["BODY_REFERENCES"] == 1
     assert stats["compiler_projection"]["provenance_count"] > 0
+    assert stats["compiler_projection"]["catalog_identity"] == {
+        "base_identity_count": 1,
+        "variant_identity_count": 1,
+        "conflicting_named_identity_count": 0,
+        "identical_named_identity_merge_count": 0,
+    }
     assert set(stats["timings_seconds"]) == {
         "compile",
         "ast_write",

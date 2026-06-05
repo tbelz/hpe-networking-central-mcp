@@ -37,6 +37,9 @@ from hpe_networking_central_mcp.compiler.ast_schema import apply_ast_schema  # n
 from hpe_networking_central_mcp.compiler.ast_writer import (  # noqa: E402
     write_ast_graphs,
 )
+from hpe_networking_central_mcp.compiler.catalog_identity import (  # noqa: E402
+    CatalogIdentityRegistry,
+)
 from hpe_networking_central_mcp.compiler.frontend import (  # noqa: E402
     ResolutionFailure,
     ResolvedSpec,
@@ -308,7 +311,14 @@ def _build_ast_artifact(
     }
     rule_packs: set[str] = set()
     metric_reports = []
-    projection_data = CompilerProjectionData()
+    catalog_identities = CatalogIdentityRegistry()
+    for resolved in resolved_specs:
+        catalog_identities.add_spec(resolved.source, resolved.raw_spec)
+    for failure in task1_failures:
+        if failure.raw_spec is not None:
+            catalog_identities.add_spec(failure.source, failure.raw_spec)
+    catalog_identities.finalize()
+    projection_data = CompilerProjectionData(catalog_identities=catalog_identities)
     semantic_graphs_to_write = []
     ast_db = lb.Database(str(ast_db_path), buffer_pool_size=_DB_BUFFER_POOL_SIZE)
     try:
