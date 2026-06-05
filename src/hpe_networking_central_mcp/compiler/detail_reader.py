@@ -238,7 +238,6 @@ def _fetch_provenance_rows(conn, table_name: str, row_id: str) -> list[dict[str,
                    row.source AS source,
                    row.ingestion_status AS ingestion_status,
                    row.ingestion_error_type AS ingestion_error_type
-            ORDER BY row.ingestion_status, row.source, row.semantic_id, row.ast_node_id
             """,
             parameters={"table_name": table_name, "row_id": row_id},
         ).rows_as_dict()
@@ -247,6 +246,14 @@ def _fetch_provenance_rows(conn, table_name: str, row_id: str) -> list[dict[str,
         raise ProjectionRowNotFoundError(
             f"No compiler projection provenance found for {table_name}:{row_id}"
         )
+    rows.sort(
+        key=lambda row: (
+            0 if row.get("ingestion_status") == "strict_valid" else 1,
+            row.get("source") or "",
+            row.get("semantic_id") or "",
+            row.get("ast_node_id") or "",
+        )
+    )
     return rows
 
 

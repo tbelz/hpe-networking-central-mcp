@@ -195,6 +195,61 @@ def test_projection_detail_returns_all_matching_provenance_rows(
     assert detail["provenance"]["source"] == "central/one"
 
 
+def test_projection_detail_prefers_strict_valid_primary_provenance(
+    repo_tmp_path: Path,
+) -> None:
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "Shared", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Shared": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                }
+            }
+        },
+    }
+    degraded_ast = build_ast_graph(spec, source="central/degraded")
+    degraded_ast.spec_row["ingestion_status"] = "degraded"
+    degraded_ast.spec_row["ingestion_error_type"] = "validation"
+    strict_ast = build_ast_graph(
+        {**spec, "info": {"title": "Strict", "version": "1.0"}},
+        source="central/strict",
+    )
+    ast_db_path = repo_tmp_path / "knowledge_db_ast"
+    compiler_db_path = repo_tmp_path / "knowledge_db_compiler"
+    semantics = [build_semantic_overlay(degraded_ast), build_semantic_overlay(strict_ast)]
+    build_ast_database(
+        ast_db_path,
+        [degraded_ast, strict_ast],
+        buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE,
+    )
+    write_semantic_database(ast_db_path, semantics, buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE)
+    build_compiler_projection_database(
+        compiler_db_path,
+        [degraded_ast, strict_ast],
+        semantics,
+        buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE,
+    )
+
+    detail = load_projection_detail(
+        compiler_db_path=compiler_db_path,
+        ast_db_path=ast_db_path,
+        table_name="SchemaComponent",
+        row_id="central:schemas:Shared",
+        buffer_pool_size=_TEST_DB_BUFFER_POOL_SIZE,
+    )
+
+    assert detail["provenance"]["source"] == "central/strict"
+    assert detail["provenance"]["ingestion_status"] == "strict_valid"
+    assert [row["ingestion_status"] for row in detail["provenance_rows"]] == [
+        "strict_valid",
+        "degraded",
+    ]
+
+
 def test_projection_detail_rejects_unknown_table(repo_tmp_path: Path) -> None:
     with pytest.raises(UnknownProjectionTableError):
         load_projection_detail(
