@@ -38,6 +38,9 @@ class Settings:
     # GitHub release repository for knowledge DB (owner/repo)
     knowledge_release_repo: str = ""
     knowledge_projection: str = "legacy"
+    compiler_tools: bool = False
+    compiler_db_path: Path = field(default_factory=lambda: Path("/data/knowledge_db_compiler"))
+    compiler_ast_db_path: Path = field(default_factory=lambda: Path("/data/knowledge_db_ast"))
 
     # Read-only mode: refuse mutating Central / GreenLake API calls and hide
     # non-GET endpoints from the API catalog tools. Local graph writes and
@@ -87,6 +90,12 @@ def load_settings() -> Settings:
         knowledge_projection = "v2"
     elif knowledge_projection != "legacy":
         knowledge_projection = "legacy"
+    graph_db_path = Path(os.environ.get("GRAPH_DB_PATH", "/data/graph_db"))
+    default_compiler_db_path = (
+        graph_db_path
+        if knowledge_projection == "v2"
+        else graph_db_path.parent / "knowledge_db_compiler"
+    )
     return Settings(
         central_base_url=os.environ.get("CENTRAL_BASE_URL", "").strip().rstrip("/"),
         central_client_id=os.environ.get("CENTRAL_CLIENT_ID", "").strip(),
@@ -98,9 +107,19 @@ def load_settings() -> Settings:
         docs_path=Path(os.environ.get("DOCS_PATH", "/docs")),
         inventory_cache_ttl=int(os.environ.get("INVENTORY_CACHE_TTL", "300")),
         glp_included_slugs=os.environ.get("GLP_INCLUDED_SLUGS", "").strip(),
-        graph_db_path=Path(os.environ.get("GRAPH_DB_PATH", "/data/graph_db")),
+        graph_db_path=graph_db_path,
         graph_ipc_socket=Path(os.environ.get("GRAPH_IPC_SOCKET", "/tmp/ladybug_graph.sock")),
         knowledge_release_repo=os.environ.get("KNOWLEDGE_RELEASE_REPO", "").strip(),
         knowledge_projection=knowledge_projection,
+        compiler_tools=_parse_bool(os.environ.get("MCP_COMPILER_TOOLS", "")),
+        compiler_db_path=Path(
+            os.environ.get("MCP_COMPILER_DB_PATH", str(default_compiler_db_path))
+        ),
+        compiler_ast_db_path=Path(
+            os.environ.get(
+                "MCP_COMPILER_AST_DB_PATH",
+                str(graph_db_path.parent / "knowledge_db_ast"),
+            )
+        ),
         read_only=_parse_bool(os.environ.get("READ_ONLY", "")),
     )

@@ -119,3 +119,44 @@ def test_server_module_imports_offline(monkeypatch, tmp_path):
     # Discovery tools must still be present.
     for must_have in ("query_graph", "write_graph", "list_scripts", "save_script"):
         assert must_have in tool_names, f"{must_have} missing in discovery-only mode"
+    assert "find_api_endpoints" not in tool_names
+
+
+def test_server_registers_compiler_tools_when_enabled(monkeypatch, tmp_path):
+    """Compiler context tools are opt-in and can register without live creds."""
+    for var in (
+        "CENTRAL_BASE_URL",
+        "CENTRAL_CLIENT_ID",
+        "CENTRAL_CLIENT_SECRET",
+        "GREENLAKE_CLIENT_ID",
+        "GREENLAKE_CLIENT_SECRET",
+        "READ_ONLY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("SCRIPT_LIBRARY_PATH", str(tmp_path / "scripts"))
+    monkeypatch.setenv("GRAPH_DB_PATH", str(tmp_path / "graph.db"))
+    monkeypatch.setenv("KNOWLEDGE_RELEASE_REPO", "")
+    monkeypatch.setenv("MCP_COMPILER_TOOLS", "true")
+    monkeypatch.setenv("MCP_COMPILER_DB_PATH", str(tmp_path / "knowledge_db_compiler"))
+    monkeypatch.setenv("MCP_COMPILER_AST_DB_PATH", str(tmp_path / "knowledge_db_ast"))
+
+    _prev = sys.modules.get("hpe_networking_central_mcp.server")
+    if _prev is not None:
+        _ipc = getattr(_prev, "ipc_server", None)
+        if _ipc is not None:
+            _ipc.stop()
+    sys.modules.pop("hpe_networking_central_mcp.server", None)
+
+    module = importlib.import_module("hpe_networking_central_mcp.server")
+
+    tool_mgr = getattr(module.mcp, "_tool_manager", None)
+    assert tool_mgr is not None, "FastMCP changed tool-manager attribute name"
+    tool_names = {t.name for t in tool_mgr._tools.values()}
+    for compiler_tool in (
+        "find_api_endpoints",
+        "get_api_endpoint_context",
+        "get_api_schema_context",
+        "get_openapi_source_detail",
+        "get_compiler_graph_health",
+    ):
+        assert compiler_tool in tool_names

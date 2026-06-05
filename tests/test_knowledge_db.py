@@ -177,6 +177,64 @@ def test_happy_path_extracts_compiler_sidecar_and_manifest_asset(tmp_path, monke
     assert manifest["knowledge_projection"] == "v2"
 
 
+def test_sidecar_manifest_name_does_not_clobber_runtime_manifest(tmp_path, monkeypatch):
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"schema_version": 10, "release_tag": "runtime"}),
+        encoding="utf-8",
+    )
+    compiler_url = "https://example.invalid/knowledge_db_compiler.tar.gz"
+    manifest_url = "https://example.invalid/manifest.json"
+
+    def handler(request):
+        url = str(request.url)
+        if "api.github.com" in url:
+            return httpx.Response(
+                200,
+                json=_release_payload(
+                    compiler_url,
+                    tag="knowledge-db-sidecar",
+                    assets=[
+                        {
+                            "name": "knowledge_db_compiler.tar.gz",
+                            "browser_download_url": compiler_url,
+                        },
+                        {
+                            "name": "manifest.json",
+                            "browser_download_url": manifest_url,
+                        },
+                    ],
+                ),
+            )
+        if url == compiler_url:
+            return httpx.Response(
+                200,
+                content=_make_tarball({"knowledge_db_compiler/db.lbd": b"compiler"}),
+            )
+        if url == manifest_url:
+            return httpx.Response(
+                200,
+                content=json.dumps({"schema_version": 10}).encode(),
+            )
+        return httpx.Response(404)
+
+    _install_transport(monkeypatch, handler)
+
+    assert download_knowledge_db(
+        "owner/repo",
+        tmp_path / "knowledge_db_compiler",
+        asset_name="knowledge_db_compiler.tar.gz",
+        archive_member="knowledge_db_compiler",
+        projection="v2",
+        manifest_name="compiler_manifest.json",
+    ) is True
+
+    runtime_manifest = json.loads((tmp_path / "manifest.json").read_text())
+    compiler_manifest = json.loads((tmp_path / "compiler_manifest.json").read_text())
+    assert runtime_manifest["release_tag"] == "runtime"
+    assert compiler_manifest["release_tag"] == "knowledge-db-sidecar"
+    assert compiler_manifest["knowledge_asset"] == "knowledge_db_compiler.tar.gz"
+
+
 def test_happy_path_replaces_existing_db_dir(tmp_path, monkeypatch):
     db_path = tmp_path / "kdb"
     db_path.mkdir()

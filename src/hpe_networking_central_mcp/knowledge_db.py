@@ -107,6 +107,7 @@ def download_knowledge_db(
     asset_name: str = "knowledge_db.tar.gz",
     archive_member: str = "knowledge_db",
     projection: str = "legacy",
+    manifest_name: str = "manifest.json",
     logger: Callable | None = None,
 ) -> bool:
     """Download the latest knowledge DB tar.gz from a GitHub release.
@@ -145,7 +146,7 @@ def download_knowledge_db(
         _info("knowledge_db_skip", reason="KNOWLEDGE_RELEASE_REPO not set")
         return False
 
-    manifest_path = db_path.parent / "manifest.json"
+    manifest_path = db_path.parent / manifest_name
     local_state = _read_local_manifest_state(manifest_path)
     local_tag = local_state.get("release_tag")
 
