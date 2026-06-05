@@ -30,6 +30,10 @@ class CatalogIdentityRegistry:
     _finalized: bool = False
     _variant_ids: dict[tuple[str, str, str, str], str] = field(default_factory=dict)
 
+    @property
+    def is_finalized(self) -> bool:
+        return self._finalized
+
     def add_ast_graph(self, ast: AstGraph) -> None:
         if self._finalized:
             raise RuntimeError("Cannot add AST graphs after catalog identities are finalized")

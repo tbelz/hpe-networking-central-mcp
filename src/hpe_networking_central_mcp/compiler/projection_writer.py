@@ -302,6 +302,11 @@ def collect_compiler_projection_graph(
     semantic: SemanticGraph,
 ) -> None:
     """Merge one compiler graph pair into compact cross-spec projection rows."""
+    if not data.catalog_identities.is_finalized:
+        raise RuntimeError(
+            "CompilerProjectionData.catalog_identities must be finalized "
+            "before collecting compiler projection rows"
+        )
     _collect_graph_rows(
         ast,
         semantic,

@@ -13,7 +13,9 @@ import real_ladybug as lb
 from hpe_networking_central_mcp.compiler.ast_builder import build_ast_graph
 from hpe_networking_central_mcp.compiler.catalog_identity import canonical_body_hash
 from hpe_networking_central_mcp.compiler.projection_writer import (
+    CompilerProjectionData,
     build_compiler_projection_database,
+    collect_compiler_projection_graph,
 )
 from hpe_networking_central_mcp.compiler.semantic_builder import build_semantic_overlay
 
@@ -310,6 +312,23 @@ def test_projection_materializes_reusable_response_header_and_array_item_ref(
         ]
     finally:
         db.close()
+
+
+def test_projection_collection_requires_finalized_catalog_identity_registry() -> None:
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "Guard", "version": "1.0"},
+        "paths": {},
+        "components": {"schemas": {"Shared": {"type": "object"}}},
+    }
+    ast = build_ast_graph(spec, source="central/guard")
+
+    with pytest.raises(RuntimeError, match="catalog_identities must be finalized"):
+        collect_compiler_projection_graph(
+            CompilerProjectionData(),
+            ast,
+            build_semantic_overlay(ast),
+        )
 
 
 def test_projection_uses_lineage_ids_for_inline_schema_branches(
