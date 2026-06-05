@@ -278,18 +278,7 @@ def _semantic_key(check_name: str, row: dict[str, Any]) -> str:
     return _key(_semantic_row(check_name, row))
 
 
-def _semantic_row(check_name: str, row: dict[str, Any]) -> dict[str, Any]:
-    if check_name not in {
-        "body_references",
-        "response_references",
-        "schema_components",
-        "properties",
-        "property_types",
-        "composition",
-        "value_schemas",
-        "property_yang",
-    }:
-        return row
+def _semantic_row(_check_name: str, row: dict[str, Any]) -> dict[str, Any]:
     return {
         key: _normalize_component_id(value)
         if key in _COMPONENT_ID_FIELDS and isinstance(value, str)
