@@ -799,10 +799,11 @@ def test_compiler_cutover_gates_pass_when_all_inputs_are_clean() -> None:
         "parity_passed": True,
         "invariants_passed": True,
         "traversal_passed": True,
+        "default_flip_ready": True,
     }
 
 
-def test_compiler_cutover_gates_fail_for_effective_parity_gap() -> None:
+def test_compiler_cutover_gates_report_effective_parity_gap_without_blocking_release() -> None:
     mod = _load_build_module()
 
     gates = mod._compiler_cutover_gates(
@@ -811,9 +812,10 @@ def test_compiler_cutover_gates_fail_for_effective_parity_gap() -> None:
         compiler_traversal={"failure_count": 0},
     )
 
-    assert gates["passed"] is False
+    assert gates["passed"] is True
     assert gates["parity_passed"] is False
-    assert mod._format_compiler_gate_failure(gates) == "parity"
+    assert gates["default_flip_ready"] is False
+    assert mod._format_compiler_gate_failure(gates) == "unknown"
 
 
 def test_compiler_cutover_gates_fail_for_invariant_violation() -> None:
@@ -832,6 +834,7 @@ def test_compiler_cutover_gates_fail_for_invariant_violation() -> None:
 
     assert gates["passed"] is False
     assert gates["invariants_passed"] is False
+    assert gates["default_flip_ready"] is False
     assert mod._serialize_invariant_violations([violation]) == [
         {
             "invariant": "INV-X",
@@ -852,6 +855,7 @@ def test_compiler_cutover_gates_fail_for_traversal_failure() -> None:
 
     assert gates["passed"] is False
     assert gates["traversal_passed"] is False
+    assert gates["default_flip_ready"] is False
     assert mod._format_compiler_gate_failure(gates) == "traversal"
 
 
@@ -910,6 +914,7 @@ def test_sample_build_strict_compiler_writes_cutover_manifest(
         "parity_passed": True,
         "invariants_passed": True,
         "traversal_passed": True,
+        "default_flip_ready": True,
     }
     assert (repo_tmp_path / "knowledge_db_compiler.tar.gz").exists()
     assert (repo_tmp_path / "knowledge_db_ast.tar.gz").exists()
