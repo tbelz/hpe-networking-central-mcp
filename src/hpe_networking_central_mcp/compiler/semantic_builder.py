@@ -646,42 +646,74 @@ def _add_response_edges(
         )
         if not isinstance(body, dict):
             continue
-        media_schemas = _iter_media_schemas(body.get("content"), body_pointer)
-        if not media_schemas:
-            response_node = state.add_node(
-                kind="Response",
-                stable_key=f"response:{endpoint.stable_key}:{status}:",
-                name=f"{endpoint.name} {status}",
-                ast_pointer=body_pointer,
-                summary={
-                    "contentType": "",
-                    "description": _as_str(body.get("description")),
-                    "responsePointer": body_pointer,
-                    "sourcePointer": response_pointer,
-                    "status": str(status),
-                },
-            )
-            state.add_edge(
-                endpoint,
-                response_node,
-                kind="HAS_RESPONSE",
-                rule_id=f"{STRUCTURAL_RULE_PACK_ID}.operation.response.node",
-                evidence={"operationPointer": op_pointer, "responsePointer": body_pointer},
-            )
+        content = body.get("content")
+        if isinstance(content, dict) and content:
+            for media, media_type in content.items():
+                media_name = str(media)
+                schema = media_type.get("schema") if isinstance(media_type, dict) else None
+                if isinstance(schema, dict):
+                    _add_response_media_edges(
+                        state,
+                        endpoint,
+                        body,
+                        body_pointer,
+                        response_pointer,
+                        op_pointer,
+                        str(status),
+                        media_name,
+                        schema,
+                        _join_pointer(body_pointer, "content", media_name, "schema"),
+                    )
+                    continue
+                _add_schema_less_response_edge(
+                    state,
+                    endpoint,
+                    body,
+                    body_pointer,
+                    response_pointer,
+                    op_pointer,
+                    str(status),
+                    media_name,
+                )
             continue
-        for media, schema, schema_pointer in media_schemas:
-            _add_response_media_edges(
-                state,
-                endpoint,
-                body,
-                body_pointer,
-                response_pointer,
-                op_pointer,
-                str(status),
-                media,
-                schema,
-                schema_pointer,
-            )
+        _add_schema_less_response_edge(
+            state,
+            endpoint,
+            body,
+            body_pointer,
+            response_pointer,
+            op_pointer,
+            str(status),
+            "",
+        )
+
+
+def _add_schema_less_response_edge(
+    state: _SemanticState,
+    endpoint: SemanticNode,
+    body: dict[str, Any],
+    body_pointer: str,
+    response_pointer: str,
+    op_pointer: str,
+    status: str,
+    media: str,
+) -> None:
+    response_node = _add_response_node(
+        state,
+        endpoint,
+        body,
+        body_pointer,
+        response_pointer,
+        status,
+        media,
+    )
+    state.add_edge(
+        endpoint,
+        response_node,
+        kind="HAS_RESPONSE",
+        rule_id=f"{STRUCTURAL_RULE_PACK_ID}.operation.response.node",
+        evidence={"operationPointer": op_pointer, "responsePointer": body_pointer},
+    )
 
 
 def _add_response_media_edges(
@@ -696,18 +728,14 @@ def _add_response_media_edges(
     schema: dict[str, Any],
     schema_pointer: str,
 ) -> None:
-    response_node = state.add_node(
-        kind="Response",
-        stable_key=f"response:{endpoint.stable_key}:{status}:{media}",
-        name=f"{endpoint.name} {status}",
-        ast_pointer=body_pointer,
-        summary={
-            "contentType": media,
-            "description": _as_str(body.get("description")),
-            "responsePointer": body_pointer,
-            "sourcePointer": response_pointer,
-            "status": str(status),
-        },
+    response_node = _add_response_node(
+        state,
+        endpoint,
+        body,
+        body_pointer,
+        response_pointer,
+        status,
+        media,
     )
     state.add_edge(
         endpoint,
@@ -743,7 +771,31 @@ def _add_response_media_edges(
             "status": str(status),
             "targetPointer": target_pointer,
         },
-        )
+    )
+
+
+def _add_response_node(
+    state: _SemanticState,
+    endpoint: SemanticNode,
+    body: dict[str, Any],
+    body_pointer: str,
+    response_pointer: str,
+    status: str,
+    media: str,
+) -> SemanticNode:
+    return state.add_node(
+        kind="Response",
+        stable_key=f"response:{endpoint.stable_key}:{status}:{media}",
+        name=f"{endpoint.name} {status}",
+        ast_pointer=body_pointer,
+        summary={
+            "contentType": media,
+            "description": _as_str(body.get("description")),
+            "responsePointer": body_pointer,
+            "sourcePointer": response_pointer,
+            "status": str(status),
+        },
+    )
 
 
 def _build_model_identity_overlay(state: _SemanticState) -> None:
@@ -1279,6 +1331,12 @@ def _iter_media_schemas(
             )
         )
     return result
+
+
+def _iter_media_types(content: Any) -> list[str]:
+    if not isinstance(content, dict) or not content:
+        return []
+    return [str(media) for media in content if isinstance(media, str)]
 
 
 def _resolve_reference_object(

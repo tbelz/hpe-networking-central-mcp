@@ -54,6 +54,19 @@ def test_projection_materializes_reusable_response_header_and_array_item_ref(
                         }
                     },
                     "responses": {
+                        "200": {
+                            "description": "mixed schema and schema-less content",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/Error"}
+                                },
+                                "*/*": {},
+                            },
+                        },
+                        "204": {
+                            "description": "accepted without schema",
+                            "content": {"*/*": {}},
+                        },
                         "429": {"$ref": "#/components/responses/TooManyRequests"}
                     },
                 }
@@ -275,6 +288,28 @@ def test_projection_materializes_reusable_response_header_and_array_item_ref(
             {"target_component_id": "central:schemas:ScopeIds"}
         ]
 
+        response_rows = list(
+            conn.execute(
+                """
+                MATCH (:ApiEndpoint {endpoint_id: 'POST:/move'})
+                      -[:HAS_RESPONSE]->(response:Response)
+                RETURN response.status AS status,
+                       response.content_type AS content_type,
+                       response.root_component_ref AS root_component_ref
+                ORDER BY response.status, response.content_type
+                """
+            ).rows_as_dict()
+        )
+        assert {
+            (row["status"], row["content_type"], row["root_component_ref"])
+            for row in response_rows
+        } == {
+            ("200", "*/*", ""),
+            ("200", "application/json", "central:schemas:Error"),
+            ("204", "*/*", ""),
+            ("429", "application/json", "central:schemas:Error"),
+        }
+
         provenance_rows = list(
             conn.execute(
                 """
@@ -363,6 +398,10 @@ def test_projection_uses_lineage_ids_for_inline_schema_branches(
                         },
                     ],
                     "properties": {
+                        "items": {
+                            "type": "object",
+                            "properties": {"id": {"type": "string"}},
+                        },
                         "nested": {
                             "type": "object",
                             "allOf": [{"$ref": "#/components/schemas/Base"}],
@@ -409,6 +448,7 @@ def test_projection_uses_lineage_ids_for_inline_schema_branches(
             "central:schemas:Root#prop:choice#union",
             "central:schemas:Root#prop:choice#union#oneOf:1",
             "central:schemas:Root#prop:entries#items",
+            "central:schemas:Root#prop:items#object",
             "central:schemas:Root#prop:nested#object",
         }.issubset(component_ids)
         assert not any(component_id.startswith("central:inline:") for component_id in component_ids)

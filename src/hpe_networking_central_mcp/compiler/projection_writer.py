@@ -671,6 +671,19 @@ def _component_id_for_pointer(
         )
         return f"{parent_id}#additionalProperties" if parent_id else ""
 
+    if len(parts) >= 2 and parts[-2] in {"properties", "patternProperties"}:
+        role = _inline_property_schema_role(body)
+        if not role:
+            return ""
+        parent_id = _component_id_for_pointer(
+            ast,
+            catalog_identities,
+            _pointer_from_parts(parts[:-2]),
+            seen,
+        )
+        property_name = _safe_id_part(parts[-1])
+        return f"{parent_id}#prop:{property_name}#{role}" if parent_id else ""
+
     if parts and parts[-1] == "items":
         if len(parts) >= 3 and parts[-3] in {"properties", "patternProperties"}:
             parent_id = _component_id_for_pointer(
@@ -688,19 +701,6 @@ def _component_id_for_pointer(
             seen,
         )
         return f"{parent_id}#items" if parent_id else ""
-
-    if len(parts) >= 2 and parts[-2] in {"properties", "patternProperties"}:
-        role = _inline_property_schema_role(body)
-        if not role:
-            return ""
-        parent_id = _component_id_for_pointer(
-            ast,
-            catalog_identities,
-            _pointer_from_parts(parts[:-2]),
-            seen,
-        )
-        property_name = _safe_id_part(parts[-1])
-        return f"{parent_id}#prop:{property_name}#{role}" if parent_id else ""
 
     return _fallback_pointer_id(ast, pointer)
 

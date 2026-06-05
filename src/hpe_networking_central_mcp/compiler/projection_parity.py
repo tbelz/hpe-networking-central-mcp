@@ -45,11 +45,14 @@ _PARITY_QUERIES: dict[str, str] = {
     """,
     "schema_components": """
         MATCH (schema:SchemaComponent)
-        RETURN schema.component_id AS component_id
+        RETURN schema.component_id AS component_id,
+               schema.bodyJson AS __body_json
     """,
     "properties": """
         MATCH (schema:SchemaComponent)-[:HAS_PROPERTY]->(prop:Property)
-        RETURN schema.component_id AS component_id, prop.name AS property
+        RETURN schema.component_id AS component_id,
+               prop.name AS property,
+               schema.bodyJson AS __component_body_json
     """,
     "property_types": """
         MATCH (schema:SchemaComponent)-[:HAS_PROPERTY]->(prop:Property)
@@ -93,6 +96,7 @@ _PARITY_QUERIES: dict[str, str] = {
 }
 
 _VARIANT_SUFFIX_RE = re.compile(r"@[0-9a-f]{12}(?=#|$)")
+_SYNTHETIC_SHAPE_RE = re.compile(r":Shape_[0-9a-f]+$")
 
 _COMPONENT_ID_FIELDS = {"component_id", "target_component_id"}
 
@@ -135,10 +139,20 @@ def compute_projection_parity(
             missing_keys,
             alias_equivalent_keys,
         )
+        structural_equivalent_keys = _structural_equivalent_missing_keys(
+            name,
+            legacy,
+            compiler,
+            missing_keys,
+            alias_equivalent_keys,
+            alternate_target_keys,
+        )
         effective_missing_keys = [
             key
             for key in missing_keys
-            if key not in alias_equivalent_keys and key not in alternate_target_keys
+            if key not in alias_equivalent_keys
+            and key not in alternate_target_keys
+            and key not in structural_equivalent_keys
         ]
         total_legacy += len(legacy)
         total_compiler += len(compiler)
@@ -150,6 +164,7 @@ def compute_projection_parity(
             "legacy_missing_count": len(missing_keys),
             "legacy_alias_equivalent_count": len(alias_equivalent_keys),
             "legacy_alternate_target_count": len(alternate_target_keys),
+            "legacy_structural_equivalent_count": len(structural_equivalent_keys),
             "legacy_effective_missing_count": len(effective_missing_keys),
             "compiler_extra_count": len(extra_keys),
             "legacy_coverage_ratio": _ratio(len(legacy) - len(missing_keys), len(legacy)),
@@ -158,19 +173,22 @@ def compute_projection_parity(
                 len(legacy),
             ),
             "legacy_missing_samples": [
-                legacy[key] for key in missing_keys[:sample_limit]
+                _public_row(legacy[key]) for key in missing_keys[:sample_limit]
             ],
             "legacy_effective_missing_samples": [
-                legacy[key] for key in effective_missing_keys[:sample_limit]
+                _public_row(legacy[key]) for key in effective_missing_keys[:sample_limit]
             ],
             "legacy_alias_equivalent_samples": [
-                legacy[key] for key in alias_equivalent_keys[:sample_limit]
+                _public_row(legacy[key]) for key in alias_equivalent_keys[:sample_limit]
             ],
             "legacy_alternate_target_samples": [
-                legacy[key] for key in alternate_target_keys[:sample_limit]
+                _public_row(legacy[key]) for key in alternate_target_keys[:sample_limit]
+            ],
+            "legacy_structural_equivalent_samples": [
+                _public_row(legacy[key]) for key in structural_equivalent_keys[:sample_limit]
             ],
             "compiler_extra_samples": [
-                compiler[key] for key in extra_keys[:sample_limit]
+                _public_row(compiler[key]) for key in extra_keys[:sample_limit]
             ],
         }
     return {
@@ -262,6 +280,55 @@ def _alternate_target_missing_keys(
     ]
 
 
+def _structural_equivalent_missing_keys(
+    check_name: str,
+    legacy: dict[str, dict[str, Any]],
+    compiler: dict[str, dict[str, Any]],
+    missing_keys: list[str],
+    alias_equivalent_keys: list[str],
+    alternate_target_keys: list[str],
+) -> list[str]:
+    if check_name == "schema_components":
+        compiler_shapes = {
+            _schema_shape_key(row.get("__body_json"))
+            for row in compiler.values()
+        }
+        compiler_shapes.discard("")
+        return [
+            key
+            for key in missing_keys
+            if key not in alias_equivalent_keys
+            and key not in alternate_target_keys
+            and _is_synthetic_shape_component(legacy[key].get("component_id"))
+            and _schema_shape_key(legacy[key].get("__body_json")) in compiler_shapes
+        ]
+    if check_name == "properties":
+        compiler_property_shapes = {
+            (
+                shape_key,
+                row.get("property", ""),
+            )
+            for row in compiler.values()
+            if (shape_key := _schema_shape_key(row.get("__component_body_json")))
+        }
+        return [
+            key
+            for key in missing_keys
+            if key not in alias_equivalent_keys
+            and key not in alternate_target_keys
+            and _is_synthetic_shape_component(legacy[key].get("component_id"))
+            and (
+                _schema_shape_key(legacy[key].get("__component_body_json")),
+                legacy[key].get("property", ""),
+            ) in compiler_property_shapes
+        ]
+    return []
+
+
+def _is_synthetic_shape_component(component_id: Any) -> bool:
+    return isinstance(component_id, str) and bool(_SYNTHETIC_SHAPE_RE.search(component_id))
+
+
 def _row_set(conn, query: str) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for row in conn.execute(query).rows_as_dict():
@@ -271,7 +338,11 @@ def _row_set(conn, query: str) -> dict[str, dict[str, Any]]:
 
 
 def _key(row: dict[str, Any]) -> str:
-    return json.dumps(row, sort_keys=True, separators=(",", ":"))
+    return json.dumps(_public_row(row), sort_keys=True, separators=(",", ":"))
+
+
+def _public_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in row.items() if not key.startswith("__")}
 
 
 def _semantic_key(check_name: str, row: dict[str, Any]) -> str:
@@ -317,6 +388,34 @@ def _normalize(value: Any) -> Any:
         return [_normalize(item) for item in value]
     if value is None:
         return ""
+    return value
+
+
+def _schema_shape_key(raw_body: Any) -> str:
+    if not isinstance(raw_body, str) or not raw_body:
+        return ""
+    try:
+        body = json.loads(raw_body)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    return json.dumps(
+        _canonical_shape(body),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _canonical_shape(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _canonical_shape(item)
+            for key, item in sorted(value.items())
+            if key not in {"description", "example", "examples", "title"}
+        }
+    if isinstance(value, list):
+        return [_canonical_shape(item) for item in value]
     return value
 
 
