@@ -90,6 +90,22 @@ def _parse_server_args() -> None:
 _parse_server_args()
 settings = load_settings()
 
+
+def _is_recoverable_runtime_db_open_error(exc: BaseException) -> bool:
+    """Return True for persisted LadybugDB failures that a fresh release can fix."""
+    if not isinstance(exc, (RuntimeError, OSError)):
+        return False
+    msg = str(exc).lower()
+    return any(
+        marker in msg
+        for marker in (
+            "corrupt",
+            "wal file",
+            "invalid wal",
+            "not a database",
+        )
+    )
+
 # ── Credential gate: connected vs discovery-only mode ─────────────────
 # When CENTRAL_BASE_URL / CENTRAL_CLIENT_ID / CENTRAL_CLIENT_SECRET are all
 # present we run in connected mode and validate the token up front. With
@@ -164,14 +180,21 @@ _knowledge_archive_member = (
     if settings.knowledge_projection == "v2"
     else "knowledge_db"
 )
-knowledge_downloaded = download_knowledge_db(
-    settings.knowledge_release_repo,
-    settings.graph_db_path,
-    asset_name=_knowledge_asset_name,
-    archive_member=_knowledge_archive_member,
-    projection=settings.knowledge_projection,
-    logger=logger,
-)
+
+
+def _download_runtime_knowledge_db(*, force: bool = False) -> bool:
+    return download_knowledge_db(
+        settings.knowledge_release_repo,
+        settings.graph_db_path,
+        asset_name=_knowledge_asset_name,
+        archive_member=_knowledge_archive_member,
+        projection=settings.knowledge_projection,
+        force=force,
+        logger=logger,
+    )
+
+
+knowledge_downloaded = _download_runtime_knowledge_db()
 logger.info(
     "knowledge_projection_selected",
     projection=settings.knowledge_projection,
@@ -214,9 +237,43 @@ if settings.compiler_tools:
         ast_downloaded=compiler_ast_downloaded,
     )
 
+def _initialize_runtime_graph() -> tuple[GraphManager, bool]:
+    manager = GraphManager(settings.graph_db_path)
+    try:
+        manager.initialize()
+        return manager, False
+    except Exception as exc:
+        if (
+            not settings.knowledge_release_repo
+            or not settings.graph_db_path.exists()
+            or not _is_recoverable_runtime_db_open_error(exc)
+        ):
+            raise
+        logger.warning(
+            "knowledge_db_open_failed_reinstalling",
+            db_path=str(settings.graph_db_path),
+            error=str(exc),
+        )
+        redownloaded = _download_runtime_knowledge_db(force=True)
+        if not redownloaded:
+            logger.error(
+                "knowledge_db_reinstall_failed",
+                db_path=str(settings.graph_db_path),
+                hint="Could not refresh the persisted knowledge DB after an open failure.",
+            )
+            raise
+        recovered = GraphManager(settings.graph_db_path)
+        recovered.initialize()
+        logger.info(
+            "knowledge_db_reinstall_recovered",
+            db_path=str(settings.graph_db_path),
+        )
+        return recovered, True
+
+
 # Initialize file-backed graph database
-graph_manager = GraphManager(settings.graph_db_path)
-graph_manager.initialize()
+graph_manager, _knowledge_recovered = _initialize_runtime_graph()
+knowledge_downloaded = knowledge_downloaded or _knowledge_recovered
 graph_manager.create_fts_indexes()
 
 

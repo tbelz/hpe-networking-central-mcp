@@ -108,6 +108,7 @@ def download_knowledge_db(
     archive_member: str = "knowledge_db",
     projection: str = "legacy",
     manifest_name: str = "manifest.json",
+    force: bool = False,
     logger: Callable | None = None,
 ) -> bool:
     """Download the latest knowledge DB tar.gz from a GitHub release.
@@ -118,6 +119,10 @@ def download_knowledge_db(
         ``owner/name`` of the GitHub repository hosting the release.
     db_path : Path
         Destination path for the extracted database (file or directory).
+    force : bool
+        When true, bypass the local release-tag short-circuit and reinstall
+        the selected asset. Used to recover tagged-but-unopenable persisted
+        Docker volumes.
     logger : structured logger, optional
         Object with ``info``/``warning`` methods accepting ``**kwargs``.
         Falls back to the standard ``logging`` module.
@@ -172,7 +177,8 @@ def download_knowledge_db(
 
     remote_tag = release.get("tag_name")
     if (
-        remote_tag
+        not force
+        and remote_tag
         and local_tag == remote_tag
         and db_path.exists()
         and _local_install_matches(
@@ -184,6 +190,13 @@ def download_knowledge_db(
     ):
         _info("knowledge_db_up_to_date", tag=remote_tag, asset=asset_name)
         return False
+    if force:
+        _info(
+            "knowledge_db_refresh_forced",
+            local_tag=local_tag,
+            remote_tag=remote_tag,
+            asset=asset_name,
+        )
 
     asset_url = None
     for asset in release.get("assets", []):
