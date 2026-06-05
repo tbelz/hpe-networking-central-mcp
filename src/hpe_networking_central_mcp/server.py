@@ -28,6 +28,7 @@ from .prompts.workflows import register_prompts
 from .resources.docs import register_api_catalog_resource, register_resources
 from .resources.graph import register_graph_resources
 from .tools.api_call import register_api_call_tools, register_greenlake_api_call_tools
+from .tools.compiler import register_compiler_tools
 from .tools.execution import register_execution_tools, _run_script
 from .tools.graph import register_graph_tools
 from .tools.scripts import register_script_tools, sync_seeds_to_graph
@@ -177,6 +178,41 @@ logger.info(
     asset=_knowledge_asset_name,
     graph_db_path=str(settings.graph_db_path),
 )
+
+compiler_db_downloaded = False
+compiler_ast_downloaded = False
+if settings.compiler_tools:
+    if settings.compiler_db_path == settings.graph_db_path and settings.knowledge_projection == "v2":
+        logger.info(
+            "compiler_db_reusing_runtime_projection",
+            compiler_db_path=str(settings.compiler_db_path),
+        )
+    else:
+        compiler_db_downloaded = download_knowledge_db(
+            settings.knowledge_release_repo,
+            settings.compiler_db_path,
+            asset_name="knowledge_db_compiler.tar.gz",
+            archive_member="knowledge_db_compiler",
+            projection="v2",
+            manifest_name="compiler_manifest.json",
+            logger=logger,
+        )
+    compiler_ast_downloaded = download_knowledge_db(
+        settings.knowledge_release_repo,
+        settings.compiler_ast_db_path,
+        asset_name="knowledge_db_ast.tar.gz",
+        archive_member="knowledge_db_ast",
+        projection="ast",
+        manifest_name="ast_manifest.json",
+        logger=logger,
+    )
+    logger.info(
+        "compiler_tools_artifacts_selected",
+        compiler_db_path=str(settings.compiler_db_path),
+        ast_db_path=str(settings.compiler_ast_db_path),
+        compiler_db_downloaded=compiler_db_downloaded,
+        ast_downloaded=compiler_ast_downloaded,
+    )
 
 # Initialize file-backed graph database
 graph_manager = GraphManager(settings.graph_db_path)
@@ -427,6 +463,15 @@ def _bg_auto_run_seeds():
 # and the execute_script tool — the agent designs and saves scripts that
 # the user reviews before running in a connected workspace.
 register_graph_tools(mcp, settings, graph_manager)
+if settings.compiler_tools:
+    register_compiler_tools(mcp, settings)
+    logger.info(
+        "compiler_tools_registered",
+        compiler_db_path=str(settings.compiler_db_path),
+        ast_db_path=str(settings.compiler_ast_db_path),
+    )
+else:
+    logger.info("compiler_tools_disabled", reason="MCP_COMPILER_TOOLS not enabled")
 register_script_tools(mcp, settings, graph_manager, offline_mode=_offline_mode)
 if _offline_mode:
     logger.info(
