@@ -133,15 +133,17 @@ def _compiler_cutover_gates(
     compiler_invariant_violations: list[InvariantViolation],
     compiler_traversal: dict,
 ) -> dict:
-    """Summarize whether compiler artifacts satisfy ADR-011 cutover gates."""
+    """Summarize whether compiler artifacts are releasable and default-flip ready."""
     parity_passed = bool(projection_parity.get("all_legacy_effectively_covered"))
     invariants_passed = not compiler_invariant_violations
     traversal_passed = int(compiler_traversal.get("failure_count", 0) or 0) == 0
+    artifact_release_passed = invariants_passed and traversal_passed
     return {
-        "passed": parity_passed and invariants_passed and traversal_passed,
+        "passed": artifact_release_passed,
         "parity_passed": parity_passed,
         "invariants_passed": invariants_passed,
         "traversal_passed": traversal_passed,
+        "default_flip_ready": parity_passed and artifact_release_passed,
     }
 
 
@@ -149,7 +151,6 @@ def _format_compiler_gate_failure(gates: dict) -> str:
     failed = [
         name
         for name, passed in (
-            ("parity", gates.get("parity_passed")),
             ("invariants", gates.get("invariants_passed")),
             ("traversal", gates.get("traversal_passed")),
         )
@@ -1243,9 +1244,10 @@ def main() -> None:
     parser.add_argument("--no-invariants", action="store_true",
                         help="Skip the post-flush invariant audit entirely.")
     parser.add_argument("--strict-compiler", action="store_true",
-                        help="Fail the build if compiler projection parity, "
-                             "compiler graph invariants, or compiler traversal "
-                             "health fail. Intended for release cutover gates.")
+                        help="Fail the build if compiler graph invariants or "
+                             "compiler traversal health fail. Projection parity is "
+                             "reported separately via "
+                             "compiler_cutover_gates.default_flip_ready.")
     parser.add_argument("--sample", type=int, default=0, metavar="N",
                         help="Dev/CI shortcut: skip spec sync, load cached specs from "
                              "<output-dir>/spec_cache (falling back to ./build/spec_cache "
