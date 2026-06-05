@@ -153,8 +153,29 @@ else:
 
 # ── Download knowledge DB from GitHub release (if configured) ─────────
 # Try to download knowledge DB before initializing graph
+_knowledge_asset_name = (
+    "knowledge_db_compiler.tar.gz"
+    if settings.knowledge_projection == "v2"
+    else "knowledge_db.tar.gz"
+)
+_knowledge_archive_member = (
+    "knowledge_db_compiler"
+    if settings.knowledge_projection == "v2"
+    else "knowledge_db"
+)
 knowledge_downloaded = download_knowledge_db(
-    settings.knowledge_release_repo, settings.graph_db_path, logger=logger
+    settings.knowledge_release_repo,
+    settings.graph_db_path,
+    asset_name=_knowledge_asset_name,
+    archive_member=_knowledge_archive_member,
+    projection=settings.knowledge_projection,
+    logger=logger,
+)
+logger.info(
+    "knowledge_projection_selected",
+    projection=settings.knowledge_projection,
+    asset=_knowledge_asset_name,
+    graph_db_path=str(settings.graph_db_path),
 )
 
 # Initialize file-backed graph database

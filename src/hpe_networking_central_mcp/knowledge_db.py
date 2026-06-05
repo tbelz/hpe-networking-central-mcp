@@ -41,8 +41,8 @@ def _stdlib_log(level: int):
     return _log
 
 
-def _read_local_release_tag(manifest_path: Path) -> str | None:
-    """Return the GitHub release tag recorded in the on-disk manifest, if any.
+def _read_local_manifest_state(manifest_path: Path) -> dict:
+    """Return release/install metadata from the on-disk manifest, if any.
 
     The manifest written by :func:`_write_local_manifest` carries an explicit
     ``release_tag`` field set from the GitHub release ``tag_name``. Older
@@ -51,17 +51,35 @@ def _read_local_release_tag(manifest_path: Path) -> str | None:
     template as the release tag, so we fall back to it for backward compat.
     """
     if not manifest_path.exists():
-        return None
+        return {}
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except Exception:
-        return None
+        return {}
     tag = manifest.get("release_tag") or manifest.get("version")
+    return {
+        "release_tag": tag if isinstance(tag, str) and tag else None,
+        "knowledge_asset": manifest.get("knowledge_asset"),
+        "knowledge_archive_member": manifest.get("knowledge_archive_member"),
+        "knowledge_projection": manifest.get("knowledge_projection"),
+    }
+
+
+def _read_local_release_tag(manifest_path: Path) -> str | None:
+    """Return the GitHub release tag recorded in the on-disk manifest, if any."""
+    state = _read_local_manifest_state(manifest_path)
+    tag = state.get("release_tag")
     return tag if isinstance(tag, str) and tag else None
 
 
 def _write_local_manifest(
-    extracted_manifest: Path, dest_manifest: Path, *, release_tag: str | None
+    extracted_manifest: Path,
+    dest_manifest: Path,
+    *,
+    release_tag: str | None,
+    asset_name: str = "knowledge_db.tar.gz",
+    archive_member: str = "knowledge_db",
+    projection: str = "legacy",
 ) -> None:
     """Copy the extracted manifest to ``dest_manifest`` and stamp the
     GitHub release ``tag_name`` so subsequent startups can short-circuit
@@ -76,6 +94,9 @@ def _write_local_manifest(
         return
     if release_tag:
         manifest["release_tag"] = release_tag
+    manifest["knowledge_asset"] = asset_name
+    manifest["knowledge_archive_member"] = archive_member
+    manifest["knowledge_projection"] = projection
     dest_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
@@ -83,6 +104,9 @@ def download_knowledge_db(
     repo: str,
     db_path: Path,
     *,
+    asset_name: str = "knowledge_db.tar.gz",
+    archive_member: str = "knowledge_db",
+    projection: str = "legacy",
     logger: Callable | None = None,
 ) -> bool:
     """Download the latest knowledge DB tar.gz from a GitHub release.
@@ -122,7 +146,8 @@ def download_knowledge_db(
         return False
 
     manifest_path = db_path.parent / "manifest.json"
-    local_tag = _read_local_release_tag(manifest_path)
+    local_state = _read_local_manifest_state(manifest_path)
+    local_tag = local_state.get("release_tag")
 
     api_url = f"https://api.github.com/repos/{repo}/releases/latest"
     try:
@@ -137,6 +162,7 @@ def download_knowledge_db(
             _info(
                 "knowledge_db_offline_using_local",
                 tag=local_tag,
+                asset=asset_name,
                 error=str(exc),
             )
             return False
@@ -148,24 +174,30 @@ def download_knowledge_db(
         remote_tag
         and local_tag == remote_tag
         and db_path.exists()
+        and _local_install_matches(
+            local_state,
+            asset_name=asset_name,
+            archive_member=archive_member,
+            projection=projection,
+        )
     ):
-        _info("knowledge_db_up_to_date", tag=remote_tag)
+        _info("knowledge_db_up_to_date", tag=remote_tag, asset=asset_name)
         return False
 
     asset_url = None
     for asset in release.get("assets", []):
-        if asset.get("name") == "knowledge_db.tar.gz":
+        if asset.get("name") == asset_name:
             asset_url = asset.get("browser_download_url")
             break
 
     if not asset_url:
-        _warn("knowledge_db_no_asset", release=remote_tag)
+        _warn("knowledge_db_no_asset", release=remote_tag, asset=asset_name)
         return False
 
     _info("knowledge_db_downloading", url=asset_url)
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            tar_path = Path(tmp) / "knowledge_db.tar.gz"
+            tar_path = Path(tmp) / asset_name
             with httpx.stream("GET", asset_url, timeout=_DOWNLOAD_TIMEOUT, follow_redirects=True) as r:
                 r.raise_for_status()
                 with open(tar_path, "wb") as f:
@@ -178,11 +210,11 @@ def download_knowledge_db(
                         raise ValueError(f"Unsafe tar member: {member.name}")
                 tf.extractall(tmp, filter="data")
 
-            extracted_db = Path(tmp) / "knowledge_db"
+            extracted_db = Path(tmp) / archive_member
             if not extracted_db.exists():
                 _warn(
                     "knowledge_db_extract_failed",
-                    reason="knowledge_db not found in archive",
+                    reason=f"{archive_member} not found in archive",
                 )
                 return False
 
@@ -197,13 +229,70 @@ def download_knowledge_db(
                 shutil.copy2(extracted_db, db_path)
 
             extracted_manifest = Path(tmp) / "manifest.json"
+            if not extracted_manifest.exists():
+                extracted_manifest = _download_manifest_asset(
+                    release,
+                    tmp_dir=Path(tmp),
+                )
             if extracted_manifest.exists():
                 _write_local_manifest(
-                    extracted_manifest, manifest_path, release_tag=remote_tag
+                    extracted_manifest,
+                    manifest_path,
+                    release_tag=remote_tag,
+                    asset_name=asset_name,
+                    archive_member=archive_member,
+                    projection=projection,
                 )
 
-            _info("knowledge_db_installed", tag=remote_tag)
+            _info("knowledge_db_installed", tag=remote_tag, asset=asset_name)
             return True
     except Exception as exc:
         _warn("knowledge_db_download_failed", error=str(exc))
         return False
+
+
+def _local_install_matches(
+    state: dict,
+    *,
+    asset_name: str,
+    archive_member: str,
+    projection: str,
+) -> bool:
+    """Return True when the local manifest describes the requested artifact.
+
+    Older manifests do not carry these fields. They are treated as legacy
+    runtime installs for backward compatibility, but never as compiler/v2
+    installs; otherwise a v2 boot could incorrectly reuse a same-release
+    legacy DB at the same ``GRAPH_DB_PATH``.
+    """
+    if asset_name == "knowledge_db.tar.gz" and archive_member == "knowledge_db":
+        return state.get("knowledge_asset") in {None, "", asset_name}
+    return (
+        state.get("knowledge_asset") == asset_name
+        and state.get("knowledge_archive_member") == archive_member
+        and state.get("knowledge_projection") == projection
+    )
+
+
+def _download_manifest_asset(release: dict, *, tmp_dir: Path) -> Path:
+    """Download the standalone ``manifest.json`` asset for sidecar archives.
+
+    The legacy runtime archive embeds the manifest. Compiler sidecars do not,
+    so v2 installs fetch the manifest asset separately and stamp it next to
+    the selected DB for the server's schema-version check.
+    """
+    manifest_url = None
+    for asset in release.get("assets", []):
+        if asset.get("name") == "manifest.json":
+            manifest_url = asset.get("browser_download_url")
+            break
+    if not manifest_url:
+        return tmp_dir / "manifest.json"
+
+    manifest_path = tmp_dir / "manifest.json"
+    with httpx.stream("GET", manifest_url, timeout=_DOWNLOAD_TIMEOUT, follow_redirects=True) as r:
+        r.raise_for_status()
+        with open(manifest_path, "wb") as f:
+            for chunk in r.iter_bytes(chunk_size=65536):
+                f.write(chunk)
+    return manifest_path

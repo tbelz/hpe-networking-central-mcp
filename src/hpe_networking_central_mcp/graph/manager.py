@@ -11,7 +11,16 @@ from typing import Any
 import real_ladybug as lb
 import structlog
 
-from .schema import ALTER_ADD_LAST_SYNCED_AT, KNOWLEDGE_NODE_TABLES, KNOWLEDGE_REL_TABLES, NODE_TABLES, POLICY_REL_TABLES, REL_TABLES, TOPOLOGY_REL_TABLES
+from .schema import (
+    ALTER_ADD_COMPILER_PROJECTION_COLUMNS,
+    ALTER_ADD_LAST_SYNCED_AT,
+    KNOWLEDGE_NODE_TABLES,
+    KNOWLEDGE_REL_TABLES,
+    NODE_TABLES,
+    POLICY_REL_TABLES,
+    REL_TABLES,
+    TOPOLOGY_REL_TABLES,
+)
 
 logger = structlog.get_logger("graph.manager")
 
@@ -68,16 +77,8 @@ class GraphManager:
 
         # Idempotent column-add migrations for pre-existing databases.
         # ALTER fails when the column already exists; that error is benign.
-        for stmt in ALTER_ADD_LAST_SYNCED_AT:
-            try:
-                conn.execute(stmt)
-            except Exception as exc:
-                msg = str(exc).lower()
-                if "already exists" in msg or "duplicate" in msg or "already has" in msg:
-                    logger.debug("alter_add_column_skipped", stmt=stmt, error=str(exc))
-                else:
-                    logger.error("alter_add_column_failed", stmt=stmt, error=str(exc))
-                    raise
+        for stmt in ALTER_ADD_LAST_SYNCED_AT + ALTER_ADD_COMPILER_PROJECTION_COLUMNS:
+            _execute_idempotent_alter(conn, stmt)
 
         # Load the algo extension
         try:
@@ -443,7 +444,9 @@ required fields without ever materialising a full skeleton.
   `allOf-composite`, `map`, `unresolved`), `required`,
   `enumValues`, `supportedDeviceTypes` (component-level lift of
   `x-supportedDeviceType` — lets you slice by device type without
-  descending to properties), `bodyJson` (full serialised component
+  descending to properties), `arrayKey` (from `x-key` on array/map-like
+  schemas), `constraintsJson` (generic JSON Schema/OpenAPI constraints),
+  `bodyJson` (full serialised component
   for deep inspection; empty when `kind = 'unresolved'`, i.e. an
   unresolvable `$ref` placeholder).
 - `Property` — one row per leaf property of a `SchemaComponent`,
@@ -457,7 +460,10 @@ required fields without ever materialising a full skeleton.
   extension — first-class for filtering), `yangPath` (typed extraction
   of the `x-path` vendor extension), `extensionsJson` (the **full**
   set of `x-*` vendor extensions for that property as a JSON string,
-  including the typed-extracted ones), `readOnly` (boolean).
+  including the typed-extracted ones), `readOnly` (boolean), plus
+  compiler-projection constraint columns: `pattern`, `defaultValue`,
+  `minimum`, `maximum`, `minLength`, `maxLength`,
+  `enumDescriptionsJson`, and `constraintsJson`.
 - `YangPath` — reverse index of every YANG path appearing on a
   `Property`. Properties: `yangPath` (PK, the full `/ac-foo:bar/...`
   string), `module` (the prefix, e.g. `ac-ntp`).
@@ -469,6 +475,8 @@ required fields without ever materialising a full skeleton.
   code (the status is stored on the `Response.status` property).
 - `(RequestBody)-[:BODY_REFERENCES]->(SchemaComponent)`
 - `(Response)-[:RESPONSE_REFERENCES]->(SchemaComponent)`
+- `(Parameter)-[:PARAMETER_REFERENCES]->(SchemaComponent)` — when a
+  parameter schema is a reusable or promoted schema component.
 - `(SchemaComponent)-[:HAS_PROPERTY]->(Property)` — every leaf
   property **declared directly** on the component. Walk
   `COMPOSED_OF*0..N` first to reach inherited fields from `allOf`
@@ -476,6 +484,10 @@ required fields without ever materialising a full skeleton.
 - `(Property)-[:PROPERTY_OF_TYPE]->(SchemaComponent)` — when a
   property's value is itself a named component (`$ref` or
   `items.$ref`).
+- `(Property)-[:HAS_ITEM_SCHEMA]->(SchemaComponent)` — array property
+  item schema. Use this for arrays; `PROPERTY_OF_TYPE` may point to the
+  same component for compatibility, but `HAS_ITEM_SCHEMA` names the
+  item role explicitly.
 - `(SchemaComponent)-[:COMPOSED_OF {kind}]->(SchemaComponent)` —
   records `allOf` / `oneOf` / `anyOf` composition; `kind` is the
   composition keyword. Synthetic inline components (sections =
@@ -766,3 +778,15 @@ traversals) use `query_graph()` directly.
             if self._db is None:
                 raise RuntimeError("Graph database is not initialized.")
             return lb.Connection(self._db)
+
+
+def _execute_idempotent_alter(conn: lb.Connection, stmt: str) -> None:
+    try:
+        conn.execute(stmt)
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "already exists" in msg or "duplicate" in msg or "already has" in msg:
+            logger.debug("alter_add_column_skipped", stmt=stmt, error=str(exc))
+            return
+        logger.error("alter_add_column_failed", stmt=stmt, error=str(exc))
+        raise

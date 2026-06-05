@@ -874,6 +874,8 @@ _COMPONENT_SCHEMA = pa.schema([
     ("enumValues", pa.list_(pa.string())),
     ("supportedDeviceTypes", pa.list_(pa.string())),
     ("bodyJson", pa.string()),
+    ("arrayKey", pa.list_(pa.string())),
+    ("constraintsJson", pa.string()),
 ])
 
 _PROPERTY_SCHEMA = pa.schema([
@@ -889,6 +891,14 @@ _PROPERTY_SCHEMA = pa.schema([
     ("yangPath", pa.string()),
     ("extensionsJson", pa.string()),
     ("readOnly", pa.bool_()),
+    ("pattern", pa.string()),
+    ("defaultValue", pa.string()),
+    ("minimum", pa.float64()),
+    ("maximum", pa.float64()),
+    ("minLength", pa.int64()),
+    ("maxLength", pa.int64()),
+    ("enumDescriptionsJson", pa.string()),
+    ("constraintsJson", pa.string()),
 ])
 
 _YANG_PATH_SCHEMA = pa.schema([
@@ -949,6 +959,8 @@ def _rows_to_pa(rows: list[dict], schema: pa.Schema) -> pa.Table:
                     v = []
                 elif pa.types.is_boolean(f.type):
                     v = False
+                elif pa.types.is_floating(f.type) or pa.types.is_integer(f.type):
+                    v = None
             cols[f.name].append(v)
     return pa.table(cols, schema=schema)
 

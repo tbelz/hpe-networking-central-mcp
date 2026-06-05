@@ -44,16 +44,22 @@ def _make_tarball(members: dict[str, bytes] | None = None) -> bytes:
     return buf.getvalue()
 
 
-def _release_payload(asset_url: str = "https://example.invalid/asset.tar.gz",
-                     tag: str = "knowledge-db-test") -> dict:
-    return {
-        "tag_name": tag,
-        "assets": [
+def _release_payload(
+    asset_url: str = "https://example.invalid/asset.tar.gz",
+    tag: str = "knowledge-db-test",
+    *,
+    assets: list[dict] | None = None,
+) -> dict:
+    if assets is None:
+        assets = [
             {
                 "name": "knowledge_db.tar.gz",
                 "browser_download_url": asset_url,
             }
-        ],
+        ]
+    return {
+        "tag_name": tag,
+        "assets": assets,
     }
 
 
@@ -118,6 +124,57 @@ def test_happy_path_extracts_db_and_manifest(tmp_path, monkeypatch):
     manifest = (tmp_path / "manifest.json")
     assert manifest.exists()
     assert json.loads(manifest.read_text())["schema_version"] == 3
+
+
+def test_happy_path_extracts_compiler_sidecar_and_manifest_asset(tmp_path, monkeypatch):
+    tarball = _make_tarball({"knowledge_db_compiler/db.lbd": b"compiler-db"})
+    compiler_url = "https://example.invalid/knowledge_db_compiler.tar.gz"
+    manifest_url = "https://example.invalid/manifest.json"
+    manifest_payload = json.dumps({"schema_version": 10}).encode()
+
+    def handler(request):
+        url = str(request.url)
+        if "api.github.com" in url:
+            return httpx.Response(
+                200,
+                json=_release_payload(
+                    compiler_url,
+                    tag="knowledge-db-v2",
+                    assets=[
+                        {
+                            "name": "knowledge_db_compiler.tar.gz",
+                            "browser_download_url": compiler_url,
+                        },
+                        {
+                            "name": "manifest.json",
+                            "browser_download_url": manifest_url,
+                        },
+                    ],
+                ),
+            )
+        if url == compiler_url:
+            return httpx.Response(200, content=tarball)
+        if url == manifest_url:
+            return httpx.Response(200, content=manifest_payload)
+        return httpx.Response(404)
+
+    _install_transport(monkeypatch, handler)
+
+    db_path = tmp_path / "graph.db"
+    assert download_knowledge_db(
+        "owner/repo",
+        db_path,
+        asset_name="knowledge_db_compiler.tar.gz",
+        archive_member="knowledge_db_compiler",
+        projection="v2",
+    ) is True
+    assert (db_path / "db.lbd").read_bytes() == b"compiler-db"
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["schema_version"] == 10
+    assert manifest["release_tag"] == "knowledge-db-v2"
+    assert manifest["knowledge_asset"] == "knowledge_db_compiler.tar.gz"
+    assert manifest["knowledge_archive_member"] == "knowledge_db_compiler"
+    assert manifest["knowledge_projection"] == "v2"
 
 
 def test_happy_path_replaces_existing_db_dir(tmp_path, monkeypatch):
@@ -221,6 +278,60 @@ def test_skips_download_when_local_tag_matches_release(tmp_path, monkeypatch):
     assert (db_path / "db.lbd").read_bytes() == b"existing"
 
 
+def test_v2_request_does_not_reuse_same_release_legacy_install(tmp_path, monkeypatch):
+    db_path = tmp_path / "kdb"
+    db_path.mkdir()
+    (db_path / "db.lbd").write_bytes(b"legacy")
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"release_tag": "knowledge-db-test", "schema_version": 10})
+    )
+    compiler_url = "https://example.invalid/knowledge_db_compiler.tar.gz"
+    manifest_url = "https://example.invalid/manifest.json"
+    download_calls: list[str] = []
+
+    def handler(request):
+        url = str(request.url)
+        if "api.github.com" in url:
+            return httpx.Response(
+                200,
+                json=_release_payload(
+                    compiler_url,
+                    tag="knowledge-db-test",
+                    assets=[
+                        {
+                            "name": "knowledge_db_compiler.tar.gz",
+                            "browser_download_url": compiler_url,
+                        },
+                        {
+                            "name": "manifest.json",
+                            "browser_download_url": manifest_url,
+                        },
+                    ],
+                ),
+            )
+        download_calls.append(url)
+        if url == compiler_url:
+            return httpx.Response(
+                200,
+                content=_make_tarball({"knowledge_db_compiler/db.lbd": b"compiler"}),
+            )
+        if url == manifest_url:
+            return httpx.Response(200, content=json.dumps({"schema_version": 10}).encode())
+        return httpx.Response(404)
+
+    _install_transport(monkeypatch, handler)
+
+    assert download_knowledge_db(
+        "owner/repo",
+        db_path,
+        asset_name="knowledge_db_compiler.tar.gz",
+        archive_member="knowledge_db_compiler",
+        projection="v2",
+    ) is True
+    assert download_calls == [compiler_url, manifest_url]
+    assert (db_path / "db.lbd").read_bytes() == b"compiler"
+
+
 def test_falls_back_to_local_when_release_api_unreachable(tmp_path, monkeypatch):
     """Spotty network: GitHub API call raises. With a local DB on disk,
     keep using it instead of failing startup."""
@@ -260,4 +371,3 @@ def test_install_writes_release_tag_into_manifest(tmp_path, monkeypatch):
     assert manifest["release_tag"] == "knowledge-db-stamped"
     # Original schema_version field from the tarball manifest preserved.
     assert manifest["schema_version"] == 3
-

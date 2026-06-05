@@ -455,6 +455,8 @@ def _seed_component_with_body(conn, component_id: str, body_json: str) -> None:
                 "enumValues": [[]],
                 "supportedDeviceTypes": [[]],
                 "bodyJson": [body_json],
+                "arrayKey": [[]],
+                "constraintsJson": [""],
             })
         },
     )
