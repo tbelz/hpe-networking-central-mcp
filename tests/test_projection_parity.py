@@ -165,6 +165,48 @@ def test_projection_parity_classifies_alternate_reachable_targets(
         compiler_db.close()
 
 
+def test_projection_parity_keeps_missing_multi_target_context_effective(
+    repo_tmp_path: Path,
+) -> None:
+    legacy_db = _make_db(repo_tmp_path / "legacy")
+    compiler_db = _make_db(repo_tmp_path / "compiler")
+    try:
+        legacy_conn = lb.Connection(legacy_db)
+        compiler_conn = lb.Connection(compiler_db)
+        for conn, include_second_branch in (
+            (legacy_conn, True),
+            (compiler_conn, False),
+        ):
+            _seed_component(conn, "central:schemas:Root")
+            _seed_component(conn, "central:schemas:BranchA")
+            _seed_component(conn, "central:schemas:BranchB")
+            conn.execute(
+                """
+                MATCH (root:SchemaComponent {component_id: 'central:schemas:Root'}),
+                      (branch:SchemaComponent {component_id: 'central:schemas:BranchA'})
+                CREATE (root)-[:COMPOSED_OF {kind: 'allOf'}]->(branch)
+                """
+            )
+            if include_second_branch:
+                conn.execute(
+                    """
+                    MATCH (root:SchemaComponent {component_id: 'central:schemas:Root'}),
+                          (branch:SchemaComponent {component_id: 'central:schemas:BranchB'})
+                    CREATE (root)-[:COMPOSED_OF {kind: 'allOf'}]->(branch)
+                    """
+                )
+
+        report = compute_projection_parity(legacy_conn, compiler_conn)
+
+        composition_check = report["checks"]["composition"]
+        assert composition_check["legacy_missing_count"] == 1
+        assert composition_check["legacy_alternate_target_count"] == 0
+        assert composition_check["legacy_effective_missing_count"] == 1
+    finally:
+        legacy_db.close()
+        compiler_db.close()
+
+
 def test_compiler_projection_covers_legacy_structural_schema_identities(
     repo_tmp_path: Path,
 ) -> None:
@@ -302,6 +344,30 @@ def _seed_endpoint(conn, *, method: str, path: str) -> None:
             "endpoint_id": f"{method}:{path}",
             "method": method,
             "path": path,
+        },
+    )
+
+
+def _seed_component(conn, component_id: str) -> None:
+    conn.execute(
+        """
+        CREATE (:SchemaComponent {
+          component_id: $component_id,
+          spec_source: 'central',
+          section: 'schemas',
+          name: $name,
+          type: 'object',
+          kind: 'object',
+          bodyShape: 'object',
+          required: [],
+          enumValues: [],
+          supportedDeviceTypes: [],
+          bodyJson: '{"type":"object"}'
+        })
+        """,
+        parameters={
+            "component_id": component_id,
+            "name": component_id.rsplit(":", 1)[-1],
         },
     )
 

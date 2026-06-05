@@ -245,15 +245,20 @@ def _alternate_target_missing_keys(
     if context_fields is None:
         return []
     alias_key_set = set(alias_equivalent_keys)
-    compiler_contexts = {
-        _context_key(check_name, row, context_fields)
-        for row in compiler.values()
-    }
+    legacy_context_counts = _context_counts(check_name, legacy.values(), context_fields)
+    compiler_context_counts = _context_counts(check_name, compiler.values(), context_fields)
     return [
         key
         for key in missing_keys
         if key not in alias_key_set
-        and _context_key(check_name, legacy[key], context_fields) in compiler_contexts
+        and legacy_context_counts.get(
+            _context_key(check_name, legacy[key], context_fields),
+            0,
+        ) == 1
+        and compiler_context_counts.get(
+            _context_key(check_name, legacy[key], context_fields),
+            0,
+        ) == 1
     ]
 
 
@@ -300,6 +305,18 @@ def _context_key(
 ) -> str:
     semantic = _semantic_row(check_name, row)
     return _key({field: semantic.get(field, "") for field in context_fields})
+
+
+def _context_counts(
+    check_name: str,
+    rows: Any,
+    context_fields: tuple[str, ...],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        key = _context_key(check_name, row, context_fields)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def _normalize_component_id(value: str) -> str:
