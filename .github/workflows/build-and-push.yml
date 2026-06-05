@@ -114,6 +114,7 @@ jobs:
     needs: merge
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       packages: read
 
     steps:
