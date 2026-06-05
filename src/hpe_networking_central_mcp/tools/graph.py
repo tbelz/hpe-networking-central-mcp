@@ -585,16 +585,30 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
     def query_api_schema(cypher: str = "", parameters: str = "{}", queries: list[dict] | None = None) -> str:
         """Cypher over the OpenAPI subgraph: endpoints, schemas, properties, YANG.
 
-        Main nodes: ``ApiEndpoint``, ``Parameter``, ``RequestBody``,
+        Nodes: ``ApiEndpoint``, ``Parameter``, ``RequestBody``,
         ``Response``, ``SchemaComponent``, ``Property``, ``YangPath``.
-        Main edges: ``HAS_*``, ``BODY_REFERENCES``,
-        ``RESPONSE_REFERENCES``, ``PARAMETER_REFERENCES``,
-        ``COMPOSED_OF``, ``PROPERTY_OF_TYPE``, ``HAS_ITEM_SCHEMA``,
-        ``HAS_VALUE_SCHEMA``, ``PROPERTY_AT_YANG``, ``CONFIGURES_YANG``.
+        Edges: ``HAS_*``, ``BODY_REFERENCES``,
+        ``RESPONSE_REFERENCES``, ``PARAMETER_REFERENCES``, ``COMPOSED_OF``,
+        ``PROPERTY_OF_TYPE``, ``HAS_ITEM_SCHEMA``, ``HAS_VALUE_SCHEMA``,
+        ``PROPERTY_AT_YANG``, ``CONFIGURES_YANG``.
         Full schema and more examples: ``graph://schema``.
 
-        Canonical request-body walk. Properties live only on the declaring
-        component; use ``COMPOSED_OF*0..5`` for allOf/promoted inline fields:
+        First contact for a path: batch endpoint/params and top body fields:
+
+        ```cypher
+        MATCH (e:ApiEndpoint {method: $m, path: $p})
+        OPTIONAL MATCH (e)-[:HAS_PARAMETER]->(param:Parameter)
+        OPTIONAL MATCH (e)-[:HAS_REQUEST_BODY]->(:RequestBody)
+                 -[:BODY_REFERENCES]->(root:SchemaComponent)
+        OPTIONAL MATCH (root)-[:COMPOSED_OF*0..5]->(c:SchemaComponent)
+                 -[:HAS_PROPERTY]->(prop:Property)
+        RETURN e.operationId, param.name, param.required,
+               c.name AS declaredOn, prop.name, prop.type, prop.required
+        LIMIT 80
+        ```
+
+        Request-body walk. Properties live on the declaring component; use
+        ``COMPOSED_OF*0..5`` for allOf/promoted inline fields:
 
         ```cypher
         MATCH (e:ApiEndpoint {method: $m, path: $p})
@@ -611,21 +625,10 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
                p.enumValues, p.yangPath, p.constraintsJson,
                child.component_id AS childSchema,
                item.component_id AS itemSchema
-        ORDER BY declaredOn, p.required DESC, p.name
         ```
 
         Nested object: follow ``PROPERTY_OF_TYPE``. Array item shape:
-        follow ``HAS_ITEM_SCHEMA``. Then recurse into the child component's
-        ``COMPOSED_OF*0..5`` / ``HAS_PROPERTY`` tree.
-
-        Required parameters:
-
-        ```cypher
-        MATCH (e:ApiEndpoint {method: $m, path: $p})
-              -[:HAS_PARAMETER]->(p:Parameter {required: true})
-        OPTIONAL MATCH (p)-[:PARAMETER_REFERENCES]->(schema:SchemaComponent)
-        RETURN p.name, p.location, p.type, schema.component_id AS schema
-        ```
+        follow ``HAS_ITEM_SCHEMA``. Recurse into the child component's tree.
 
         Args:
             cypher: Read-only Cypher.
@@ -769,24 +772,20 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
     )
     def query_yang(cypher: str = "", parameters: str = "{}", queries: list[dict] | None = None) -> str:
-        """Cypher over the YANG reverse-index subgraph (Phase 3).
+        """Cypher over the YANG, CLI, and config-profile reverse indexes.
 
-        Lets you map a known YANG path (e.g. from a legacy CLI/YANG config)
-        back to the API endpoints that configure it, or to the
-        property/schema-component where it surfaces.
+        Map YANG paths or legacy CLI/config keywords to Central API
+        endpoints and schema properties.
 
-        Node tables: ``YangPath(yangPath PK, module)``,
+        Nodes: ``YangPath(yangPath PK, module)``,
         ``YangModule(module PK)``, ``CliCommand(command_id PK,
         commandName, commandUse, parentCommand, pathToPrint, paramKeys)``.
+        ``CliCommand`` comes from OpenAPI ``x-cliParam``.
 
-        Edges:
+        Edges: ``PROPERTY_AT_YANG``, ``CONFIGURES_YANG``, ``IN_MODULE``,
+        ``HAS_CLI_COMMAND``.
 
-        - ``(Property)-[:PROPERTY_AT_YANG]->(YangPath)`` — direct.
-        - ``(ApiEndpoint)-[:CONFIGURES_YANG]->(YangPath)`` — derived.
-        - ``(YangPath)-[:IN_MODULE]->(YangModule)`` — module index.
-        - ``(ApiEndpoint)-[:HAS_CLI_COMMAND]->(CliCommand)`` — CLI bridge.
-
-        ## Canonical: endpoint → YANG paths it touches
+        ## Endpoint → YANG paths
 
         ```cypher
         MATCH (e:ApiEndpoint {method: $m, path: $p})
@@ -794,33 +793,32 @@ def register_graph_tools(mcp, settings: Settings, graph: GraphManager):
         RETURN y.yangPath, y.module ORDER BY y.yangPath
         ```
 
-        ## Canonical: YANG path → endpoints (reverse)
+        ## YANG path → endpoints and properties
 
         ```cypher
         MATCH (e:ApiEndpoint)-[:CONFIGURES_YANG]->(:YangPath {yangPath: $yp})
-        RETURN DISTINCT e.method, e.path
-        ```
-
-        ## Canonical: YANG path → properties that surface it
-
-        ```cypher
         MATCH (p:Property)-[:PROPERTY_AT_YANG]->(:YangPath {yangPath: $yp})
-        MATCH (c:SchemaComponent {component_id: p.parent_component_id})
-        RETURN c.name AS schema, p.name, p.type
+        RETURN DISTINCT e.method, e.path, p.parent_component_id, p.name, p.type
         ```
 
-        ## All YANG paths in a module
-
-        ``MATCH (y:YangPath {module: $mod}) RETURN y.yangPath``
-        (module = path prefix, e.g. ``ac-ntp``).
-
-        ## CANONICAL — CLI bridge: keyword → property → YANG → CLI + API
+        ## CLI keyword → endpoint/config profile
 
         ```cypher
-        CALL QUERY_FTS_INDEX('Property','property_fts', $keyword)
+        MATCH (e:ApiEndpoint)-[:HAS_CLI_COMMAND]->(cli:CliCommand)
+        WHERE toLower(coalesce(cli.commandName,'')) CONTAINS toLower($keyword)
+           OR toLower(coalesce(cli.commandUse,'')) CONTAINS toLower($keyword)
+           OR toLower(coalesce(cli.parentCommand,'')) CONTAINS toLower($keyword)
+        RETURN e.method, e.path, e.summary, cli.commandName, cli.commandUse,
+               cli.parentCommand, cli.pathToPrint, cli.paramKeys
+        LIMIT 25
+        ```
+
+        ## Property keyword → YANG → CLI + API
+
+        ```cypher
+        CALL QUERY_FTS_INDEX('Property','property_fts',$keyword)
         YIELD node AS p, score
-        MATCH (p)-[:PROPERTY_AT_YANG]->(yp:YangPath)
-              -[:IN_MODULE]->(m:YangModule)
+        MATCH (p)-[:PROPERTY_AT_YANG]->(yp:YangPath)-[:IN_MODULE]->(m:YangModule)
         OPTIONAL MATCH (e:ApiEndpoint)-[:CONFIGURES_YANG]->(yp)
         OPTIONAL MATCH (e)-[:HAS_CLI_COMMAND]->(cli:CliCommand)
         RETURN p.name, p.parent_component_id, yp.yangPath, m.module,

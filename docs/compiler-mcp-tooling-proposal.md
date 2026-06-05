@@ -1,11 +1,21 @@
 # Compiler-Backed MCP Tooling Proposal
 
-Status: proposal, not implemented in the live MCP runtime.
+Status: superseded by the graph-first v2 smoke-test decision.
 
-This document sketches the tool surface that should sit on top of the
-ADR-011 compiler pipeline once the compiler artifacts are ready to become
-agent-facing. It intentionally does not change `tools/graph.py`, live tool
-descriptions, schema versioning, or runtime database loading.
+The initial proposal below explored deterministic compiler context tools as
+the primary agent-facing API discovery surface. Agent smoke testing showed
+that this created a second mental model beside the Cypher graph aliases and
+introduced separate persisted-DB open paths. The current direction is:
+
+- keep routine API discovery on `query_fts`, `query_api_schema`, and
+  `query_yang`, all backed by the shared runtime graph connection;
+- keep `get_raw_schema` as the graph-level raw OpenAPI escape hatch;
+- expose compiler sidecars only for provenance (`get_openapi_source_detail`)
+  and release diagnostics (`get_compiler_graph_health`).
+
+The original proposal below sketches an alternate tool surface on top of
+ADR-011 compiler artifacts. Keep it as design history; do not treat it as
+the current implementation target.
 
 ## Current State
 
@@ -35,12 +45,13 @@ provenance remains the escape hatch for every source attribute and vendor
 extension. Adding a convenience column must never be required merely to
 prevent source-data loss.
 
-Recently added compiler-only readers already prove this shape:
+Compiler-only readers already prove this shape internally:
 
 - `detail_reader.py`: resolves a typed projection row to projection data,
   provenance, optional semantic summary, and raw L1 OpenAPI JSON.
 - `traversal_reader.py`: returns endpoint-centered and schema-centered
-  contexts from the compiler projection, including provenance detail.
+  contexts from the compiler projection, including provenance detail. These
+  are internal validation helpers, not the current MCP tool surface.
 - `traversal_report.py` and `scripts/report_compiler_traversal.py`: sample
   persisted compiler artifacts and report traversal success/failures.
 
@@ -210,28 +221,20 @@ Implementation path:
 - In normal agent sessions, return manifest/report summaries rather than
   running expensive full-corpus scans on demand.
 
-## Tool Description Changes Later
+## Current Tool Description Direction
 
-Do not change live tool descriptions until the server can actually open the
-compiler artifacts.
+The live descriptions now keep the graph aliases as the normal agent path:
 
-When that is true, update the descriptions in this direction:
-
-- `query_api_schema`: describe it as an expert Cypher fallback. The first
-  recommendation should become `find_api_endpoints`,
-  `get_api_endpoint_context`, and `get_api_schema_context`.
-- `query_graph`: keep as the cross-domain escape hatch, but do not teach
-  routine API schema discovery primarily through Cypher examples.
-- `get_raw_schema`: either keep for legacy `knowledge_db` or deprecate in
-  favor of `get_openapi_source_detail` once compiler artifacts are live.
-- `query_yang`: keep for explicit YANG graph analysis, but endpoint-to-YANG
-  lookup should also be visible through endpoint context.
-
-Suggested wording principle:
-
-> Use deterministic compiler context tools for normal API discovery. Use
-> Cypher only when you need custom graph analysis that the context tools do
-> not yet provide.
+- `query_fts`: keyword discovery over endpoint, property, doc, script, and
+  runtime indexes.
+- `query_api_schema`: endpoint, parameter, request-body, response, and schema
+  traversal, including `COMPOSED_OF*0..5`, `PROPERTY_OF_TYPE`, and
+  `HAS_ITEM_SCHEMA`.
+- `query_yang`: YANG/CLI reverse mapping through `YangPath`, `CliCommand`,
+  `CONFIGURES_YANG`, `PROPERTY_AT_YANG`, and `HAS_CLI_COMMAND`.
+- `get_raw_schema`: raw OpenAPI JSON for a known `SchemaComponent`.
+- `get_openapi_source_detail`: compiler sidecar provenance/source detail for
+  a known projection row.
 
 ## Migration Plan
 

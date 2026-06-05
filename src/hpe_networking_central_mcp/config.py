@@ -91,11 +91,7 @@ def load_settings() -> Settings:
     elif knowledge_projection != "legacy":
         knowledge_projection = "legacy"
     graph_db_path = Path(os.environ.get("GRAPH_DB_PATH", "/data/graph_db"))
-    default_compiler_db_path = (
-        graph_db_path
-        if knowledge_projection == "v2"
-        else graph_db_path.parent / "knowledge_db_compiler"
-    )
+    default_compiler_db_path = graph_db_path.parent / "knowledge_db_compiler"
     return Settings(
         central_base_url=os.environ.get("CENTRAL_BASE_URL", "").strip().rstrip("/"),
         central_client_id=os.environ.get("CENTRAL_CLIENT_ID", "").strip(),
