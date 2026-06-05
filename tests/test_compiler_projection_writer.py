@@ -11,6 +11,7 @@ import pytest
 import real_ladybug as lb
 
 from hpe_networking_central_mcp.compiler.ast_builder import build_ast_graph
+from hpe_networking_central_mcp.compiler.catalog_identity import canonical_body_hash
 from hpe_networking_central_mcp.compiler.projection_writer import (
     build_compiler_projection_database,
 )
@@ -420,7 +421,7 @@ def test_projection_uses_lineage_ids_for_inline_schema_branches(
         db.close()
 
 
-def test_projection_richest_schema_keeps_matching_provenance(
+def test_projection_keeps_distinct_same_name_component_variants(
     repo_tmp_path: Path,
 ) -> None:
     rich_spec = {
@@ -454,24 +455,199 @@ def test_projection_richest_schema_keeps_matching_provenance(
     db = lb.Database(str(db_path), max_db_size=256 * 1024 * 1024)
     conn = lb.Connection(db)
     try:
+        rich_id = "central:schemas:Shared"
+        stub_id = "central:schemas:Shared@" + canonical_body_hash(
+            stub_spec["components"]["schemas"]["Shared"]
+        )[:12]
         rows = list(
             conn.execute(
                 """
-                MATCH (component:SchemaComponent {component_id: 'central:schemas:Shared'}),
-                      (provenance:CompilerProjectionMap {
-                        row_id: 'central:schemas:Shared',
-                        table_name: 'SchemaComponent'
-                      })
-                RETURN component.bodyJson AS body_json,
+                MATCH (component:SchemaComponent)
+                WHERE component.component_id IN [$rich_id, $stub_id]
+                OPTIONAL MATCH (component)-[:HAS_PROPERTY]->(prop:Property)
+                WITH component, COUNT(prop) AS property_count
+                MATCH (provenance:CompilerProjectionMap {
+                  row_id: component.component_id,
+                  table_name: 'SchemaComponent'
+                })
+                RETURN component.component_id AS component_id,
+                       component.bodyJson AS body_json,
+                       property_count,
                        provenance.source AS source,
                        provenance.json_pointer AS json_pointer
+                ORDER BY component.component_id
+                """,
+                parameters={"rich_id": rich_id, "stub_id": stub_id},
+            ).rows_as_dict()
+        )
+        assert {
+            row["component_id"]: row
+            for row in rows
+        } == {
+            rich_id: {
+                "component_id": rich_id,
+                "body_json": '{"type":"object","properties":{"name":{"type":"string"}}}',
+                "property_count": 1,
+                "source": "central/rich",
+                "json_pointer": "/components/schemas/Shared",
+            },
+            stub_id: {
+                "component_id": stub_id,
+                "body_json": '{"type":"object"}',
+                "property_count": 0,
+                "source": "central/stub",
+                "json_pointer": "/components/schemas/Shared",
+            },
+        }
+    finally:
+        db.close()
+
+
+def test_projection_component_variant_ids_are_input_order_independent(
+    repo_tmp_path: Path,
+) -> None:
+    alpha_spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "Alpha", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Shared": {
+                    "type": "object",
+                    "properties": {
+                        "alpha": {"type": "string"},
+                        "alphaExtra": {"type": "boolean"},
+                    },
+                }
+            }
+        },
+    }
+    beta_spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "Beta", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Shared": {
+                    "type": "object",
+                    "properties": {"beta": {"type": "integer"}},
+                }
+            }
+        },
+    }
+    alpha_ast = build_ast_graph(alpha_spec, source="central/alpha")
+    beta_ast = build_ast_graph(beta_spec, source="central/beta")
+
+    def component_ids(db_path: Path, asts: list) -> set[str]:
+        build_compiler_projection_database(
+            db_path,
+            asts,
+            [build_semantic_overlay(ast) for ast in asts],
+        )
+        db = lb.Database(str(db_path), max_db_size=256 * 1024 * 1024)
+        try:
+            return {
+                row["component_id"]
+                for row in lb.Connection(db)
+                .execute(
+                    """
+                    MATCH (component:SchemaComponent)
+                    RETURN component.component_id AS component_id
+                    """
+                )
+                .rows_as_dict()
+            }
+        finally:
+            db.close()
+
+    forward_ids = component_ids(
+        repo_tmp_path / "knowledge_db_compiler_forward",
+        [alpha_ast, beta_ast],
+    )
+    reverse_ids = component_ids(
+        repo_tmp_path / "knowledge_db_compiler_reverse",
+        [beta_ast, alpha_ast],
+    )
+
+    assert forward_ids == reverse_ids
+    assert forward_ids == {
+        "central:schemas:Shared",
+        "central:schemas:Shared@" + canonical_body_hash(
+            beta_spec["components"]["schemas"]["Shared"]
+        )[:12],
+    }
+
+
+def test_projection_merges_identical_component_rows_with_multiple_provenance(
+    repo_tmp_path: Path,
+) -> None:
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "One", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Shared": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                }
+            }
+        },
+    }
+    first_ast = build_ast_graph(spec, source="central/one")
+    second_spec = {
+        **spec,
+        "info": {"title": "Two", "version": "1.0"},
+    }
+    second_ast = build_ast_graph(second_spec, source="central/two")
+    db_path = repo_tmp_path / "knowledge_db_compiler_identical"
+    stats = build_compiler_projection_database(
+        db_path,
+        [first_ast, second_ast],
+        [build_semantic_overlay(first_ast), build_semantic_overlay(second_ast)],
+    )
+
+    db = lb.Database(str(db_path), max_db_size=256 * 1024 * 1024)
+    conn = lb.Connection(db)
+    try:
+        assert stats["catalog_identity"]["conflicting_named_identity_count"] == 0
+        assert stats["catalog_identity"]["identical_named_identity_merge_count"] >= 1
+        component_rows = list(
+            conn.execute(
+                """
+                MATCH (component:SchemaComponent {component_id: 'central:schemas:Shared'})
+                RETURN component.component_id AS component_id,
+                       component.bodyJson AS body_json
                 """
             ).rows_as_dict()
         )
-        assert rows == [
+        assert component_rows == [
             {
-                "body_json": '{"type":"object","properties":{"name":{"type":"string"}}}',
-                "source": "central/rich",
+                "component_id": "central:schemas:Shared",
+                "body_json": '{"type":"object","properties":{"id":{"type":"string"}}}',
+            }
+        ]
+
+        provenance_rows = list(
+            conn.execute(
+                """
+                MATCH (provenance:CompilerProjectionMap {
+                  row_id: 'central:schemas:Shared',
+                  table_name: 'SchemaComponent'
+                })
+                RETURN provenance.source AS source,
+                       provenance.json_pointer AS json_pointer
+                ORDER BY provenance.source
+                """
+            ).rows_as_dict()
+        )
+        assert provenance_rows == [
+            {
+                "source": "central/one",
+                "json_pointer": "/components/schemas/Shared",
+            },
+            {
+                "source": "central/two",
                 "json_pointer": "/components/schemas/Shared",
             }
         ]
