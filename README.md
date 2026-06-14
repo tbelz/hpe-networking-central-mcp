@@ -5,86 +5,92 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://python.org)
 
-MCP Server for **HPE Aruba Networking Central** and the **HPE GreenLake Platform**.
+MCP server for **HPE Aruba Networking Central** and the **HPE GreenLake Platform**.
+It gives an MCP client a graph-backed API catalog, live Central/GreenLake API
+calls when credentials are configured, and a reusable Python script library for
+network automation workflows.
 
-The agent manages network devices through a combination of direct API calls and
-reusable Python scripts, with full access to both the Central API and the
-GreenLake Platform API. The OpenAPI surface of both platforms is decomposed
-into a LadybugDB graph at build time, so `query_graph` (Cypher) is the primary
-tool for endpoint and schema discovery — the agent walks `ApiEndpoint`,
-`Parameter`, `RequestBody`, `Response`, `SchemaComponent`, and `Property`
-nodes instead of paging through raw OpenAPI blobs.
+The current agent-facing discovery surface is graph-first. Routine endpoint,
+schema, CLI/YANG, and topology lookup should use the focused graph aliases
+(`query_fts`, `query_api_schema`, `query_yang`, `query_topology`) before falling
+back to broad `query_graph` Cypher. Compiler artifacts can be enabled for
+provenance and release-health diagnostics, but they are not a separate endpoint
+discovery tool surface.
+
+## What It Provides
+
+- OpenAPI discovery for Central and GreenLake from a pre-built LadybugDB graph.
+- Focused Cypher tools for API/schema traversal, full-text search, topology, and
+  YANG/CLI reverse lookup.
+- Authenticated Central and GreenLake API tools in connected mode.
+- Stateless pre-flight API validation against the graph before live API calls.
+- A script library with seed scripts, editable saved scripts, and optional
+  execution with `central_helpers` injected.
+- Discovery-only and read-only modes for safer review and audit workflows.
+- Optional compiler/v2 projection support for smoke testing, provenance, and
+  graph-health diagnostics.
 
 ## Architecture
 
-```
-┌─────────────────────────┐
-│      MCP Client         │
-│  (VS Code / Claude)     │
-└──────────┬──────────────┘
-           │ stdio (JSON-RPC)
-┌──────────▼─────────────────────────────────────────────────────────────┐
-│   MCP Server (FastMCP)                                                 │
-│                                                                        │
-│  Tools                                                                 │
-│  ├─ query_graph                    Cypher reads against LadybugDB      │
-│  ├─ write_graph                    Cypher writes to enrich the graph   │
-│  ├─ call_central_api               Central REST API                    │
-│  ├─ call_greenlake_api             GreenLake Platform API              │
-│  ├─ list_scripts / get_script_content / save_script                    │
-│  └─ execute_script                 Run scripts with central_helpers    │
-│                                                                        │
-│  Resources                                                             │
-│  ├─ api://endpoint-catalog         Full METHOD /path catalog           │
-│  ├─ docs://endpoint-catalog        Alias for clients filtering api://  │
-│  ├─ graph://schema                 Live LadybugDB schema + Cypher      │
-│  ├─ graph://seed-status            Startup seed execution results      │
-│  ├─ docs://central/overview        Central + GreenLake API overview    │
-│  ├─ docs://script-writing-guide    Script template + helpers ref       │
-│  ├─ docs://config-workflows        Hierarchy / scope / effective cfg   │
-│  ├─ docs://vsg/list, docs://vsg/{id}  Validated Solution Guide pages   │
-│  └─ script://seeds                 Pre-built seed scripts metadata     │
-│                                                                        │
-│  Prompts                                                               │
-│  └─ analyze_inventory · analyze_config · troubleshoot_device · write_script │
-└────────────────────────────────────────────────────────────────────────┘
+```text
+MCP client
+  |
+  | stdio JSON-RPC
+  v
+FastMCP server
+  |
+  |-- graph tools
+  |     query_fts, query_api_schema, query_yang, query_topology
+  |     query_graph, write_graph, get_raw_schema
+  |
+  |-- live API tools, only with credentials
+  |     call_central_api, call_greenlake_api
+  |
+  |-- script tools
+  |     list_scripts, get_script_content, save_script
+  |     execute_script, only with credentials
+  |
+  |-- optional compiler tools
+  |     get_openapi_source_detail, get_compiler_graph_health
+  |
+  |-- resources
+        api://endpoint-catalog, docs://endpoint-catalog
+        graph://schema, graph://seed-status
+        docs://central/overview, docs://script-writing-guide
+        docs://config-workflows, docs://vsg/list, docs://vsg/{section_id}
+        script://seeds
 ```
 
-## Knowledge Graph (LadybugDB)
+The graph has two main layers:
 
-The server ships with a pre-built LadybugDB graph database updated nightly and
-downloaded on first launch. It has two layers:
-
-- **Knowledge layer** — the entire OpenAPI surface of Central and GreenLake
-  modelled as a graph (`ApiEndpoint`, `Parameter`, `RequestBody`,
-  `SchemaComponent`, and related nodes). Populated at build time from the
-  upstream specs. Use `query_graph` for endpoint discovery and schema
-  navigation; canned Cypher patterns are embedded in `graph://schema`.
-- **Domain layer** — live network state (`Org`, `SiteCollection`, `Site`,
-  `Device`, `DeviceGroup`) populated at runtime by seed scripts that call
-  the Central APIs.
-
-## Prerequisites
-
-- Docker (supports both **amd64** and **arm64** — Apple Silicon Macs pull the native image automatically)
-- HPE Aruba Networking Central API credentials (client_id + client_secret)
-- Optionally: HPE GreenLake Platform credentials (may share the same credentials)
+- Knowledge layer: build-time API and documentation graph nodes such as
+  `ApiEndpoint`, `Parameter`, `RequestBody`, `Response`, `SchemaComponent`,
+  `Property`, `YangPath`, `CliCommand`, `DocSection`, and `Script`.
+- Domain layer: runtime network state such as `Org`, `SiteCollection`, `Site`,
+  `Device`, `DeviceGroup`, and topology edges populated by seed scripts.
 
 ## Quick Start
 
-### VS Code MCP Configuration
+Prerequisites:
 
-Add to `.vscode/mcp.json`:
+- Docker for the published image path.
+- HPE Aruba Networking Central credentials for connected mode.
+- Optional GreenLake Platform credentials, otherwise GreenLake uses the Central
+  credentials when possible.
+
+### Discovery-Only Docker Profile
+
+Use this first when you want API discovery and script authoring without granting
+network credentials. Live API tools and script execution are intentionally not
+registered in this mode.
 
 ```json
 {
-  "servers": {
-    "hpe-networking-central-mcp": {
+  "mcpServers": {
+    "hpe-networking-central-mcp-discovery": {
       "command": "docker",
       "args": [
-        "run", "-i", "--rm",
-        "--pull", "always",
-        "--env-file", "${workspaceFolder}/.env",
+        "run", "-i", "--rm", "--pull", "always",
         "-v", "central-scripts:/scripts/library",
         "ghcr.io/tbelz/hpe-networking-central-mcp:main"
       ]
@@ -93,121 +99,10 @@ Add to `.vscode/mcp.json`:
 }
 ```
 
-> **Tip — interactive credentials:** If you prefer entering credentials on each
-> server start instead of storing them in a `.env` file, use VS Code input
-> variables:
->
-> ```json
-> {
->   "inputs": [
->     { "id": "centralBaseUrl", "type": "promptString", "description": "Central API base URL" },
->     { "id": "centralClientId", "type": "promptString", "description": "Central Client ID" },
->     { "id": "centralClientSecret", "type": "promptString", "description": "Central Client Secret", "password": true }
->   ],
->   "servers": {
->     "hpe-networking-central-mcp": {
->       "command": "docker",
->       "args": [
->         "run", "-i", "--rm", "--pull", "always",
->         "-v", "central-scripts:/scripts/library",
->         "-e", "CENTRAL_BASE_URL=${input:centralBaseUrl}",
->         "-e", "CENTRAL_CLIENT_ID=${input:centralClientId}",
->         "-e", "CENTRAL_CLIENT_SECRET=${input:centralClientSecret}",
->         "ghcr.io/tbelz/hpe-networking-central-mcp:main"
->       ]
->     }
->   }
-> }
-> ```
->
-> VS Code will prompt you for each credential when the server starts.
-> GreenLake credentials can be added the same way if needed.
+### Connected Docker Profile
 
-### Environment Variables (.env file)
-
-```
-CENTRAL_BASE_URL=https://apigw-YOUR_CLUSTER.central.arubanetworks.com
-CENTRAL_CLIENT_ID=your_client_id
-CENTRAL_CLIENT_SECRET=your_client_secret
-GREENLAKE_CLIENT_ID=your_glp_client_id
-GREENLAKE_CLIENT_SECRET=your_glp_client_secret
-```
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `CENTRAL_BASE_URL` | Yes | — | Central API base URL ([find yours](https://developer.arubanetworks.com/aruba-central/docs/api-gateway-url)) |
-| `CENTRAL_CLIENT_ID` | Yes | — | OAuth2 client ID for Central |
-| `CENTRAL_CLIENT_SECRET` | Yes | — | OAuth2 client secret for Central |
-| `GREENLAKE_CLIENT_ID` | No | Central client ID | GreenLake Platform client ID |
-| `GREENLAKE_CLIENT_SECRET` | No | Central client secret | GreenLake Platform client secret |
-| `GLP_BASE_URL` | No | `https://global.api.greenlake.hpe.com` | GreenLake API base URL |
-| `GLP_INCLUDED_SLUGS` | No | — | Comma-separated service slugs to include (or empty for default set) |
-| `READ_ONLY` | No | `false` | When set to `true` / `1` / `yes` / `on`, the server refuses any non-GET Central / GreenLake API call (both via tools and from inside scripts) and hides mutating endpoints from the `api://endpoint-catalog` resource. Local operations (`write_graph`, `save_script`, `execute_script`) remain available. |
-
-### Startup behaviour
-
-On first launch the server downloads the latest pre-built knowledge DB
-tarball published by the
-[`update-knowledge-db`](.github/workflows/update-knowledge-db.yml) workflow.
-The on-disk manifest records the GitHub release tag, so subsequent launches
-short-circuit the download when the local DB is already current — typical
-warm-start latency is well under a second. If GitHub is unreachable but a
-local DB exists, the server keeps using it (logged as
-`knowledge_db_offline_using_local`) instead of falling back to an empty DB.
-
-### Read-Only Mode
-
-Start the container with `READ_ONLY=true` to lock the server into a
-**network-side read-only** posture:
-
-- `call_central_api` / `call_greenlake_api` reject `POST`, `PUT`, `PATCH`,
-  and `DELETE` with a `READ_ONLY` error.
-- The same restriction is enforced inside scripts — `api.post(...)` and
-  friends fail with `CentralAPIError(403, "READ_ONLY", ...)`.
-- Mutating endpoints are filtered out of the `api://endpoint-catalog` resource so the model never sees them.
-- A banner is prepended to the MCP system prompt so the assistant knows it
-  must not attempt configuration changes.
-- Local-only operations (graph writes, saving / editing scripts, executing
-  scripts that only read) continue to work — useful for auditing and
-  reporting workflows.
-
-> **Scope of enforcement.** READ_ONLY is an *agent behavioural guardrail*,
-> not a hard sandbox. Enforcement happens at the HTTP-client layer inside
-> `central_helpers` and via a `sitecustomize` hook injected into script
-> subprocesses. Do not expose READ_ONLY mode to untrusted script authors.
-
-## Claude Desktop / Claude Code Configuration
-
-Claude Desktop reads its MCP servers from
-`%APPDATA%\Claude\claude_desktop_config.json` (Windows) or
-`~/Library/Application Support/Claude/claude_desktop_config.json` (macOS).
-Claude Code reads `~/.config/claude-code/config.json` and uses the same
-schema.
-
-Paste the snippet below into the `mcpServers` block, replace the
-placeholders, and restart the client. No `.env` file is needed — the
-credentials are passed as plain CLI arguments to the server binary
-running inside the container, so there is no separate `env` block to
-keep in sync. Three profiles are shown:
-
-- **`hpe-networking-central-mcp`** — full access; can read **and** write
-  via the Central / GreenLake APIs.
-- **`hpe-networking-central-mcp-readonly`** — same image with
-  `--read-only`; mutating endpoints are refused at the HTTP client layer.
-- **`hpe-networking-central-mcp-discovery-only`** — **no credentials**.
-  The server boots in *discovery-only* mode: `query_graph`,
-  `write_graph`, and the script-CRUD tools are available so the agent
-  can design API calls and draft scripts, but no live API tools
-  (`call_central_api`, `call_greenlake_api`, `execute_script`) are
-  registered. Use this for review / authoring sessions before granting
-  network access.
-
-> **Security note**: CLI arguments to a process are visible to anyone
-> who can run `docker inspect` or `ps` on the host. On a shared
-> workstation, swap the inline `--client-secret` / `--glp-client-secret`
-> for `--env-file /path/to/.env` (Docker) or your platform's secret
-> store; the server still accepts the same values via the
-> `CENTRAL_*` / `GREENLAKE_*` environment variables.
+Add credentials to enable `call_central_api`, `call_greenlake_api`, seed-script
+startup, and `execute_script`.
 
 ```json
 {
@@ -224,47 +119,94 @@ keep in sync. Three profiles are shown:
         "--glp-client-id", "REPLACE_WITH_YOUR_GLP_CLIENT_ID",
         "--glp-client-secret", "REPLACE_WITH_YOUR_GLP_CLIENT_SECRET"
       ]
-    },
-    "hpe-networking-central-mcp-readonly": {
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm", "--pull", "always",
-        "-v", "central-scripts:/scripts/library",
-        "ghcr.io/tbelz/hpe-networking-central-mcp:main",
-        "--central-url", "https://apigw-YOUR_CLUSTER.central.arubanetworks.com",
-        "--client-id", "REPLACE_WITH_YOUR_CENTRAL_CLIENT_ID",
-        "--client-secret", "REPLACE_WITH_YOUR_CENTRAL_CLIENT_SECRET",
-        "--glp-client-id", "REPLACE_WITH_YOUR_GLP_CLIENT_ID",
-        "--glp-client-secret", "REPLACE_WITH_YOUR_GLP_CLIENT_SECRET",
-        "--read-only"
-      ]
-    },
-    "hpe-networking-central-mcp-discovery-only": {
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm", "--pull", "always",
-        "-v", "central-scripts:/scripts/library",
-        "ghcr.io/tbelz/hpe-networking-central-mcp:main"
-      ]
     }
   }
 }
 ```
 
-The same flat-`args` pattern works for any other MCP client that
-supports the standard `command` + `args` schema. Drop profiles you do
-not need, omit the `--glp-*` flags if you're only using Central APIs,
-or fall back to the equivalent `-e CENTRAL_BASE_URL=...` Docker flags
-if you prefer environment variables.
+Add `--read-only` after the credentials to keep live API access network-side
+read-only:
 
-### Compiler v2 smoke-test profile
+```json
+"--read-only"
+```
 
-Use this profile after a knowledge DB release has been published from
-`main`. It keeps the session discovery-only, loads the compiler/v2 graph
-as the runtime graph, and keeps API discovery on the normal graph query
-tools. `MCP_COMPILER_TOOLS=true` only adds compiler sidecar provenance and
-health diagnostics; it does not replace `query_api_schema`, `query_fts`,
-or `query_yang`.
+Claude Desktop reads this shape from
+`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS and
+`%APPDATA%\Claude\claude_desktop_config.json` on Windows. Claude Code uses the
+same `mcpServers` schema in `~/.config/claude-code/config.json`.
+
+CLI arguments are visible to local process/container inspection tools. On shared
+workstations, prefer an env file or platform secret store.
+
+## Configuration
+
+You can pass the same settings through Docker `-e` flags, an `--env-file`, or
+the CLI flags shown above.
+
+```env
+CENTRAL_BASE_URL=https://apigw-YOUR_CLUSTER.central.arubanetworks.com
+CENTRAL_CLIENT_ID=your_client_id
+CENTRAL_CLIENT_SECRET=your_client_secret
+GREENLAKE_CLIENT_ID=your_glp_client_id
+GREENLAKE_CLIENT_SECRET=your_glp_client_secret
+```
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `CENTRAL_BASE_URL` | Connected mode | none | Central API base URL |
+| `CENTRAL_CLIENT_ID` | Connected mode | none | Central OAuth2 client ID |
+| `CENTRAL_CLIENT_SECRET` | Connected mode | none | Central OAuth2 client secret |
+| `GREENLAKE_CLIENT_ID` | No | Central client ID | GreenLake OAuth2 client ID |
+| `GREENLAKE_CLIENT_SECRET` | No | Central client secret | GreenLake OAuth2 client secret |
+| `GLP_BASE_URL` | No | `https://global.api.greenlake.hpe.com` | GreenLake API base URL |
+| `GLP_INCLUDED_SLUGS` | No | default set | Comma-separated GreenLake service slugs, or `*` for all |
+| `READ_ONLY` | No | `false` | Refuse mutating Central/GreenLake HTTP methods |
+| `KNOWLEDGE_RELEASE_REPO` | No | none | GitHub repo (`owner/name`) to download knowledge DB releases from |
+| `GRAPH_DB_PATH` | No | `/data/graph_db` | Runtime LadybugDB graph path |
+| `MCP_KNOWLEDGE_PROJECTION` | No | `legacy` | Runtime projection: `legacy`, `v2`, or `compiler` |
+| `MCP_COMPILER_TOOLS` | No | `false` | Register compiler provenance and health tools |
+| `MCP_COMPILER_DB_PATH` | No | sibling `knowledge_db_compiler` | Compiler projection sidecar path |
+| `MCP_COMPILER_AST_DB_PATH` | No | sibling `knowledge_db_ast` | Compiler AST sidecar path |
+| `SCRIPT_LIBRARY_PATH` | No | `/scripts/library` | Script library mount |
+| `INVENTORY_CACHE_TTL` | No | `300` | Runtime inventory cache TTL in seconds |
+
+The published Docker image sets
+`KNOWLEDGE_RELEASE_REPO=tbelz/hpe-networking-central-mcp`, so normal container
+starts download the latest released knowledge DB automatically. Local
+non-Docker runs leave it empty unless you set it.
+
+Partial Central credentials are treated as a configuration error. Provide all of
+`CENTRAL_BASE_URL`, `CENTRAL_CLIENT_ID`, and `CENTRAL_CLIENT_SECRET` for
+connected mode, or omit all three for discovery-only mode.
+
+## Runtime Modes
+
+### Discovery-Only
+
+No Central credentials are configured. The server exposes the knowledge graph,
+documentation resources, `write_graph`, and script CRUD tools. It does not
+register `call_central_api`, `call_greenlake_api`, or `execute_script`.
+
+### Connected
+
+Central credentials are configured and validated during startup. The server
+registers live API calls, script execution, and runtime seed execution. GreenLake
+tools are registered when effective GreenLake credentials validate.
+
+### Read-Only
+
+Set `READ_ONLY=true` or pass `--read-only`. The server rejects `POST`, `PUT`,
+`PATCH`, and `DELETE` through live API tools and through script helpers. Mutating
+endpoints are filtered out of `api://endpoint-catalog`. Local graph writes,
+script saves, and script execution remain available, so this is an agent
+guardrail rather than a sandbox for untrusted script authors.
+
+### Compiler / v2 Smoke
+
+Recent PRs moved v2 API discovery back onto the shared graph aliases and removed
+the parallel compiler endpoint/context discovery tools. Use this profile to load
+the compiler/v2 runtime graph and enable the remaining compiler diagnostics:
 
 ```json
 {
@@ -285,58 +227,114 @@ or `query_yang`.
 }
 ```
 
-For live read-only API testing, add the Central/GreenLake credentials and
-`--read-only` after the image name:
+`MCP_COMPILER_TOOLS=true` adds only:
 
-```json
-"--central-url", "https://apigw-YOUR_CLUSTER.central.arubanetworks.com",
-"--client-id", "REPLACE_WITH_YOUR_CENTRAL_CLIENT_ID",
-"--client-secret", "REPLACE_WITH_YOUR_CENTRAL_CLIENT_SECRET",
-"--glp-client-id", "REPLACE_WITH_YOUR_GLP_CLIENT_ID",
-"--glp-client-secret", "REPLACE_WITH_YOUR_GLP_CLIENT_SECRET",
-"--read-only"
-```
+- `get_openapi_source_detail`
+- `get_compiler_graph_health`
 
-## Tools
+It does not add `find_api_endpoints`, `get_api_endpoint_context`, or
+`get_api_schema_context`; those tools were removed. Use `query_fts`,
+`query_api_schema`, and `query_yang` for normal discovery.
 
-| Tool | Description |
-|------|-------------|
-| `query_graph` | Read-only Cypher against the LadybugDB graph. Primary tool for endpoint discovery, hierarchy navigation, and schema traversal. Soft cap 200 rows / hard cap 2000. Accepts a `parameters` JSON-string for parameterised queries. |
-| `write_graph` | Cypher writes (`CREATE`, `MERGE`, `SET`, `DELETE`) to enrich the domain layer of the graph from runtime discoveries. |
-| `call_central_api` | Make authenticated requests to any Central API endpoint. Runs stateless pre-flight validation against the graph on every call; schema context is included in any validation error so the agent can self-correct. |
-| `call_greenlake_api` | Same as `call_central_api`, against the GreenLake Platform API. Only registered when GreenLake credentials are configured. |
-| `list_scripts` | List all scripts in the automation library, optionally filtered by tag. |
-| `get_script_content` | Read the source code of a script. |
-| `save_script` | Save a Python script to the library for reuse. |
-| `execute_script` | Execute a script with Central / GreenLake credentials and the `central_helpers` SDK injected. |
+## Tool Surface
+
+### Graph And Discovery Tools
+
+| Tool | Mode | Purpose |
+| --- | --- | --- |
+| `query_fts` | Always | Full-text search over endpoint, property, doc, script, and runtime indexes. Use this for keyword-first discovery. |
+| `query_api_schema` | Always | Focused Cypher over endpoints, parameters, request/response bodies, schema components, properties, and API/YANG edges. |
+| `query_yang` | Always | YANG path, CLI command, and config-profile reverse lookup. |
+| `query_topology` | Always | Runtime topology graph queries over orgs, sites, devices, groups, and neighbor edges. |
+| `query_graph` | Always | Broad read-only Cypher escape hatch for cross-domain graph queries. |
+| `get_raw_schema` | Always | Fetch raw OpenAPI JSON for known `SchemaComponent` IDs when graph fields are not enough. |
+| `write_graph` | Always | Local graph writes for enrichment and script metadata. |
+
+The read tools support batch mode with `queries=[...]`. Responses are capped to
+keep MCP payloads manageable; oversized cells return truncation envelopes with
+next-step hints.
+
+### Live API Tools
+
+| Tool | Mode | Purpose |
+| --- | --- | --- |
+| `call_central_api` | Connected | Authenticated Central REST call with graph-backed pre-flight validation. |
+| `call_greenlake_api` | Connected plus GLP credentials | Authenticated GreenLake Platform REST call with validation. |
+
+### Script Tools
+
+| Tool | Mode | Purpose |
+| --- | --- | --- |
+| `list_scripts` | Always | List saved and seed scripts, optionally by tag. |
+| `get_script_content` | Always | Read a script from the library. |
+| `save_script` | Always | Save or update a reusable Python script. |
+| `execute_script` | Connected | Run a script with Central/GreenLake helpers injected. |
+
+### Compiler Tools
+
+| Tool | Mode | Purpose |
+| --- | --- | --- |
+| `get_openapi_source_detail` | `MCP_COMPILER_TOOLS=true` | Resolve a compiler projection row back to projection data, provenance, AST metadata, and raw OpenAPI source. |
+| `get_compiler_graph_health` | `MCP_COMPILER_TOOLS=true` | Run bounded traversal-health samples against compiler artifacts. |
+
+## Recommended Discovery Flow
+
+1. Read `api://endpoint-catalog` or `docs://endpoint-catalog` for a path-tree
+   overview when the endpoint family is already obvious.
+2. Use `query_fts` when starting from a keyword such as a feature name, field,
+   config concept, or CLI term.
+3. Use `query_api_schema` to inspect exact parameters, request bodies, response
+   schemas, `COMPOSED_OF`, `PROPERTY_OF_TYPE`, and `HAS_ITEM_SCHEMA` traversal.
+4. Use `query_yang` when mapping YANG paths, CLI commands, or config-profile
+   concepts back to API endpoints and schema properties.
+5. Use `get_raw_schema` only for a known component when the structured graph
+   omits source detail that you need.
+6. In connected mode, call `call_central_api` or `call_greenlake_api` after
+   validating the method, path, parameters, and body shape.
+
+## Knowledge DB Startup
+
+When `KNOWLEDGE_RELEASE_REPO` is set, the server downloads the latest released
+knowledge artifact before opening the graph. `MCP_KNOWLEDGE_PROJECTION=legacy`
+uses `knowledge_db.tar.gz`; `v2` or `compiler` uses
+`knowledge_db_compiler.tar.gz`.
+
+The local manifest records the release tag, selected artifact, archive member,
+and projection so the server does not confuse same-release legacy and v2
+installs. If GitHub is unavailable but a local DB exists, startup keeps using
+the local copy. If a persisted graph fails to open with recoverable Ladybug/WAL
+errors, startup forces one fresh download and retries.
 
 ## Development
 
+Use `uv` for local Python commands.
+
 ```bash
-# Install uv
-pip install uv
-
-# Create venv and install dependencies
 uv sync
-
-# Run locally (without Docker)
 uv run hpe-networking-central-mcp
-
-# Run the test suite (no creds needed for unit tests; live_api is auto-skipped)
-uv run pytest -m "unit and not slow"
-uv run pytest                       # full suite (skips live_api without creds)
-uv run pytest -m live_api           # requires .env with Central / GLP creds
 ```
 
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for build pipeline details
-and the test-marker reference, and the [docs/adr/](docs/adr/) directory
-for architectural decisions.
+Fast local test loops:
 
-### Building Locally
+```bash
+bash scripts/dev_test.sh
+bash scripts/test_changed.sh
+```
+
+The full suite is slower and is normally left to CI or broader validation:
+
+```bash
+uv run pytest
+```
+
+Build the Docker image locally:
 
 ```bash
 docker build -t hpe-networking-central-mcp .
 ```
+
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for build-pipeline details and
+test-marker guidance. Architecture decisions live in [docs/adr/](docs/adr/).
 
 ## License
 
